@@ -100,6 +100,9 @@ function verifyIdToken_(idToken) {
     const d = JSON.parse(res.getContentText());
     if (d.aud !== CLIENT_ID) return null;
     if (Number(d.exp) < Math.floor(Date.now() / 1000)) return null;
+    // email_verified：tokeninfo 端點回傳的是字串 'true'（JWT 內為布林），兩種都接受；
+    // 未驗證的 email 一律拒絕（角色解析、白名單、audit 都以 email 為主鍵，不能收未驗證值）。
+    if (d.email_verified !== 'true' && d.email_verified !== true) return null;
     try { cache.put(cacheKey, d.email, 300); } catch (_) {}
     return d.email;
   } catch (e) { return null; }
@@ -323,6 +326,50 @@ function ensureFolderPath_(parts, ctx) {
   let curId = ctx.root;
   parts.forEach(function (name) { curId = ensureFolder_(name, curId); });
   return curId;
+}
+
+// 只查找、不建立的資料夾路徑解析：任何一層不存在就回傳 null。
+// 用於附件歸屬驗證——驗證情境下資料夾不存在代表「不可能有合法附件」，
+// 絕不能順手建立資料夾（那會把驗證變成永遠通過）。
+function findFolderPathId_(parts, ctx) {
+  let curId = ctx.root;
+  for (let i = 0; i < parts.length; i++) {
+    const q = "name='" + parts[i] + "' and mimeType='application/vnd.google-apps.folder'" +
+              " and '" + curId + "' in parents and trashed=false";
+    const res = driveGet_('files', { q: q, fields: 'files(id)', pageSize: '1' });
+    if (!res.files || res.files.length === 0) return null;
+    curId = res.files[0].id;
+  }
+  return curId;
+}
+
+// 附件歸屬驗證（提交側，防禦縱深第一層）：attachments 裡的每個 fileId 都必須實際位於
+// ctx.root 底下 attachments/<semester>/<classId>/ 對應資料夾內（用 Drive API 查 parents，
+// 純函式判斷交給 isAttachmentInFolder_），任何一個不合法就整筆拒絕。
+// 前置條件：semester 已通過 requireValidSemester_、classId 已比對過 classes.json，
+// 因此拼進 findFolderPathId_ 的 q 字串的都是受控值，無注入疑慮。
+function assertAttachmentsBelong_(attachments, semester, classId, ctx) {
+  const list = attachments || [];
+  if (!list.length) return;
+  const folderId = findFolderPathId_(['attachments', semester, classId], ctx);
+  if (!folderId) throw new Error('attachments folder not found for this class/semester');
+  list.forEach(function (a) {
+    if (!a || !a.fileId) throw new Error('attachment.fileId required');
+    let meta = null;
+    try {
+      meta = driveGet_('files/' + encodeURIComponent(a.fileId), { fields: 'id,parents,trashed' });
+    } catch (e) { /* 查不到 metadata → meta 保持 null → fail-closed */ }
+    if (!isAttachmentInFolder_(meta, folderId)) {
+      throw new Error('attachment does not belong to this class/semester: ' + a.fileId);
+    }
+  });
+}
+
+// semester 參數的入口守門：所有接受 client 傳入 semester 的 action 都必須先過這關。
+function requireValidSemester_(semesterId, ctx) {
+  const semesters = readJsonSafe_('semesters.json', ctx, []);
+  if (!isValidSemesterId_(semesterId, semesters)) throw new Error('invalid semester: ' + semesterId);
+  return semesterId;
 }
 
 // ── LockService 寫入保護 + 稽核紀錄 ────────────────────────────────────────────
@@ -576,6 +623,45 @@ function recordResubmit_(record, classInfo, actorEmail, actorName, updatedForm, 
   return { ok: true, record: next };
 }
 
+// semester 參數白名單驗證：格式必須為 NNN-N（如 114-2）**且**存在於 semesters.json。
+// 防禦：semester 由 client 傳入、會被串進 records_<semester>.json 檔名與 Drive 搜尋的 q 字串
+// （resolvePathToId_ 直接把檔名拼進 q），未驗證會有兩個風險：
+// (1) 含單引號的字串可逃逸 q 的引號、注入查詢條件（跳出「in parents」範圍）；
+// (2) recordSubmit / uploadAttachment 會用它建檔案/資料夾，任意字串 = 垃圾檔。
+function isValidSemesterId_(semesterId, semesters) {
+  if (typeof semesterId !== 'string') return false;
+  if (!/^[0-9]{3}-[0-9]$/.test(semesterId)) return false;
+  return (semesters || []).some(function (s) { return s && s.id === semesterId; });
+}
+
+// 依呼叫者角色過濾 classes 的敏感欄位再回傳給前端。
+// uploadWhitelist 是學生 gmail 清單（個資），只有「該班導師或 admin」看得到；
+// 其他人拿到的物件移除該欄位，改附 hasWhitelist 布林（前端仍可顯示「此班有限制名單」提示）。
+// tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
+function sanitizeClassesForViewer_(classes, roles) {
+  return (classes || []).map(function (c) {
+    if (!c) return c;
+    const canSee = !!roles && (roles.isAdmin === true || (roles.tutorOf || []).indexOf(c.id) !== -1);
+    if (canSee) return c;
+    const copy = Object.assign({}, c);
+    copy.hasWhitelist = !!(c.uploadWhitelist && c.uploadWhitelist.length);
+    delete copy.uploadWhitelist;
+    return copy;
+  });
+}
+
+// 附件歸屬驗證的純函式骨架：檔案 metadata（{ id, parents, trashed }）是否真的掛在預期的
+// attachments/<semester>/<classId> 資料夾底下。expectedFolderId 為 null（資料夾不存在）、
+// metadata 缺失、檔案已進垃圾桶、或 parents 未命中，一律 false（fail-closed）。
+// 不變式：record.attachments 裡的每個 fileId 都必須通過本檢查——否則任何帳號可以在 submit
+// 時塞任意 Drive fileId（例如部署者個人 Drive 的檔案），再對自己的 record 呼叫
+// downloadAttachment，讓後端用部署者權限把該檔 base64 回傳 = 任意檔案外洩。
+function isAttachmentInFolder_(fileMeta, expectedFolderId) {
+  if (!expectedFolderId) return false;
+  if (!fileMeta || fileMeta.trashed === true) return false;
+  return (fileMeta.parents || []).indexOf(expectedFolderId) !== -1;
+}
+
 // 學期輔助：找出 isCurrent 的學期；找不到就退而求其次用陣列最後一筆（假設按時間排序）。
 function currentSemesterId_(semesters) {
   const found = (semesters || []).filter(function (s) { return s && s.isCurrent; })[0];
@@ -598,6 +684,11 @@ function bootstrapAction_(params, ctx, userEmail) {
   const semesters = readJsonSafe_('semesters.json', ctx, []);
   const roles = resolveRoles_(userEmail, config, departments, classes);
 
+  // params.semester 為 client 傳入，必須通過白名單驗證（見 isValidSemesterId_ 註解）；
+  // 未指定時用 isCurrent 學期（來自 semesters.json，本來就是受控值）。
+  if (params.semester !== undefined && params.semester !== null && !isValidSemesterId_(params.semester, semesters)) {
+    throw new Error('invalid semester: ' + params.semester);
+  }
   const semesterId = params.semester || currentSemesterId_(semesters);
   const records = semesterId ? readJsonSafe_('records_' + semesterId + '.json', ctx, { records: [] }) : { records: [] };
 
@@ -614,7 +705,8 @@ function bootstrapAction_(params, ctx, userEmail) {
     email: userEmail,
     roles: roles,
     departments: departments,
-    classes: classes,
+    // uploadWhitelist（學生 gmail 清單）只給該班導師/admin 看，其他人只拿到 hasWhitelist 布林。
+    classes: sanitizeClassesForViewer_(classes, roles),
     semesters: semesters,
     semester: semesterId,
     records: visibleRecords,
@@ -629,11 +721,17 @@ function recordSubmitAction_(params, ctx, userEmail) {
   const semester = params.semester, classId = params.classId, type = params.type;
   if (!semester || !classId || !type) throw new Error('semester, classId, type required');
   if (type !== 'meeting' && type !== 'activity') throw new Error('invalid type: ' + type);
+  requireValidSemester_(semester, ctx);
 
   const classes = readJsonSafe_('classes.json', ctx, []);
   const classInfo = classes.filter(function (c) { return c.id === classId; })[0];
   if (!classInfo || classInfo.active === false) throw new Error('class not found: ' + classId);
   if (!isUploadAllowed_(classInfo, userEmail)) throw new Error('not authorized to upload for this class (not in whitelist)');
+
+  // 附件歸屬驗證（防禦縱深第一層；第二層在 downloadAttachmentAction_）：
+  // client 傳來的每個 attachment.fileId 都必須真的位於本班本學期的 attachments 資料夾內，
+  // 否則拒絕整筆——不驗證的話，任意 fileId 之後可經 downloadAttachment 以部署者權限讀出。
+  assertAttachmentsBelong_(params.attachments, semester, classId, ctx);
 
   const isTutor = isClassTutor_(classInfo, userEmail);
   const uploaderInfo = params.uploader || {};
@@ -665,6 +763,7 @@ function recordSubmitAction_(params, ctx, userEmail) {
 function recordResubmitAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId;
   if (!semester || !recordId) throw new Error('semester and recordId required');
+  requireValidSemester_(semester, ctx);
   const classes = readJsonSafe_('classes.json', ctx, []);
 
   return withLock_(function () {
@@ -679,6 +778,9 @@ function recordResubmitAction_(params, ctx, userEmail) {
     const actorName = params.uploaderName || (record.uploader && record.uploader.name) || '';
     const res = recordResubmit_(record, classInfo, userEmail, actorName, params.form, params.attachments, now);
     if (!res.ok) throw new Error(res.error);
+    // 附件歸屬驗證：重送後的整組 attachments（含沿用的與新增的）全部重驗，簡單為上。
+    // 用 record 上既有的 semester/classId（存檔值，非 client 傳入值）當基準。
+    assertAttachmentsBelong_(res.record.attachments, record.semester, record.classId, ctx);
     list[idx] = res.record;
     data.records = list;
     writeJsonPath_(path, data, ctx);
@@ -691,6 +793,7 @@ function recordResubmitAction_(params, ctx, userEmail) {
 function recordGetMineAction_(params, ctx, userEmail) {
   const semester = params.semester;
   if (!semester) throw new Error('semester required');
+  requireValidSemester_(semester, ctx);
   const data = readJsonSafe_('records_' + semester + '.json', ctx, { records: [] });
   const mine = (data.records || []).filter(function (r) { return r.uploader && r.uploader.email === userEmail; });
   return { records: mine };
@@ -702,6 +805,7 @@ function uploadAttachmentAction_(params, ctx, userEmail) {
   const semester = params.semester, classId = params.classId;
   if (!semester || !classId) throw new Error('semester and classId required');
   if (!params.fileName || !params.base64Data) throw new Error('fileName and base64Data required');
+  requireValidSemester_(semester, ctx);
 
   const classes = readJsonSafe_('classes.json', ctx, []);
   const classInfo = classes.filter(function (c) { return c.id === classId; })[0];
@@ -714,6 +818,11 @@ function uploadAttachmentAction_(params, ctx, userEmail) {
       parentFolderId: folderId, fileName: params.fileName,
       mimeType: params.mimeType || 'application/octet-stream', base64Data: params.base64Data,
     });
+    appendAuditLog_(ctx, {
+      action: 'uploadAttachment', by: userEmail, fileId: uploaded.fileId,
+      fileName: uploaded.fileName, semester: semester, classId: classId,
+      at: new Date().toISOString(),
+    });
     return { fileId: uploaded.fileId, fileName: uploaded.fileName };
   });
 }
@@ -722,6 +831,7 @@ function uploadAttachmentAction_(params, ctx, userEmail) {
 function downloadAttachmentAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId, fileId = params.fileId;
   if (!semester || !recordId || !fileId) throw new Error('semester, recordId, fileId required');
+  requireValidSemester_(semester, ctx);
 
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const departments = readJsonSafe_('departments.json', ctx, []);
@@ -738,6 +848,12 @@ function downloadAttachmentAction_(params, ctx, userEmail) {
   const deptInfo = departments.filter(function (d) { return d.id === record.deptId; })[0];
   if (!canViewRecord_(record, classInfo, deptInfo, roles, userEmail)) throw new Error('not authorized to view this record');
 
+  // 附件歸屬驗證（防禦縱深第二層；第一層在 recordSubmit/recordResubmit 的提交側驗證）：
+  // 即使 record.attachments 裡混入了未經驗證的 fileId（歷史資料、或第一層被繞過），
+  // 下載前仍再確認該檔案實際位於本班本學期的 attachments 資料夾內，才用部署者權限讀出。
+  // 基準用 record 上存檔的 semester/classId，不用 client 傳入值。
+  assertAttachmentsBelong_([{ fileId: fileId }], record.semester, record.classId, ctx);
+
   return downloadFileBase64_({ fileId: fileId });
 }
 
@@ -746,6 +862,7 @@ function downloadAttachmentAction_(params, ctx, userEmail) {
 function recordApproveAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId;
   if (!semester || !recordId) throw new Error('semester and recordId required');
+  requireValidSemester_(semester, ctx);
 
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const departments = readJsonSafe_('departments.json', ctx, []);
@@ -777,6 +894,7 @@ function recordApproveAction_(params, ctx, userEmail) {
 function recordRejectAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId, reason = params.reason;
   if (!semester || !recordId) throw new Error('semester and recordId required');
+  requireValidSemester_(semester, ctx);
 
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const departments = readJsonSafe_('departments.json', ctx, []);
@@ -933,6 +1051,7 @@ function classSetWhitelistAction_(params, ctx, userEmail) {
     data[idx] = Object.assign({}, data[idx], { uploadWhitelist: uploadWhitelist });
     writeJsonPath_('classes.json', data, ctx);
     appendAuditLog_(ctx, { action: 'classSetWhitelist', by: userEmail, targetId: classId, at: new Date().toISOString() });
-    return { classes: data };
+    // 與 bootstrap 同一套過濾：導師只看得到自己班的 uploadWhitelist，不外洩其他班的名單。
+    return { classes: sanitizeClassesForViewer_(data, roles) };
   });
 }

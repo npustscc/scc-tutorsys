@@ -45,3 +45,9 @@ dev 環境的實際 GAS 部署上端到端驗證。
 - **授權判斷**（`authorization.test.js`）：`resolveActionableStage_`/`recordApprove_`/
   `recordReject_`/`canViewRecord_`——錯誤角色/錯誤狀態一律拒絕、admin 可代為處理任一關但
   不能動終態、director 只能動 pending_director、退件必填理由、紀錄可視範圍規則。
+- **資安強化**（`security-validation.test.js`）：`isValidSemesterId_`（合法/格式錯/單引號
+  注入字串/不存在學期/非字串/空 semesters，防 Drive query 注入與垃圾檔）、
+  `sanitizeClassesForViewer_`（uploadWhitelist 只給該班導師或 admin，其他人只拿 hasWhitelist
+  布林；tutors 保留；不就地修改；roles 缺失 fail-closed）、`isAttachmentInFolder_`
+  （附件歸屬驗證骨架：parents 命中/未命中/trashed/metadata 缺失/資料夾不存在，防任意
+  fileId 經 downloadAttachment 外洩）。
