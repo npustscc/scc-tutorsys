@@ -1,0 +1,5 @@
+{
+  "scriptId": "__PROD_SCRIPT_ID__",
+  "rootDir": ".",
+  "projectId": "__PROD_GCP_PROJECT_ID__"
+}

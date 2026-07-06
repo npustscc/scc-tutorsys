@@ -1,0 +1,23 @@
+name: CI
+
+# 每次 push 到 master 與每個 PR 都跑：純函式測試 + 環境常數守門員。
+# 後者會在「promote 時漏改 prod 環境常數」時直接讓 CI 紅燈（比照 scc-infosys 2026-07-03 事故教訓）。
+# 注意：GitHub Pages 由內建 deploy-from-branch 服務，與本 workflow 互不干擾。
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 純函式單元測試
+        run: node --test test/*.test.js
+      - name: 環境常數守門員（prod/dev 常數比對）
+        run: node scripts/check-env-constants.mjs

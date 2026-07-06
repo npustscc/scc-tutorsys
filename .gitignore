@@ -1,0 +1,17 @@
+node_modules/
+package-lock.json
+
+.claude/
+
+# 機密與個資：絕對不可進入 public repo
+creds.json
+.clasprc.json
+.drive-token.json
+*.csv
+*.docx
+*.xlsx
+*.xlsm
+名單*
+roster*
+forsystems/
+bugreports/
