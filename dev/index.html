@@ -101,6 +101,15 @@
   .attachment-list{list-style:none; margin:6px 0 0; padding:0; display:flex; flex-direction:column; gap:4px;}
   .attachment-list li{display:flex; align-items:center; gap:8px; font-size:.84rem;}
 
+  .chips{display:flex; flex-wrap:wrap; gap:6px;}
+  .chip{
+    border:1px solid var(--color-border); background:#fff; color:var(--color-text);
+    border-radius:999px; padding:5px 13px; font-size:.84rem; font-weight:600;
+  }
+  .chip:hover{background:var(--color-bg);}
+  .chip.active{background:var(--color-primary); border-color:var(--color-primary); color:#fff;}
+  .chip-new{border-style:dashed; color:var(--color-text-light);}
+
   .tab-bar{display:flex; gap:4px; flex-wrap:wrap; margin-bottom:16px; border-bottom:1px solid var(--color-border);}
   .tab-btn{background:transparent; border:none; padding:9px 14px; font-size:.86rem; font-weight:600; color:var(--color-text-light); border-bottom:2px solid transparent;}
   .tab-btn.active{color:var(--color-primary); border-bottom-color:var(--color-primary);}
@@ -274,10 +283,32 @@ function openModal(title, bodyHtml, opts) {
 function closeModal() { $('modal-overlay').classList.remove('open'); }
 $('modal-overlay').addEventListener('click', (e) => { if (e.target.id === 'modal-overlay') closeModal(); });
 
-function slugifyId(str) {
-  const s = String(str || '').trim().replace(/['"\\\/]/g, '').replace(/\s+/g, '_').slice(0, 60);
-  return s || ('id_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+// ── 系所/年級/班別 前端驗證與 id 衍生（規則與 dev/Code.gs 的 classResolve 純函式一致；
+//    前端只是 UI 閘門，後端 classResolveCore_ 才是安全邊界）──
+const SECTION_RE   = /^[A-Za-z0-9一-鿿]{1,6}$/;
+const DEPT_NAME_RE = /^[A-Za-z0-9一-鿿()（）\s]{1,30}$/;
+const GRADE_ZH     = ['', '一', '二', '三', '四', '五', '六'];
+
+function gradeLabel(g) { return (GRADE_ZH[g] || g) + '年級'; }
+function gradeFromCell(v) {
+  const s = String(v == null ? '' : v).trim();
+  const idx = GRADE_ZH.indexOf(s);
+  if (idx >= 1) return idx;
+  const n = Number(s);
+  return (Number.isInteger(n) && n >= 1 && n <= 6) ? n : null;
 }
+function slugifyDeptIdFront(name) { return String(name || '').replace(/[^A-Za-z0-9一-鿿_]/g, ''); }
+function uniqueDeptIdFront(slug, departments) {
+  const ids = {};
+  (departments || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
+  const base = slug || 'dept';
+  if (!ids[base]) return base;
+  let i = 2;
+  while (ids[base + '_' + i]) i++;
+  return base + '_' + i;
+}
+function buildClassId(deptId, grade, section) { return deptId + '_g' + grade + '_' + section; }
+function buildClassName(grade, section) { return (GRADE_ZH[grade] || grade) + '年級' + section + '班'; }
 
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -602,13 +633,7 @@ document.body.addEventListener('click', function (e) {
 
 function recordFormFieldsHtml(type, form, idPrefix) {
   form = form || {};
-  const seqField = type === 'meeting'
-    ? '<div class="field"><label>第幾次班會（1–5）</label><select id="' + idPrefix + 'seq" required>' +
-        [1, 2, 3, 4, 5].map(function (n) { return '<option value="' + n + '"' + (String(form.seq) === String(n) ? ' selected' : '') + '>第 ' + n + ' 次</option>'; }).join('') +
-      '</select></div>'
-    : '';
-  return seqField +
-    '<div class="row">' +
+  return '<div class="row">' +
       '<div class="field"><label>日期</label><input type="date" id="' + idPrefix + 'date" value="' + escapeHtml(form.date || '') + '" required></div>' +
       '<div class="field"><label>主題</label><input type="text" id="' + idPrefix + 'topic" value="' + escapeHtml(form.topic || '') + '" required></div>' +
     '</div>' +
@@ -617,40 +642,48 @@ function recordFormFieldsHtml(type, form, idPrefix) {
 }
 
 function readRecordFormFields(type, idPrefix) {
-  const form = {
+  return {
     date: $(idPrefix + 'date').value.trim(),
     topic: $(idPrefix + 'topic').value.trim(),
     summary: $(idPrefix + 'summary').value.trim(),
     attendance: $(idPrefix + 'attendance').value.trim(),
   };
-  if (type === 'meeting') form.seq = Number($(idPrefix + 'seq').value);
-  return form;
 }
 
 function validateRecordForm(type, form) {
   if (!form.date || !form.topic || !form.summary || !form.attendance) return '請完整填寫日期、主題、內容摘要、出席狀況。';
-  if (type === 'meeting' && (!form.seq || form.seq < 1 || form.seq > 5)) return '班會次數須為 1–5。';
   return null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ── 頁面 1：上傳頁 ────────────────────────────────────────────────────────────
-// action 呼叫點：uploadAttachment（逐檔）→ recordSubmit
+// 班級 = (系所, 年級, 班別) 組合，第一次使用時由後端 classResolve 自動建立。
+// action 呼叫點：classResolve →（逐檔）uploadAttachment → recordSubmit
 // ══════════════════════════════════════════════════════════════════════════════
+let upDeptSel = null; // { deptId } 選既有系所；{ custom:true } 自填（名稱讀 up-dept-new）
+
 PAGE_RENDERERS.upload = function renderUploadPage() {
-  const depts = activeDepartments();
+  upDeptSel = null;
   $('page-root').innerHTML =
     '<div class="card">' +
       '<h2>上傳紀錄</h2>' +
       '<form id="upload-form">' +
+        '<div class="field"><label>類型</label><select id="up-type" style="max-width:220px;">' +
+          '<option value="meeting">班會紀錄</option><option value="activity">導生活動紀錄</option>' +
+        '</select></div>' +
+        '<div class="field"><label>系所</label>' +
+          '<div id="up-dept-chips" class="chips"></div>' +
+          '<div id="up-dept-new-wrap" style="display:none; margin-top:8px;">' +
+            '<input type="text" id="up-dept-new" placeholder="輸入系所名稱（例：資訊管理系）" maxlength="30" style="max-width:280px;">' +
+          '</div>' +
+        '</div>' +
         '<div class="row">' +
-          '<div class="field"><label>類型</label><select id="up-type">' +
-            '<option value="meeting">班會紀錄</option><option value="activity">導生活動紀錄</option>' +
+          '<div class="field"><label>年級</label><select id="up-grade">' +
+            [1, 2, 3, 4, 5, 6].map(function (g) { return '<option value="' + g + '">' + gradeLabel(g) + '</option>'; }).join('') +
           '</select></div>' +
-          '<div class="field"><label>系所</label><select id="up-dept"><option value="">請選擇系所</option>' +
-            depts.map(function (d) { return '<option value="' + escapeHtml(d.id) + '">' + escapeHtml(d.name) + '</option>'; }).join('') +
-          '</select></div>' +
-          '<div class="field"><label>班級</label><select id="up-class"><option value="">請先選擇系所</option></select></div>' +
+          '<div class="field"><label>班別</label><select id="up-section"></select>' +
+            '<input type="text" id="up-section-custom" placeholder="輸入班別（例：E 或 甲）" maxlength="6" style="display:none; margin-top:6px;">' +
+          '</div>' +
         '</div>' +
         '<div id="up-form-fields"></div>' +
         '<div class="row">' +
@@ -664,58 +697,128 @@ PAGE_RENDERERS.upload = function renderUploadPage() {
       '</form>' +
     '</div>';
 
-  function renderFormFields() {
-    $('up-form-fields').innerHTML = recordFormFieldsHtml($('up-type').value, {}, 'up-');
-  }
-  renderFormFields();
-  $('up-type').addEventListener('change', renderFormFields);
+  $('up-form-fields').innerHTML = recordFormFieldsHtml($('up-type').value, {}, 'up-');
 
-  $('up-dept').addEventListener('change', function () {
-    const classes = classesInDept($('up-dept').value);
-    $('up-class').innerHTML = '<option value="">請選擇班級</option>' +
-      classes.map(function (c) { return '<option value="' + escapeHtml(c.id) + '">' + escapeHtml(c.name) + '</option>'; }).join('');
+  renderUpDeptChips();
+  renderUpSectionOptions();
+  $('up-grade').addEventListener('change', renderUpSectionOptions);
+  $('up-section').addEventListener('change', function () {
+    $('up-section-custom').style.display = $('up-section').value === '__custom' ? '' : 'none';
   });
 
-  $('upload-form').addEventListener('submit', async function (e) {
-    e.preventDefault();
-    const type = $('up-type').value;
-    const classId = $('up-class').value;
-    if (!classId) { showToast('請選擇班級', 'error'); return; }
-    const form = readRecordFormFields(type, 'up-');
-    const invalid = validateRecordForm(type, form);
-    if (invalid) { showToast(invalid, 'error'); return; }
-    const name = $('up-name').value.trim();
-    const sid = $('up-sid').value.trim();
-    if (!name || !sid) { showToast('請填寫上傳者姓名與學號', 'error'); return; }
-    const files = Array.from($('up-files').files || []);
-    const semester = bootstrapData.semester;
-    const submitBtn = e.target.querySelector('button[type=submit]');
-    submitBtn.disabled = true;
-    try {
-      let attachments = [];
-      if (files.length) {
-        attachments = await uploadFilesForClass(semester, classId, files, function (i, total, fname) {
-          $('up-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
-        });
-      }
-      $('up-progress').textContent = '';
-      await proxyCall('recordSubmit', {
-        semester: semester, classId: classId, type: type,
-        form: form, attachments: attachments,
-        uploader: { name: name, studentId: sid },
-      });
-      showToast('已送出，等待核章', 'success');
-      e.target.reset();
-      renderFormFields();
-      await refreshBootstrap();
-      showPage('mine');
-    } catch (err) {
-      showToast('送出失敗：' + err.message, 'error');
-    } finally {
-      submitBtn.disabled = false;
-    }
-  });
+  $('upload-form').addEventListener('submit', onUploadSubmit);
 };
+
+// 系所 chips：active 系所逐一顯示為可點選 chip，最後附「＋自填系所」。
+function renderUpDeptChips() {
+  const depts = activeDepartments();
+  $('up-dept-chips').innerHTML =
+    depts.map(function (d) {
+      const active = upDeptSel && upDeptSel.deptId === d.id;
+      return '<button type="button" class="chip' + (active ? ' active' : '') + '" data-dept-chip="' + escapeHtml(d.id) + '">' + escapeHtml(d.name) + '</button>';
+    }).join('') +
+    '<button type="button" class="chip chip-new' + (upDeptSel && upDeptSel.custom ? ' active' : '') + '" data-dept-chip="__new">＋自填系所</button>';
+  $('up-dept-new-wrap').style.display = (upDeptSel && upDeptSel.custom) ? '' : 'none';
+}
+
+document.body.addEventListener('click', function (e) {
+  const chip = e.target.closest('[data-dept-chip]');
+  if (!chip) return;
+  upDeptSel = chip.dataset.deptChip === '__new' ? { custom: true } : { deptId: chip.dataset.deptChip };
+  renderUpDeptChips();
+  renderUpSectionOptions();
+  if (upDeptSel.custom) $('up-dept-new').focus();
+});
+
+// 班別選項：A–D 固定 + 該系所該年級已存在的自訂班別 + 「自填…」。
+function renderUpSectionOptions() {
+  if (!$('up-section')) return;
+  const prev = $('up-section').value;
+  const grade = Number($('up-grade').value);
+  const base = ['A', 'B', 'C', 'D'];
+  const extra = [];
+  if (upDeptSel && upDeptSel.deptId) {
+    (bootstrapData.classes || []).forEach(function (c) {
+      if (c && c.active !== false && c.deptId === upDeptSel.deptId && Number(c.grade) === grade &&
+          c.section && base.indexOf(c.section) === -1 && extra.indexOf(c.section) === -1) {
+        extra.push(c.section);
+      }
+    });
+    extra.sort();
+  }
+  $('up-section').innerHTML =
+    base.concat(extra).map(function (s) { return '<option value="' + escapeHtml(s) + '">' + escapeHtml(s) + ' 班</option>'; }).join('') +
+    '<option value="__custom">自填…</option>';
+  if (prev && Array.prototype.some.call($('up-section').options, function (o) { return o.value === prev; })) {
+    $('up-section').value = prev;
+  }
+  $('up-section-custom').style.display = $('up-section').value === '__custom' ? '' : 'none';
+}
+
+async function onUploadSubmit(e) {
+  e.preventDefault();
+  const type = $('up-type').value;
+
+  // 系所：chips 選既有（deptId）或自填（deptName），二擇一。
+  if (!upDeptSel) { showToast('請選擇系所', 'error'); return; }
+  const resolveParams = { grade: Number($('up-grade').value) };
+  if (upDeptSel.custom) {
+    const deptName = $('up-dept-new').value.trim();
+    if (!deptName || !DEPT_NAME_RE.test(deptName)) { showToast('系所名稱限 1–30 字（中英數字/括號/空白）', 'error'); return; }
+    resolveParams.deptName = deptName;
+  } else {
+    resolveParams.deptId = upDeptSel.deptId;
+  }
+
+  // 班別：select 或自填輸入框。
+  let section = $('up-section').value;
+  if (section === '__custom') section = $('up-section-custom').value.trim();
+  if (!SECTION_RE.test(section)) { showToast('班別限 1–6 字（英數或中文，不可含空白/符號）', 'error'); return; }
+
+  const form = readRecordFormFields(type, 'up-');
+  const invalid = validateRecordForm(type, form);
+  if (invalid) { showToast(invalid, 'error'); return; }
+  const name = $('up-name').value.trim();
+  const sid = $('up-sid').value.trim();
+  if (!name || !sid) { showToast('請填寫上傳者姓名與學號', 'error'); return; }
+  const files = Array.from($('up-files').files || []);
+  const semester = bootstrapData.semester;
+  const submitBtn = e.target.querySelector('button[type=submit]');
+  submitBtn.disabled = true;
+  try {
+    // 1) classResolve：find-or-create 系所/班級，拿 classId；並用回傳同步本地清單。
+    $('up-progress').textContent = '確認班級中…';
+    resolveParams.section = section;
+    const resolved = await proxyCall('classResolve', resolveParams);
+    bootstrapData.departments = resolved.departments;
+    bootstrapData.classes = resolved.classes;
+    const classId = resolved.classId;
+
+    // 2) 逐檔上傳附件（須在 recordSubmit 之前，後端 submit 時驗證附件歸屬資料夾）。
+    let attachments = [];
+    if (files.length) {
+      attachments = await uploadFilesForClass(semester, classId, files, function (i, total, fname) {
+        $('up-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+      });
+    }
+    $('up-progress').textContent = '';
+
+    // 3) 建立紀錄。
+    await proxyCall('recordSubmit', {
+      semester: semester, classId: classId, type: type,
+      form: form, attachments: attachments,
+      uploader: { name: name, studentId: sid },
+    });
+    showToast('已送出，等待核章', 'success');
+    await refreshBootstrap();
+    showPage('mine');
+  } catch (err) {
+    $('up-progress').textContent = '';
+    showToast('送出失敗：' + err.message, 'error');
+  } finally {
+    submitBtn.disabled = false;
+  }
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ── 頁面 2：我的上傳 ──────────────────────────────────────────────────────────
@@ -786,7 +889,6 @@ document.body.addEventListener('click', function (e) {
 
 function recordDetailHtml(r) {
   return '<p><b>類型：</b>' + TYPE_LABELS[r.type] + '　<b>班級：</b>' + escapeHtml(deptName(r.deptId)) + ' / ' + escapeHtml(className(r.classId)) + '</p>' +
-    (r.type === 'meeting' ? '<p><b>第幾次：</b>' + escapeHtml(r.form.seq) + '</p>' : '') +
     '<p><b>日期：</b>' + escapeHtml(r.form.date) + '</p>' +
     '<p><b>主題：</b>' + escapeHtml(r.form.topic) + '</p>' +
     '<p><b>內容摘要：</b><br>' + escapeHtml(r.form.summary).replace(/\n/g, '<br>') + '</p>' +
@@ -1081,6 +1183,7 @@ function renderAdminDepartments() {
 function openDeptForm(dept) {
   dept = dept || {};
   const bodyHtml = '<form id="dept-form">' +
+    '<p class="field-hint">學生自填的系所會出現在此，可在此改名、補系主任資訊或停用。</p>' +
     '<div class="field"><label>系所 ID</label><input type="text" id="dept-id" value="' + escapeHtml(dept.id || '') + '" ' + (dept.id ? 'readonly' : '') + ' required></div>' +
     '<div class="field"><label>系所名稱</label><input type="text" id="dept-name" value="' + escapeHtml(dept.name || '') + '" required></div>' +
     '<div class="row"><div class="field"><label>系主任姓名</label><input type="text" id="dept-head-name" value="' + escapeHtml(dept.headName || '') + '"></div>' +
@@ -1126,14 +1229,30 @@ function renderAdminClasses() {
     '<button class="btn btn-primary" data-action="class-new" style="margin-top:12px;">新增班級</button></div>';
 }
 
+// 從舊班級 id（deptId_g<年級>_<班別>）嘗試反解 grade/section，供舊資料編輯時預填。
+function parseClassId(id) {
+  const m = /^(.*)_g([1-6])_([A-Za-z0-9一-鿿]{1,6})$/.exec(String(id || ''));
+  return m ? { grade: Number(m[2]), section: m[3] } : null;
+}
+
 function openClassForm(cls) {
   cls = cls || {};
   const tutors = cls.tutors || [];
   const depts = activeDepartments();
+  const isEdit = !!cls.id;
+  // 舊資料若無 grade/section，先試著從 id 反解，再退回預設（一年級 A 班）；管理員可於表單修正。
+  const parsed = (!cls.grade || !cls.section) ? parseClassId(cls.id) : null;
+  const curGrade = Number(cls.grade) || (parsed && parsed.grade) || 1;
+  const curSection = cls.section || (parsed && parsed.section) || 'A';
   const bodyHtml = '<form id="class-form">' +
-    '<div class="field"><label>班級 ID</label><input type="text" id="class-id" value="' + escapeHtml(cls.id || '') + '" ' + (cls.id ? 'readonly' : '') + ' required></div>' +
-    '<div class="field"><label>班級名稱</label><input type="text" id="class-name" value="' + escapeHtml(cls.name || '') + '" required></div>' +
     '<div class="field"><label>系所</label><select id="class-dept">' + depts.map(function (d) { return '<option value="' + escapeHtml(d.id) + '"' + (d.id === cls.deptId ? ' selected' : '') + '>' + escapeHtml(d.name) + '</option>'; }).join('') + '</select></div>' +
+    '<div class="row">' +
+      '<div class="field"><label>年級</label><select id="class-grade">' +
+        [1, 2, 3, 4, 5, 6].map(function (g) { return '<option value="' + g + '"' + (g === curGrade ? ' selected' : '') + '>' + gradeLabel(g) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="field"><label>班別（英數或中文 1–6 字）</label><input type="text" id="class-section" value="' + escapeHtml(curSection) + '" maxlength="6" required></div>' +
+    '</div>' +
+    '<div class="field"><label>班級 ID（自動衍生' + (isEdit ? '；既有班級不可變更' : '') + '）</label><input type="text" id="class-id" value="' + escapeHtml(cls.id || '') + '" readonly></div>' +
     '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="tutor1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '"></div>' +
     '<div class="field"><label>導師 1 Email</label><input type="email" id="tutor1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '"></div></div>' +
     '<div class="row"><div class="field"><label>導師 2 姓名（選填）</label><input type="text" id="tutor2-name" value="' + escapeHtml(tutors[1] && tutors[1].name || '') + '"></div>' +
@@ -1142,16 +1261,32 @@ function openClassForm(cls) {
     '<div class="field"><label><input type="checkbox" id="class-active" ' + (cls.active === false ? '' : 'checked') + '> 啟用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
-  openModal(cls.id ? '編輯班級' : '新增班級', bodyHtml);
+  openModal(isEdit ? '編輯班級' : '新增班級', bodyHtml);
+
+  // 新增時 id 隨系所/年級/班別即時衍生；編輯時 id 固定（records 以 classId 關聯，不可改）。
+  function refreshDerivedId() {
+    if (isEdit) return;
+    const sec = $('class-section').value.trim().toUpperCase();
+    $('class-id').value = SECTION_RE.test(sec) ? buildClassId($('class-dept').value, Number($('class-grade').value), sec) : '';
+  }
+  refreshDerivedId();
+  ['class-dept', 'class-grade', 'class-section'].forEach(function (fid) {
+    $(fid).addEventListener('input', refreshDerivedId);
+    $(fid).addEventListener('change', refreshDerivedId);
+  });
+
   $('class-form').addEventListener('submit', async function (e) {
     e.preventDefault();
-    const id = $('class-id').value.trim();
-    if (!id) { showToast('請輸入班級 ID', 'error'); return; }
+    const grade = Number($('class-grade').value);
+    const section = $('class-section').value.trim().toUpperCase();
+    if (!SECTION_RE.test(section)) { showToast('班別限 1–6 字（英數或中文，不可含空白/符號）', 'error'); return; }
+    const id = isEdit ? cls.id : buildClassId($('class-dept').value, grade, section);
     const newTutors = [];
     if ($('tutor1-name').value.trim() || $('tutor1-email').value.trim()) newTutors.push({ name: $('tutor1-name').value.trim(), email: $('tutor1-email').value.trim() });
     if ($('tutor2-name').value.trim() || $('tutor2-email').value.trim()) newTutors.push({ name: $('tutor2-name').value.trim(), email: $('tutor2-email').value.trim() });
     const entry = {
-      id: id, name: $('class-name').value.trim(), deptId: $('class-dept').value,
+      id: id, name: buildClassName(grade, section), deptId: $('class-dept').value,
+      grade: grade, section: section,
       tutors: newTutors, dualApprovalMode: $('class-dual').value, active: $('class-active').checked,
     };
     try {
@@ -1292,7 +1427,7 @@ let rosterDiff = null; // { departmentUpserts, classUpserts, rows: [{status, dep
 function renderAdminRoster() {
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>Excel 匯入導師名單</h3>' +
-    '<p class="field-hint">欄位需含：系所、班級、導師1姓名、導師1email、導師2姓名（選填）、導師2email（選填）。</p>' +
+    '<p class="field-hint">欄位需含：系所、年級（1–6 或 一～六）、班級（班別，如 A）、導師1姓名、導師1email、導師2姓名（選填）、導師2email（選填）。</p>' +
     '<input type="file" id="roster-file" accept=".xlsx,.xls,.csv" />' +
     '<div id="roster-preview" style="margin-top:16px;"></div>' +
     '</div>';
@@ -1324,13 +1459,25 @@ function buildRosterDiff(rows) {
 
   rows.forEach(function (row) {
     const deptNameVal = String(row['系所'] || '').trim();
-    const classNameVal = String(row['班級'] || '').trim();
-    if (!deptNameVal || !classNameVal) return;
+    const grade = gradeFromCell(row['年級']);
+    const sectionRaw = String(row['班級'] || '').trim().toUpperCase();
+    if (!deptNameVal || !sectionRaw) return;
+    if (grade === null) {
+      previewRows.push({ deptName: deptNameVal, deptStatus: '—', grade: String(row['年級'] || ''), className: sectionRaw, classStatus: '略過（年級無效）', tutors: [] });
+      return;
+    }
+    if (!SECTION_RE.test(sectionRaw)) {
+      previewRows.push({ deptName: deptNameVal, deptStatus: '—', grade: gradeLabel(grade), className: sectionRaw, classStatus: '略過（班別無效）', tutors: [] });
+      return;
+    }
 
+    // 系所以名稱比對既有（含本次已排入新增的），找不到才建；id 衍生規則與後端 classResolve 一致。
     let dept = depts.find(function (d) { return d.name === deptNameVal; }) || seenDeptNames[deptNameVal];
     let deptStatus = '不變';
     if (!dept) {
-      dept = { id: slugifyId(deptNameVal), name: deptNameVal, active: true };
+      const pendingIds = departmentUpserts.map(function (d) { return d.id; });
+      const id = uniqueDeptIdFront(slugifyDeptIdFront(deptNameVal), depts.concat(pendingIds.map(function (i) { return { id: i }; })));
+      dept = { id: id, name: deptNameVal, active: true };
       departmentUpserts.push(dept);
       seenDeptNames[deptNameVal] = dept;
       deptStatus = '新增';
@@ -1342,11 +1489,16 @@ function buildRosterDiff(rows) {
     if (t1n || t1e) tutors.push({ name: t1n, email: t1e });
     if (t2n || t2e) tutors.push({ name: t2n, email: t2e });
 
-    let existingClass = classes.find(function (c) { return c.deptId === dept.id && c.name === classNameVal; });
+    // 班級以 (deptId, grade, section) 比對；找不到才建，id/name 衍生規則與後端 classResolve 一致。
+    let existingClass = classes.find(function (c) { return c.deptId === dept.id && Number(c.grade) === grade && c.section === sectionRaw; });
     let classStatus;
     let classEntry;
     if (!existingClass) {
-      classEntry = { id: dept.id + '_' + slugifyId(classNameVal), name: classNameVal, deptId: dept.id, tutors: tutors, dualApprovalMode: 'any', active: true };
+      classEntry = {
+        id: buildClassId(dept.id, grade, sectionRaw), name: buildClassName(grade, sectionRaw),
+        deptId: dept.id, grade: grade, section: sectionRaw,
+        tutors: tutors, dualApprovalMode: 'any', active: true,
+      };
       classStatus = '新增';
     } else {
       const tutorsChanged = JSON.stringify(existingClass.tutors || []) !== JSON.stringify(tutors);
@@ -1355,7 +1507,7 @@ function buildRosterDiff(rows) {
     }
     if (classStatus !== '不變') classUpserts.push(classEntry);
 
-    previewRows.push({ deptName: deptNameVal, deptStatus: deptStatus, className: classNameVal, classStatus: classStatus, tutors: tutors });
+    previewRows.push({ deptName: deptNameVal, deptStatus: deptStatus, grade: gradeLabel(grade), className: sectionRaw + ' 班', classStatus: classStatus, tutors: tutors });
   });
 
   return { departmentUpserts: departmentUpserts, classUpserts: classUpserts, rows: previewRows };
@@ -1364,12 +1516,14 @@ function buildRosterDiff(rows) {
 function renderRosterPreview() {
   if (!rosterDiff || !rosterDiff.rows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列。</div>'; return; }
   $('roster-preview').innerHTML =
-    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>班級</th><th>導師</th><th>異動</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>年級</th><th>班級</th><th>導師</th><th>異動</th></tr></thead><tbody>' +
     rosterDiff.rows.map(function (r) {
+      const skipped = r.classStatus.indexOf('略過') === 0;
       return '<tr><td data-label="系所">' + escapeHtml(r.deptName) + (r.deptStatus === '新增' ? ' <span class="badge badge-pending_tutor">新系所</span>' : '') + '</td>' +
+        '<td data-label="年級">' + escapeHtml(r.grade) + '</td>' +
         '<td data-label="班級">' + escapeHtml(r.className) + '</td>' +
         '<td data-label="導師">' + r.tutors.map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
-        '<td data-label="異動"><span class="badge ' + (r.classStatus === '不變' ? 'badge-approved' : 'badge-pending_tutor') + '">' + r.classStatus + '</span></td></tr>';
+        '<td data-label="異動"><span class="badge ' + (skipped ? 'badge-rejected' : r.classStatus === '不變' ? 'badge-approved' : 'badge-pending_tutor') + '">' + r.classStatus + '</span></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<p class="field-hint">新增系所僅帶入名稱，系主任 Email／姓名請於「系所」頁籤補齊。</p>' +
     '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入</button>';

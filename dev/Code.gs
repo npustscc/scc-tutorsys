@@ -67,6 +67,7 @@ function doPost(e) {
       case 'adminUpsertSemester':    result = adminUpsertSemesterAction_(params, ctx, userEmail); break;
       case 'adminImportRoster':      result = adminImportRosterAction_(params, ctx, userEmail); break;
       case 'classSetWhitelist':      result = classSetWhitelistAction_(params, ctx, userEmail); break;
+      case 'classResolve':           result = classResolveAction_(params, ctx, userEmail); break;
       default: return jsonResp_({ error: 'Unknown action: ' + action });
     }
     return jsonResp_(result);
@@ -670,6 +671,102 @@ function currentSemesterId_(semesters) {
   return null;
 }
 
+// ── classResolve 純邏輯：系所/班級 find-or-create ─────────────────────────────
+// 班級的身分是 (系所, 年級, 班別) 組合，由上傳者第一次使用時自動建立（免管理員預建）。
+// 資安重點：grade/section/deptName 都是 client 傳入值，會進 classes.json 的 id 與
+// Drive 資料夾路徑/查詢字串（attachments/<semester>/<classId>/），比照 semester 白名單
+// 的教訓（commit d28fedb），一律先過嚴格白名單驗證——禁止引號/斜線/空白/控制字元，
+// 避免 Drive q 字串注入與垃圾 id。
+
+// grade：必須是整數 1–6（拒絕字串 '3'、小數、NaN、null 等一切非整數）。
+function isValidGrade_(grade) {
+  return Number.isInteger(grade) && grade >= 1 && grade <= 6;
+}
+
+// section（班別）：1–6 字，只允許英數與中日韓統一表意文字（一-鿿），
+// 禁止引號/斜線/空白/控制字元（會進 classId 與 Drive 查詢字串）。
+function isValidSection_(section) {
+  return typeof section === 'string' && /^[A-Za-z0-9一-鿿]{1,6}$/.test(section);
+}
+
+// 班別正規化：英文字母統一大寫（'a' 與 'A' 視為同一班），中文/數字維持原樣。
+function normalizeSection_(section) {
+  return String(section).toUpperCase();
+}
+
+// deptName（自填系所名稱）：trim 後 1–30 字，只允許英數/中文/括號/空白。
+function isValidDeptName_(name) {
+  if (typeof name !== 'string') return false;
+  const t = name.trim();
+  return t.length >= 1 && t.length <= 30 && /^[A-Za-z0-9一-鿿()（）\s]{1,30}$/.test(t);
+}
+
+// 系所 id slugify：只保留英數/中文/底線（去掉括號與空白），不信任前端傳 id 建新系所。
+function slugifyDeptId_(name) {
+  return String(name || '').replace(/[^A-Za-z0-9一-鿿_]/g, '');
+}
+
+// slug 撞既有系所 id 時加序號後綴（_2、_3…）；slug 為空（名稱全是括號/空白）用 'dept' 打底。
+function uniqueDeptId_(slug, departments) {
+  const ids = {};
+  (departments || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
+  const base = slug || 'dept';
+  if (!ids[base]) return base;
+  let i = 2;
+  while (ids[base + '_' + i]) i++;
+  return base + '_' + i;
+}
+
+// 年級中文對照（班級顯示名稱用）。
+function gradeZh_(grade) {
+  return ({ 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六' })[grade] || String(grade);
+}
+
+// classResolve 核心（純函式，不做 I/O）：驗證輸入、解析（或準備建立）系所與班級。
+// 回傳 { ok:false, error } 或 { ok:true, dept, cls, newDept|null, newClass|null }——
+// newDept/newClass 非 null 表示需由呼叫端（withLock_ 內）寫入對應 JSON 檔。
+function classResolveCore_(params, departments, classes) {
+  if (!isValidGrade_(params.grade)) return { ok: false, error: 'invalid grade: ' + params.grade };
+  if (!isValidSection_(params.section)) return { ok: false, error: 'invalid section' };
+  const grade = params.grade;
+  const section = normalizeSection_(params.section);
+
+  // 系所解析：deptId（選既有，必須存在且 active）與 deptName（自填）二擇一。
+  let dept = null;
+  let newDept = null;
+  if (params.deptId) {
+    dept = (departments || []).filter(function (d) { return d && d.id === params.deptId; })[0];
+    if (!dept || dept.active === false) return { ok: false, error: 'department not found: ' + params.deptId };
+  } else {
+    if (!isValidDeptName_(params.deptName)) return { ok: false, error: 'invalid deptName' };
+    const name = String(params.deptName).trim();
+    // 以名稱完全比對既有系所（含 inactive 也算命中，避免重複建同名系所）。
+    dept = (departments || []).filter(function (d) { return d && d.name === name; })[0];
+    if (!dept) {
+      const id = uniqueDeptId_(slugifyDeptId_(name), departments);
+      newDept = { id: id, name: name, headEmail: '', headName: '', active: true };
+      dept = newDept;
+    }
+  }
+
+  // 班級解析：以 (deptId, grade, section) 找；找不到就準備建立。
+  let cls = (classes || []).filter(function (c) {
+    return c && c.deptId === dept.id && Number(c.grade) === grade && c.section === section;
+  })[0];
+  let newClass = null;
+  if (cls && cls.active === false) return { ok: false, error: 'class disabled: ' + cls.id };
+  if (!cls) {
+    newClass = {
+      id: dept.id + '_g' + grade + '_' + section,
+      name: gradeZh_(grade) + '年級' + section + '班',
+      deptId: dept.id, grade: grade, section: section,
+      tutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: true,
+    };
+    cls = newClass;
+  }
+  return { ok: true, dept: dept, cls: cls, newDept: newDept, newClass: newClass };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Action handlers（會呼叫 Drive/LockService，不是純函式，不在單元測試範圍）──
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1053,5 +1150,37 @@ function classSetWhitelistAction_(params, ctx, userEmail) {
     appendAuditLog_(ctx, { action: 'classSetWhitelist', by: userEmail, targetId: classId, at: new Date().toISOString() });
     // 與 bootstrap 同一套過濾：導師只看得到自己班的 uploadWhitelist，不外洩其他班的名單。
     return { classes: sanitizeClassesForViewer_(data, roles) };
+  });
+}
+
+// classResolve：任何已認證帳號可呼叫（自填系所/班級正是為了免預建名單），
+// 但輸入驗證在 classResolveCore_ 內卡死（grade/section/deptName 白名單，見該函式註解）。
+// find-or-create 的 read-modify-write 全程包在 withLock_ 內，避免併發重複建立。
+function classResolveAction_(params, ctx, userEmail) {
+  const roles = loadRolesForCtx_(ctx, userEmail);
+
+  return withLock_(function () {
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const res = classResolveCore_(params, departments, classes);
+    if (!res.ok) throw new Error(res.error);
+
+    const now = new Date().toISOString();
+    if (res.newDept) {
+      departments.push(res.newDept);
+      writeJsonPath_('departments.json', departments, ctx);
+      appendAuditLog_(ctx, { action: 'deptAutoCreate', by: userEmail, targetId: res.newDept.id, name: res.newDept.name, at: now });
+    }
+    if (res.newClass) {
+      classes.push(res.newClass);
+      writeJsonPath_('classes.json', classes, ctx);
+      appendAuditLog_(ctx, { action: 'classAutoCreate', by: userEmail, targetId: res.newClass.id, at: now });
+    }
+    return {
+      deptId: res.dept.id,
+      classId: res.cls.id,
+      departments: departments,
+      classes: sanitizeClassesForViewer_(classes, roles),
+    };
   });
 }
