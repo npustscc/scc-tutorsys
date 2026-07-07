@@ -16,7 +16,7 @@ ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'prod' };
 
 // 緊急備援名單：即使 config.json 讀不到或帳號不在名單，這些帳號仍可登入以修復系統。
 // 註：列出 email 不構成後門——仍須持有該帳號的 Google 憑證（有效 ID token）才通過。
-const BOOTSTRAP_ADMINS = ['linkinlol528101@gmail.com'];
+const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw'];
 
 function doGet(e) {
   return jsonResp_({ ok: true, service: 'SCC Tutor System Drive Proxy (PROD, STUB)' });
