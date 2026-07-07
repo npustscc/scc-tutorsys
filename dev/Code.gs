@@ -68,6 +68,7 @@ function doPost(e) {
       case 'adminImportRoster':      result = adminImportRosterAction_(params, ctx, userEmail); break;
       case 'classSetWhitelist':      result = classSetWhitelistAction_(params, ctx, userEmail); break;
       case 'classResolve':           result = classResolveAction_(params, ctx, userEmail); break;
+      case 'classStats':             result = classStatsAction_(params, ctx, userEmail); break;
       default: return jsonResp_({ error: 'Unknown action: ' + action });
     }
     return jsonResp_(result);
@@ -636,17 +637,26 @@ function isValidSemesterId_(semesterId, semesters) {
 }
 
 // 依呼叫者角色過濾 classes 的敏感欄位再回傳給前端。
-// uploadWhitelist 是學生 gmail 清單（個資），只有「該班導師或 admin」看得到；
-// 其他人拿到的物件移除該欄位，改附 hasWhitelist 布林（前端仍可顯示「此班有限制名單」提示）。
-// tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
+// - uploadWhitelist 是學生 gmail 清單（個資），只有「該班導師或 admin」看得到；
+//   其他人拿到的物件移除該欄位，改附 hasWhitelist 布林（前端仍可顯示「此班有限制名單」提示）。
+// - suggestedTutors 的 by（建議者 email，即上傳學生）與自填 email 屬個資，只有 admin
+//   看得到完整內容；其他人（含該班導師）只拿到 name（前端顯示「待確認」chip 用）。
+// - tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
 function sanitizeClassesForViewer_(classes, roles) {
   return (classes || []).map(function (c) {
     if (!c) return c;
-    const canSee = !!roles && (roles.isAdmin === true || (roles.tutorOf || []).indexOf(c.id) !== -1);
-    if (canSee) return c;
+    if (roles && roles.isAdmin === true) return c;
+    const isTutor = !!roles && (roles.tutorOf || []).indexOf(c.id) !== -1;
+    const hasSuggestions = !!(c.suggestedTutors && c.suggestedTutors.length);
+    if (isTutor && !hasSuggestions) return c;
     const copy = Object.assign({}, c);
-    copy.hasWhitelist = !!(c.uploadWhitelist && c.uploadWhitelist.length);
-    delete copy.uploadWhitelist;
+    if (hasSuggestions) {
+      copy.suggestedTutors = c.suggestedTutors.map(function (s) { return { name: (s && s.name) || '' }; });
+    }
+    if (!isTutor) {
+      copy.hasWhitelist = !!(c.uploadWhitelist && c.uploadWhitelist.length);
+      delete copy.uploadWhitelist;
+    }
     return copy;
   });
 }
@@ -671,27 +681,19 @@ function currentSemesterId_(semesters) {
   return null;
 }
 
-// ── classResolve 純邏輯：系所/班級 find-or-create ─────────────────────────────
-// 班級的身分是 (系所, 年級, 班別) 組合，由上傳者第一次使用時自動建立（免管理員預建）。
-// 資安重點：grade/section/deptName 都是 client 傳入值，會進 classes.json 的 id 與
-// Drive 資料夾路徑/查詢字串（attachments/<semester>/<classId>/），比照 semester 白名單
-// 的教訓（commit d28fedb），一律先過嚴格白名單驗證——禁止引號/斜線/空白/控制字元，
-// 避免 Drive q 字串注入與垃圾 id。
+// ── classResolve 純邏輯：系所/班級 find-or-create + 導師建議 ──────────────────
+// 班級的身分是 (系所, 班級名稱) 組合，名稱為自由文字（如「資管三A」「碩一」），
+// 由上傳者第一次使用時自動建立（免管理員預建）。
+// 資安重點：className/deptName/suggestedTutors 都是 client 傳入值，className 會進
+// classes.json 的 id 與 Drive 資料夾路徑/查詢字串（attachments/<semester>/<classId>/），
+// 比照 semester 白名單的教訓（commit d28fedb），一律先過嚴格白名單驗證——
+// 禁止引號/斜線/空白/控制字元，避免 Drive q 字串注入與垃圾 id。
 
-// grade：必須是整數 1–6（拒絕字串 '3'、小數、NaN、null 等一切非整數）。
-function isValidGrade_(grade) {
-  return Number.isInteger(grade) && grade >= 1 && grade <= 6;
-}
-
-// section（班別）：1–6 字，只允許英數與中日韓統一表意文字（一-鿿），
-// 禁止引號/斜線/空白/控制字元（會進 classId 與 Drive 查詢字串）。
-function isValidSection_(section) {
-  return typeof section === 'string' && /^[A-Za-z0-9一-鿿]{1,6}$/.test(section);
-}
-
-// 班別正規化：英文字母統一大寫（'a' 與 'A' 視為同一班），中文/數字維持原樣。
-function normalizeSection_(section) {
-  return String(section).toUpperCase();
+// className（班級名稱）：trim 後 1–20 字，只允許英數與中日韓統一表意文字（一-鿿），
+// 禁止空白/引號/斜線/符號（會進 classId 與 Drive 查詢字串）。
+function isValidClassName_(name) {
+  if (typeof name !== 'string') return false;
+  return /^[A-Za-z0-9一-鿿]{1,20}$/.test(name.trim());
 }
 
 // deptName（自填系所名稱）：trim 後 1–30 字，只允許英數/中文/括號/空白。
@@ -702,6 +704,7 @@ function isValidDeptName_(name) {
 }
 
 // 系所 id slugify：只保留英數/中文/底線（去掉括號與空白），不信任前端傳 id 建新系所。
+// className 建 id 時也套同一套（防禦縱深；className regex 本來就更嚴）。
 function slugifyDeptId_(name) {
   return String(name || '').replace(/[^A-Za-z0-9一-鿿_]/g, '');
 }
@@ -717,19 +720,73 @@ function uniqueDeptId_(slug, departments) {
   return base + '_' + i;
 }
 
-// 年級中文對照（班級顯示名稱用）。
-function gradeZh_(grade) {
-  return ({ 1: '一', 2: '二', 3: '三', 4: '四', 5: '五', 6: '六' })[grade] || String(grade);
+// class id 撞名後綴（比照 uniqueDeptId_ 模式）：同 slug 不同名稱的班級可各自取得唯一 id。
+function uniqueClassId_(slug, classes) {
+  const ids = {};
+  (classes || []).forEach(function (c) { if (c && c.id) ids[c.id] = true; });
+  const base = slug || 'class';
+  if (!ids[base]) return base;
+  let i = 2;
+  while (ids[base + '_' + i]) i++;
+  return base + '_' + i;
 }
 
-// classResolve 核心（純函式，不做 I/O）：驗證輸入、解析（或準備建立）系所與班級。
-// 回傳 { ok:false, error } 或 { ok:true, dept, cls, newDept|null, newClass|null }——
-// newDept/newClass 非 null 表示需由呼叫端（withLock_ 內）寫入對應 JSON 檔。
-function classResolveCore_(params, departments, classes) {
-  if (!isValidGrade_(params.grade)) return { ok: false, error: 'invalid grade: ' + params.grade };
-  if (!isValidSection_(params.section)) return { ok: false, error: 'invalid section' };
-  const grade = params.grade;
-  const section = normalizeSection_(params.section);
+// 學生自填導師建議的驗證與正規化：
+// - 每筆 { name, email? }：name trim 後 1–20 字（英數/中文/間隔號/空白）；
+//   email 選填，若有必須過基本格式檢查並轉小寫。
+// - 整個陣列上限 2 筆（單次呼叫）。任一筆不合法 → 整包拒絕（fail-closed）。
+function normalizeSuggestedTutors_(list) {
+  if (list === undefined || list === null) return { ok: true, tutors: [] };
+  if (!Array.isArray(list)) return { ok: false, error: 'invalid suggestedTutors' };
+  if (list.length > 2) return { ok: false, error: 'too many suggested tutors (max 2)' };
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (!t || typeof t.name !== 'string') return { ok: false, error: 'invalid suggested tutor name' };
+    const name = t.name.trim();
+    if (!/^[A-Za-z0-9一-鿿·\s]{1,20}$/.test(name)) return { ok: false, error: 'invalid suggested tutor name' };
+    let email = '';
+    if (t.email !== undefined && t.email !== null && String(t.email).trim() !== '') {
+      email = String(t.email).trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'invalid suggested tutor email' };
+    }
+    out.push({ name: name, email: email });
+  }
+  return { ok: true, tutors: out };
+}
+
+// 把驗證過的建議 append 進 class.suggestedTutors（純函式，不改動輸入物件）。
+// 資安不變式：**絕對不寫入 class.tutors**——tutors 是核章授權來源，只有 admin action
+// （adminUpsertClass / adminImportRoster）能動；學生自填一律只進 suggestedTutors，
+// 待管理員在後台確認後才轉正。
+// - 依 name（trim 比對）對既有 tutors 與既有 suggestions 去重（重複者靜默略過）。
+// - 每班 suggestions 總量上限 10：超過的丟棄並以 dropped 計數回報。
+function applyTutorSuggestions_(cls, tutors, byEmail, now) {
+  const seen = {};
+  (cls.tutors || []).forEach(function (t) { if (t && t.name) seen[String(t.name).trim()] = true; });
+  const sugList = (cls.suggestedTutors || []).slice();
+  sugList.forEach(function (s) { if (s && s.name) seen[String(s.name).trim()] = true; });
+  let added = 0, dropped = 0;
+  (tutors || []).forEach(function (t) {
+    if (seen[t.name]) return;                      // 與正式導師或既有建議同名 → 略過
+    if (sugList.length >= 10) { dropped++; return; } // 每班建議總量上限
+    sugList.push({ name: t.name, email: t.email, by: byEmail, at: now });
+    seen[t.name] = true;
+    added++;
+  });
+  if (!added) return { cls: cls, added: 0, dropped: dropped };
+  return { cls: Object.assign({}, cls, { suggestedTutors: sugList }), added: added, dropped: dropped };
+}
+
+// classResolve 核心（純函式，不做 I/O）：驗證輸入、解析（或準備建立）系所與班級、
+// 套用導師建議。回傳 { ok:false, error } 或
+// { ok:true, dept, cls, newDept|null, classCreated, suggestionsAdded, suggestionsDropped }——
+// newDept 非 null / classCreated / suggestionsAdded>0 表示需由呼叫端（withLock_ 內）寫入。
+function classResolveCore_(params, departments, classes, userEmail, now) {
+  if (!isValidClassName_(params.className)) return { ok: false, error: 'invalid className' };
+  const className = String(params.className).trim();
+  const sug = normalizeSuggestedTutors_(params.suggestedTutors);
+  if (!sug.ok) return { ok: false, error: sug.error };
 
   // 系所解析：deptId（選既有，必須存在且 active）與 deptName（自填）二擇一。
   let dept = null;
@@ -752,22 +809,50 @@ function classResolveCore_(params, departments, classes) {
     }
   }
 
-  // 班級解析：以 (deptId, grade, section) 找；找不到就準備建立。
+  // 班級解析：以 (deptId, name===trim 後原文) 完全比對找既有；找不到就準備建立。
+  // 舊資料若殘留 grade/section 欄位無妨，一律只認 name。
   let cls = (classes || []).filter(function (c) {
-    return c && c.deptId === dept.id && Number(c.grade) === grade && c.section === section;
+    return c && c.deptId === dept.id && c.name === className;
   })[0];
-  let newClass = null;
+  // 命中已停用班級一律拒絕（fail-closed，理由同上：防重打同名繞過停用）。
   if (cls && cls.active === false) return { ok: false, error: 'class disabled: ' + cls.id };
+  let classCreated = false;
   if (!cls) {
-    newClass = {
-      id: dept.id + '_g' + grade + '_' + section,
-      name: gradeZh_(grade) + '年級' + section + '班',
-      deptId: dept.id, grade: grade, section: section,
-      tutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: true,
+    cls = {
+      id: uniqueClassId_(dept.id + '_' + slugifyDeptId_(className), classes),
+      name: className, deptId: dept.id,
+      tutors: [], suggestedTutors: [],
+      dualApprovalMode: 'any', uploadWhitelist: [], active: true,
     };
-    cls = newClass;
+    classCreated = true;
   }
-  return { ok: true, dept: dept, cls: cls, newDept: newDept, newClass: newClass };
+
+  // 導師建議：只進 suggestedTutors，絕不進 tutors（見 applyTutorSuggestions_ 註解）。
+  const applied = applyTutorSuggestions_(cls, sug.tutors, userEmail, now);
+
+  return {
+    ok: true, dept: dept, cls: applied.cls, newDept: newDept, classCreated: classCreated,
+    suggestionsAdded: applied.added, suggestionsDropped: applied.dropped,
+  };
+}
+
+// classStats 彙總（純函式）：只回彙總數字，絕不回紀錄內容。
+// pending = status 以 'pending' 開頭（pending_tutor / pending_dept / pending_director）。
+function computeClassStats_(records, classId) {
+  const stats = {
+    meeting:  { approved: 0, pending: 0, rejected: 0, total: 0 },
+    activity: { approved: 0, pending: 0, rejected: 0, total: 0 },
+  };
+  (records || []).forEach(function (r) {
+    if (!r || r.classId !== classId) return;
+    const bucket = stats[r.type];
+    if (!bucket) return;
+    bucket.total++;
+    if (r.status === 'approved') bucket.approved++;
+    else if (r.status === 'rejected') bucket.rejected++;
+    else if (String(r.status || '').indexOf('pending') === 0) bucket.pending++;
+  });
+  return stats;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1156,34 +1241,59 @@ function classSetWhitelistAction_(params, ctx, userEmail) {
   });
 }
 
-// classResolve：任何已認證帳號可呼叫（自填系所/班級正是為了免預建名單），
-// 但輸入驗證在 classResolveCore_ 內卡死（grade/section/deptName 白名單，見該函式註解）。
+// classResolve：任何已認證帳號可呼叫（自填系所/班級/建議導師正是為了免預建名單），
+// 但輸入驗證在 classResolveCore_ 內卡死（className/deptName/suggestedTutors 白名單）。
 // find-or-create 的 read-modify-write 全程包在 withLock_ 內，避免併發重複建立。
+// 學生自填導師只進 suggestedTutors（待管理員轉正），絕不寫入 tutors（核章授權來源）。
 function classResolveAction_(params, ctx, userEmail) {
   const roles = loadRolesForCtx_(ctx, userEmail);
 
   return withLock_(function () {
     const departments = readJsonSafe_('departments.json', ctx, []);
     const classes = readJsonSafe_('classes.json', ctx, []);
-    const res = classResolveCore_(params, departments, classes);
+    const now = new Date().toISOString();
+    const res = classResolveCore_(params, departments, classes, userEmail, now);
     if (!res.ok) throw new Error(res.error);
 
-    const now = new Date().toISOString();
     if (res.newDept) {
       departments.push(res.newDept);
       writeJsonPath_('departments.json', departments, ctx);
       appendAuditLog_(ctx, { action: 'deptAutoCreate', by: userEmail, targetId: res.newDept.id, name: res.newDept.name, at: now });
     }
-    if (res.newClass) {
-      classes.push(res.newClass);
-      writeJsonPath_('classes.json', classes, ctx);
-      appendAuditLog_(ctx, { action: 'classAutoCreate', by: userEmail, targetId: res.newClass.id, at: now });
+    let classesChanged = false;
+    if (res.classCreated) {
+      classes.push(res.cls);
+      classesChanged = true;
+      appendAuditLog_(ctx, { action: 'classAutoCreate', by: userEmail, targetId: res.cls.id, at: now });
+    } else if (res.suggestionsAdded > 0) {
+      const idx = classes.findIndex(function (c) { return c && c.id === res.cls.id; });
+      if (idx !== -1) classes[idx] = res.cls;
+      classesChanged = true;
     }
+    if (res.suggestionsAdded > 0) {
+      appendAuditLog_(ctx, { action: 'tutorSuggest', by: userEmail, targetId: res.cls.id, count: res.suggestionsAdded, at: now });
+    }
+    if (classesChanged) writeJsonPath_('classes.json', classes, ctx);
+
     return {
       deptId: res.dept.id,
       classId: res.cls.id,
       departments: departments,
       classes: sanitizeClassesForViewer_(classes, roles),
+      suggestionsDropped: res.suggestionsDropped || 0,
     };
   });
+}
+
+// classStats：任何已認證帳號可呼叫（上傳頁選定班級後顯示繳交統計提示用）。
+// 只回彙總數字（computeClassStats_），絕不回紀錄內容；純讀取，不需 lock。
+function classStatsAction_(params, ctx, userEmail) {
+  const semester = params.semester, classId = params.classId;
+  if (!semester || !classId) throw new Error('semester and classId required');
+  requireValidSemester_(semester, ctx);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const exists = classes.some(function (c) { return c && c.id === classId; });
+  if (!exists) throw new Error('class not found: ' + classId);
+  const data = readJsonSafe_('records_' + semester + '.json', ctx, { records: [] });
+  return computeClassStats_(data.records, classId);
 }

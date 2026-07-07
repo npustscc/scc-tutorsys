@@ -110,6 +110,35 @@ test('sanitizeClassesForViewer_: roles 為 null/undefined → 一律過濾（fai
   assert.equal(out[0].hasWhitelist, true);
 });
 
+// suggestedTutors 的 by（建議者 email）與自填 email 屬個資：只有 admin 看得到完整內容，
+// 其他人（含該班導師）只拿到 name。
+const CLASSES_WITH_SUG = [
+  {
+    id: 'c1', name: '資管一甲', tutors: [{ email: 't1@x.com', name: 'T1' }],
+    uploadWhitelist: ['a@gmail.com'],
+    suggestedTutors: [{ name: '陳建議', email: 'chen@x.com', by: 'uploader@gmail.com', at: '2026-01-01T00:00:00.000Z' }],
+    active: true,
+  },
+];
+
+test('sanitizeClassesForViewer_: suggestedTutors 的 by/email 只給 admin；其他人只拿到 name', () => {
+  const S = load(['sanitizeClassesForViewer_']);
+  // admin：完整
+  const adminOut = S.sanitizeClassesForViewer_(CLASSES_WITH_SUG, rolesFor({ isAdmin: true }));
+  assert.equal(adminOut[0].suggestedTutors[0].by, 'uploader@gmail.com');
+  assert.equal(adminOut[0].suggestedTutors[0].email, 'chen@x.com');
+  // 該班導師：看得到 uploadWhitelist，但 suggestedTutors 只有 name（by 是上傳學生 email，不外洩）
+  const tutorOut = S.sanitizeClassesForViewer_(CLASSES_WITH_SUG, rolesFor({ tutorOf: ['c1'] }));
+  assert.deepEqual(tutorOut[0].uploadWhitelist, ['a@gmail.com']);
+  assert.deepEqual(tutorOut[0].suggestedTutors, [{ name: '陳建議' }]);
+  // 一般學生：兩者都過濾
+  const stuOut = S.sanitizeClassesForViewer_(CLASSES_WITH_SUG, rolesFor({}));
+  assert.equal(stuOut[0].uploadWhitelist, undefined);
+  assert.deepEqual(stuOut[0].suggestedTutors, [{ name: '陳建議' }]);
+  // 原始資料不被就地修改
+  assert.equal(CLASSES_WITH_SUG[0].suggestedTutors[0].by, 'uploader@gmail.com');
+});
+
 // ── isAttachmentInFolder_ ─────────────────────────────────────────────────────
 
 test('isAttachmentInFolder_: parents 命中預期資料夾 → true', () => {
