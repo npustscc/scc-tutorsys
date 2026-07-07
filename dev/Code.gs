@@ -742,6 +742,9 @@ function classResolveCore_(params, departments, classes) {
     const name = String(params.deptName).trim();
     // 以名稱完全比對既有系所（含 inactive 也算命中，避免重複建同名系所）。
     dept = (departments || []).filter(function (d) { return d && d.name === name; })[0];
+    // 命中已停用系所一律拒絕（fail-closed）：停用是管理員下架垃圾/濫用 chip 的唯一手段，
+    // 若在此放行，重打同名即可繞過停用；命中後拒絕也同時避免落到「建同名新系所」分支。
+    if (dept && dept.active === false) return { ok: false, error: 'department disabled: ' + dept.id };
     if (!dept) {
       const id = uniqueDeptId_(slugifyDeptId_(name), departments);
       newDept = { id: id, name: name, headEmail: '', headName: '', active: true };

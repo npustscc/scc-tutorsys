@@ -133,13 +133,14 @@ test('classResolveCore_: deptId 不存在或 inactive → 拒絕', () => {
   assert.equal(r2.ok, false);
 });
 
-test('classResolveCore_: deptName 完全比對既有名稱（含 inactive）→ 命中不重複建', () => {
+test('classResolveCore_: deptName 命中已停用系所 → 拒絕且不建同名新系所（防繞過停用）', () => {
   const s = S();
-  // '木材科學與設計系' 是 inactive 系所的名稱，仍應命中（避免重複建同名系所）
+  // '木材科學與設計系' 是 inactive 系所的名稱：必須命中後拒絕（fail-closed），
+  // 不可放行（否則重打同名即可繞過管理員停用），也不可落到「建同名新系所」分支。
   const r = s.classResolveCore_({ deptName: ' 木材科學與設計系 ', grade: 1, section: 'A' }, DEPTS, CLASSES);
-  assert.equal(r.ok, true);
-  assert.equal(r.dept.id, '木材科學系');
-  assert.equal(r.newDept, null);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /department disabled/);
+  assert.match(r.error, /木材科學系/);
 });
 
 test('classResolveCore_: deptName 全新 → 建新系所，id 為 slugify 後名稱、headEmail 空、active true', () => {
