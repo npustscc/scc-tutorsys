@@ -14,7 +14,7 @@
 //     但這裡通用化成每個寫入 action 都套用，而不是只有單一函式）。
 
 const CLIENT_ID      = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googleusercontent.com';
-const ROOT_FOLDER_ID = '__DEV_ROOT_FOLDER_ID__';  // dev 資料夾
+const ROOT_FOLDER_ID = '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT';  // dev 資料夾
 
 // 白名單：只允許 dev 資料夾（前端可傳 rootFolderId 指定要打哪個環境的資料夾，
 // 但後端只承認自己環境的白名單，其餘一律 Unauthorized rootFolderId）。

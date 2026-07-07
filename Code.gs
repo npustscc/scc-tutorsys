@@ -9,7 +9,7 @@
 // 正式版整個無法登入（Unauthorized rootFolderId）。
 
 const CLIENT_ID      = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googleusercontent.com';
-const ROOT_FOLDER_ID = '__PROD_ROOT_FOLDER_ID__';  // 正式版 Drive 根資料夾
+const ROOT_FOLDER_ID = '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik';  // 正式版 Drive 根資料夾
 
 const ALLOWED_ROOTS = {};
 ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'prod' };

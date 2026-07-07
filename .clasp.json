@@ -1,5 +1,16 @@
 {
-  "scriptId": "__PROD_SCRIPT_ID__",
-  "rootDir": ".",
-  "projectId": "__PROD_GCP_PROJECT_ID__"
+  "scriptId": "1KDH4HMzRSaGF7hMJGFEN056s7uokLTC839Sxd3l0n1ILoDwbbyohIiJ_",
+  "rootDir": "",
+  "scriptExtensions": [
+    ".js",
+    ".gs"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ],
+  "filePushOrder": [],
+  "skipSubdirectories": false
 }
