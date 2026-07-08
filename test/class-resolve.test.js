@@ -8,7 +8,7 @@ const { load } = require('./harness');
 const FNS = [
   'classResolveCore_', 'isValidClassName_', 'isValidDeptName_', 'slugifyDeptId_',
   'uniqueDeptId_', 'uniqueClassId_', 'normalizeSuggestedTutors_', 'applyTutorSuggestions_',
-  'computeClassStats_',
+  'computeClassStats_', 'fuseClassDisplayName_', 'deptShortName_',
 ];
 
 function S() { return load(FNS); }
@@ -148,13 +148,14 @@ test('classResolveCore_: 命中 inactive 班級 → 拒絕', () => {
   assert.match(r.error, /class disabled/);
 });
 
-test('classResolveCore_: 找不到 → 建新班，形狀正確（tutors/suggestedTutors 空、any、active）', () => {
+test('classResolveCore_: 找不到 → 建新班，形狀正確（tutors/suggestedTutors 空、any、active、displayName 自動融合）', () => {
   const s = S();
   const r = s.classResolveCore_({ deptId: '資訊管理系', className: '碩一' }, DEPTS, baseClasses(), STU, NOW);
   assert.equal(r.ok, true);
   assert.equal(r.classCreated, true);
   assert.deepEqual(plain(r.cls), {
     id: '資訊管理系_碩一', name: '碩一', deptId: '資訊管理系',
+    systemId: null, displayName: '碩資訊管理一', requiredMeetingOverride: null,
     tutors: [], suggestedTutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: true,
   });
 });

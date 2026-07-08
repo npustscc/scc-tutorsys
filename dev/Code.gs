@@ -26,6 +26,27 @@ ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'dev' };
 // 攻擊者知道 email 也無法冒充。
 const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw'];
 
+// 導師制度預設種子（bootstrap 時若 tutorSystems.json 不存在則以此建立；admin 可事後修改/停用）。
+const DEFAULT_TUTOR_SYSTEMS_ = [
+  { id: 'day_college',      name: '大學日間部', requiredMeetingCount: 4, disabled: false },
+  { id: 'evening_college',  name: '大學進修部', requiredMeetingCount: 4, disabled: false },
+  { id: 'master',           name: '碩士',       requiredMeetingCount: 4, disabled: false },
+  { id: 'master_inservice', name: '碩專',       requiredMeetingCount: 4, disabled: false },
+  { id: 'doctor',           name: '博士',       requiredMeetingCount: 4, disabled: false },
+  { id: 'family',           name: '家族',       requiredMeetingCount: 2, disabled: false },
+];
+
+// 四類宣導關鍵字預設種子（bootstrap 時若 config.keywordRules 不存在則以此建立；admin/staffLead 可調整）。
+const DEFAULT_KEYWORD_RULES_ = {
+  traffic: { label: '交通安全宣導', keywords: ['交通安全', '交通宣導', '酒駕', '車禍', '騎車', '安全帽'] },
+  gender:  { label: '性平宣導',     keywords: ['性平', '性別平等', '性騷擾', '性侵'] },
+  smoking: { label: '菸害防制宣導', keywords: ['菸害', '菸品', '戒菸', '電子煙'] },
+  fraud:   { label: '防詐騙宣導',   keywords: ['詐騙', '防詐', '反詐', '詐欺'] },
+};
+
+// 未指定 requiredMeetingOverride、且班級的 systemId 對不到任何 tutorSystem 時的保底預設。
+const DEFAULT_REQUIRED_MEETING_COUNT_ = 4;
+
 // ── 進入點 ────────────────────────────────────────────────────────────────────
 
 function doPost(e) {
@@ -69,6 +90,13 @@ function doPost(e) {
       case 'classSetWhitelist':      result = classSetWhitelistAction_(params, ctx, userEmail); break;
       case 'classResolve':           result = classResolveAction_(params, ctx, userEmail); break;
       case 'classStats':             result = classStatsAction_(params, ctx, userEmail); break;
+      case 'adminUpsertCollege':     result = adminUpsertCollegeAction_(params, ctx, userEmail); break;
+      case 'adminUpsertTutorSystem': result = adminUpsertTutorSystemAction_(params, ctx, userEmail); break;
+      case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
+      case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
+      case 'recordSetTopics':        result = recordSetTopicsAction_(params, ctx, userEmail); break;
+      case 'overviewStats':          result = overviewStatsAction_(params, ctx, userEmail); break;
+      case 'adminSetKeywordRules':   result = adminSetKeywordRulesAction_(params, ctx, userEmail); break;
       default: return jsonResp_({ error: 'Unknown action: ' + action });
     }
     return jsonResp_(result);
@@ -416,8 +444,15 @@ function isClassTutor_(classInfo, email) {
 // - tutorOf：classes.json 中 tutors 含此 email 且該班 active 的 class id 陣列。
 // 注意：config.users 的 disabled 只影響「後台指派的角色」（admin/director）的取得，
 // 不影響「學生」身分（任何 Google 帳號都能以學生身分上傳，本系統不預建學生名單）。
+// isStaffLead / isStaffAssistant：config.staffLeads / config.staffAssistants 陣列命中且未停用
+// （disabled!==true）。assistantLead：助理綁定的主責 {email,name}——只有當該主責也存在且未停用
+// 才算綁定成功，否則 null（fail-closed：綁定失效的助理不能代為核章，見 resolveActionableStage_）。
 function resolveRoles_(email, config, departments, classes) {
-  const roles = { email: email, isAdmin: false, isDirector: false, deptHeadOf: [], tutorOf: [] };
+  const roles = {
+    email: email, isAdmin: false, isDirector: false,
+    isStaffLead: false, isStaffAssistant: false, assistantLead: null,
+    deptHeadOf: [], tutorOf: [],
+  };
   if (!email) return roles;
 
   if (typeof BOOTSTRAP_ADMINS !== 'undefined' && BOOTSTRAP_ADMINS.indexOf(email) !== -1) {
@@ -428,6 +463,17 @@ function resolveRoles_(email, config, departments, classes) {
   if (u && u.disabled !== true) {
     if (u.role === 'admin') roles.isAdmin = true;
     if (u.role === 'director') roles.isDirector = true;
+  }
+
+  const staffLeads = (config && config.staffLeads) || [];
+  const staffAssistants = (config && config.staffAssistants) || [];
+  const lead = staffLeads.filter(function (s) { return s && s.email === email && s.disabled !== true; })[0];
+  if (lead) roles.isStaffLead = true;
+  const assistant = staffAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true; })[0];
+  if (assistant) {
+    roles.isStaffAssistant = true;
+    const boundLead = staffLeads.filter(function (s) { return s && s.email === assistant.leadEmail && s.disabled !== true; })[0];
+    roles.assistantLead = boundLead ? { email: boundLead.email, name: boundLead.name } : null;
   }
 
   (departments || []).forEach(function (d) {
@@ -455,38 +501,70 @@ function isUploadAllowed_(classInfo, email) {
 // 用於 bootstrap 的 records 過濾，以及 downloadAttachment 的授權檢查。
 function canViewRecord_(record, classInfo, deptInfo, roles, viewerEmail) {
   if (!record || !roles) return false;
-  if (roles.isAdmin || roles.isDirector) return true;
+  if (roles.isAdmin || roles.isDirector || roles.isStaffLead || roles.isStaffAssistant) return true;
   if (record.uploader && record.uploader.email === viewerEmail) return true;
   if (classInfo && (roles.tutorOf || []).indexOf(classInfo.id) !== -1) return true;
   if (deptInfo && (roles.deptHeadOf || []).indexOf(deptInfo.id) !== -1) return true;
   return false;
 }
 
+// 核章鏈定義：班會紀錄 4 關（導師→系主任→學諮中心主責→學諮中心主任）、
+// 導生活動紀錄 2 關（學諮中心主責→學諮中心主任，跳過導師與系主任）。
+function chainForType_(type) {
+  return type === 'activity' ? ['staffLead', 'director'] : ['tutor', 'dept', 'staffLead', 'director'];
+}
+
+// 新紀錄的起始狀態：依類型套用對應核章鏈的第一關。
+function initialStatusForType_(type) {
+  return 'pending_' + chainForType_(type)[0];
+}
+
+// 從 'pending_xxx' 狀態字串取出關卡代號；非 pending_ 狀態（approved/rejected）回傳 null。
+function stageFromStatus_(status) {
+  if (typeof status !== 'string' || status.indexOf('pending_') !== 0) return null;
+  return status.slice('pending_'.length);
+}
+
 // 找出「目前這個 pending 狀態，輪到誰核章／退件」，並判斷 actor 是否有資格動作。
 // admin 視為全關卡的 override（後台管理員可代為處理任何一關，例如職員請假時代核）。
-// 回傳 { ok:true, stage:'tutor'|'dept'|'director' } 或 { ok:false, reason }。
+// 學諮中心主責關（staffLead）：主責本人可動；助理僅在「已綁定且該主責未停用」時可代為動作
+// （resolveRoles_ 的 assistantLead 已 fail-closed，綁定失效的助理 assistantLead 為 null）。
+// 回傳 { ok:true, stage:'tutor'|'dept'|'staffLead'|'director' } 或 { ok:false, reason }。
 function resolveActionableStage_(record, classInfo, deptInfo, roles) {
   if (!record) return { ok: false, reason: 'record not found' };
+  const stage = stageFromStatus_(record.status);
+  if (!stage) return { ok: false, reason: 'record not pending (status=' + record.status + ')' };
 
-  if (roles && roles.isAdmin) {
-    if (record.status === 'pending_tutor') return { ok: true, stage: 'tutor' };
-    if (record.status === 'pending_dept') return { ok: true, stage: 'dept' };
-    if (record.status === 'pending_director') return { ok: true, stage: 'director' };
-    return { ok: false, reason: 'record not pending (status=' + record.status + ')' };
-  }
+  if (roles && roles.isAdmin) return { ok: true, stage: stage };
 
-  if (record.status === 'pending_tutor') {
+  if (stage === 'tutor') {
     const isTutor = classInfo && (roles.tutorOf || []).indexOf(classInfo.id) !== -1;
     return isTutor ? { ok: true, stage: 'tutor' } : { ok: false, reason: 'not a tutor of this class' };
   }
-  if (record.status === 'pending_dept') {
+  if (stage === 'dept') {
     const isHead = deptInfo && (roles.deptHeadOf || []).indexOf(deptInfo.id) !== -1;
     return isHead ? { ok: true, stage: 'dept' } : { ok: false, reason: 'not the department head' };
   }
-  if (record.status === 'pending_director') {
+  if (stage === 'staffLead') {
+    if (roles.isStaffLead) return { ok: true, stage: 'staffLead' };
+    if (roles.isStaffAssistant && roles.assistantLead) return { ok: true, stage: 'staffLead' };
+    return { ok: false, reason: 'not staff lead or bound assistant' };
+  }
+  if (stage === 'director') {
     return roles.isDirector ? { ok: true, stage: 'director' } : { ok: false, reason: 'not the director' };
   }
-  return { ok: false, reason: 'record not pending (status=' + record.status + ')' };
+  return { ok: false, reason: 'unknown stage: ' + stage };
+}
+
+// 助理代主責時，核章顯示身分要「掛主責的名字」，真實動作者另存 actualBy（見 sanitizeRecordForViewer_，
+// 只有 admin/staffLead/staffAssistant/director 看得到 actualBy）。
+// - 主責本人動作、或 tutor/dept/director 關：approver = 動作者本人，actualBy = null。
+// - staffLead 關且動作者是「已綁定的助理」（非主責本人）：approver = 綁定主責的身分，actualBy = 助理 email。
+function resolveApproverIdentity_(stage, roles, userEmail, userName) {
+  if (stage === 'staffLead' && !roles.isStaffLead && roles.isStaffAssistant && roles.assistantLead) {
+    return { email: roles.assistantLead.email, name: roles.assistantLead.name, actualBy: userEmail };
+  }
+  return { email: userEmail, name: userName, actualBy: null };
 }
 
 // 組出一筆全新的紀錄。若上傳者本人就是該班導師，視同「已完成導師核章該關」立刻套用
@@ -502,13 +580,17 @@ function buildNewRecord_(input, classInfo, now) {
     uploader: input.uploader,
     form: input.form || {},
     attachments: input.attachments || [],
-    status: 'pending_tutor',
-    approvals: { tutor: [], dept: null, director: null },
+    status: initialStatusForType_(input.type),
+    approvals: { tutor: [], dept: null, staffLead: null, director: null },
     rejection: null,
+    topics: input.topics || null,
+    editLog: [],
     history: [{ action: 'submit', by: input.uploader.email, at: now, note: null }],
     createdAt: now,
     updatedAt: now,
   };
+  // 只有班會紀錄（meeting）才有導師關；導生活動紀錄（activity）起始就是 pending_staffLead，
+  // 這裡的 advanceOnTutorApproval_ 對 activity 是 no-op（guard: status!=='pending_tutor'）。
   if (input.uploader && input.uploader.isTutor) {
     record = advanceOnTutorApproval_(record, classInfo, input.uploader.email, input.uploader.name, now);
   }
@@ -546,8 +628,22 @@ function advanceOnDeptApproval_(record, deptHeadEmail, deptHeadName, now) {
   if (record.status !== 'pending_dept') return record;
   return Object.assign({}, record, {
     approvals: Object.assign({}, record.approvals, { dept: { email: deptHeadEmail, name: deptHeadName, at: now } }),
-    status: 'pending_director',
+    status: 'pending_staffLead',
     history: record.history.concat([{ action: 'dept_approve', by: deptHeadEmail, at: now, note: null }]),
+    updatedAt: now,
+  });
+}
+
+// 學諮中心主責關。actualBy 非空 = 由已綁定助理代為動作（approvals.staffLead 顯示主責的姓名，
+// actualBy 記錄真正動作的助理 email——sanitizeRecordForViewer_ 會把 actualBy 對非授權角色隱藏）。
+function advanceOnStaffLeadApproval_(record, actorEmail, actorName, actualBy, now) {
+  if (record.status !== 'pending_staffLead') return record;
+  const approval = { email: actorEmail, name: actorName, at: now };
+  if (actualBy) approval.actualBy = actualBy;
+  return Object.assign({}, record, {
+    approvals: Object.assign({}, record.approvals, { staffLead: approval }),
+    status: 'pending_director',
+    history: record.history.concat([{ action: 'staffLead_approve', by: actorEmail, at: now, note: null, actualBy: actualBy || null }]),
     updatedAt: now,
   });
 }
@@ -562,51 +658,107 @@ function advanceOnDirectorApproval_(record, directorEmail, directorName, now) {
   });
 }
 
-// 授權判斷 + 狀態推進的整合入口（供 recordApproveAction_ 呼叫）。
-// resolveActionableStage_ 判斷「這個人現在能不能核這一關」，通過才呼叫對應的 advanceOnXApproval_。
-function recordApprove_(record, classInfo, deptInfo, roles, actorEmail, actorName, now) {
+// meeting 表單欄位（必填 + 六段選填）／activity 表單欄位（必填）白名單：核章關「編輯內容」時
+// 用來過濾 updatedForm，只允許改動這些欄位（同 recordSubmit 表單欄位範圍，不接受任意鍵值）。
+const MEETING_FORM_FIELDS_ = [
+  'date', 'topic', 'chair', 'recorder', 'attendance',
+  'chairReport', 'discussion', 'resolutions', 'tutorRemarks', 'extempore', 'others',
+];
+const ACTIVITY_FORM_FIELDS_ = ['date', 'topic', 'summary', 'attendance'];
+
+function formFieldsForType_(type) {
+  return type === 'activity' ? ACTIVITY_FORM_FIELDS_ : MEETING_FORM_FIELDS_;
+}
+
+// 白名單過濾：只留下該類型允許的欄位，且值必須是字串（非字串一律丟棄，不拋錯——由呼叫端決定
+// 是否要求全部欄位存在；這裡只做「不可夾帶未知鍵/非法型別」的防線）。
+function sanitizeFormFields_(type, form) {
+  const allowed = formFieldsForType_(type);
+  const out = {};
+  allowed.forEach(function (k) {
+    if (form && typeof form[k] === 'string') out[k] = form[k];
+  });
+  return out;
+}
+
+// 核章關「編輯內容」：套用白名單過濾後的欄位、記錄 editLog（changedFields 只列真的變動的鍵）。
+// 沒有任何欄位變動則原樣回傳（不 append 空的 editLog 項目）。byEmail 一律記真實動作者
+// （即使是助理代主責核章，也記助理本人 email，不是「掛名」的主責——見 recordApprove_ 呼叫處註解）。
+function applyFormEdit_(record, updatedForm, byEmail, roleStage, now) {
+  if (!updatedForm || typeof updatedForm !== 'object') return record;
+  const clean = sanitizeFormFields_(record.type, updatedForm);
+  const changed = [];
+  Object.keys(clean).forEach(function (k) {
+    if ((record.form || {})[k] !== clean[k]) changed.push(k);
+  });
+  if (!changed.length) return record;
+  const newForm = Object.assign({}, record.form, clean);
+  const editLog = (record.editLog || []).concat([{ by: byEmail, roleStage: roleStage, at: now, changedFields: changed }]);
+  return Object.assign({}, record, { form: newForm, editLog: editLog, updatedAt: now });
+}
+
+// 授權判斷 + （選填）內容編輯 + 狀態推進的整合入口（供 recordApproveAction_ 呼叫）。
+// resolveActionableStage_ 判斷「這個人現在能不能核這一關」，通過才套用 updatedForm（若有）
+// 並呼叫對應的 advanceOnXApproval_；核准照常推進，不重跑已過關卡。
+// userName：動作者本人姓名（config.users 查得）；助理代主責時 approver 身分由
+// resolveApproverIdentity_ 換成「綁定主責」的 email/name，actualBy 存助理本人 email。
+function recordApprove_(record, classInfo, deptInfo, roles, userEmail, userName, updatedForm, now) {
   const chk = resolveActionableStage_(record, classInfo, deptInfo, roles);
   if (!chk.ok) return { ok: false, error: chk.reason };
+  const approver = resolveApproverIdentity_(chk.stage, roles, userEmail, userName);
+  let rec = applyFormEdit_(record, updatedForm, userEmail, chk.stage, now);
   let updated;
-  if (chk.stage === 'tutor') updated = advanceOnTutorApproval_(record, classInfo, actorEmail, actorName, now);
-  else if (chk.stage === 'dept') updated = advanceOnDeptApproval_(record, actorEmail, actorName, now);
-  else updated = advanceOnDirectorApproval_(record, actorEmail, actorName, now);
+  if (chk.stage === 'tutor') updated = advanceOnTutorApproval_(rec, classInfo, approver.email, approver.name, now);
+  else if (chk.stage === 'dept') updated = advanceOnDeptApproval_(rec, approver.email, approver.name, now);
+  else if (chk.stage === 'staffLead') updated = advanceOnStaffLeadApproval_(rec, approver.email, approver.name, approver.actualBy, now);
+  else updated = advanceOnDirectorApproval_(rec, approver.email, approver.name, now);
   return { ok: true, record: updated, stage: chk.stage };
 }
 
-// 退件：三關都可退（用同一套 resolveActionableStage_ 判斷「現在輪到誰」），必須填理由。
-function applyRejection_(record, byEmail, role, reason, now) {
+// 退件：任何一關都可退（用同一套 resolveActionableStage_ 判斷「現在輪到誰」），必須填理由，
+// 一律退回「導師」（狀態統一設為 rejected；由 canResubmit_ 規定只有該班導師能修正重送，
+// 不論是哪一關退的、也不論原上傳者是誰——見 canResubmit_ 註解）。
+function applyRejection_(record, byEmail, byName, actualBy, role, reason, now) {
+  const rejection = { by: byEmail, name: byName, role: role, reason: reason, at: now };
+  if (actualBy) rejection.actualBy = actualBy;
   return Object.assign({}, record, {
     status: 'rejected',
-    rejection: { by: byEmail, role: role, reason: reason, at: now },
-    history: record.history.concat([{ action: 'reject', by: byEmail, at: now, note: reason }]),
+    rejection: rejection,
+    history: record.history.concat([{ action: 'reject', by: byEmail, at: now, note: reason, actualBy: actualBy || null }]),
     updatedAt: now,
   });
 }
 
-function recordReject_(record, classInfo, deptInfo, roles, actorEmail, reason, now) {
+function recordReject_(record, classInfo, deptInfo, roles, userEmail, userName, reason, updatedForm, now) {
   const chk = resolveActionableStage_(record, classInfo, deptInfo, roles);
   if (!chk.ok) return { ok: false, error: chk.reason };
   if (!reason || !String(reason).trim()) return { ok: false, error: 'reason required' };
-  const updated = applyRejection_(record, actorEmail, chk.stage, reason, now);
+  const approver = resolveApproverIdentity_(chk.stage, roles, userEmail, userName);
+  const rec = applyFormEdit_(record, updatedForm, userEmail, chk.stage, now);
+  const updated = applyRejection_(rec, approver.email, approver.name, approver.actualBy, chk.stage, reason, now);
   return { ok: true, record: updated, stage: chk.stage };
 }
 
-// 退件重送：只有原上傳者本人、且紀錄目前是 rejected 狀態，才能重送。
-function canResubmit_(record, actorEmail) {
+// 退件重送權限：一律「退回導師」——不論是哪一關退的、原上傳者是誰，只有該班導師
+// （isClassTutor_）能修正重送；且紀錄必須目前是 rejected 狀態。
+// （與舊版差異：舊版限「原上傳者本人」，新版限「該班導師」——因為新規則不論哪一關退件，
+// 責任都收斂回導師身上，導師不必是原上傳者也能代表全班修正重送。）
+function canResubmit_(record, classInfo, actorEmail) {
   if (!record) return { ok: false, error: 'record not found' };
   if (record.status !== 'rejected') return { ok: false, error: 'record not rejected' };
-  if (!record.uploader || record.uploader.email !== actorEmail) return { ok: false, error: 'not the original uploader' };
+  if (!isClassTutor_(classInfo, actorEmail)) return { ok: false, error: 'only a tutor of this class may resubmit' };
   return { ok: true };
 }
 
-// 重送後狀態回 pending_tutor、approvals 清空、rejection 清空，history 保留累加（不清空）。
-// 「重跑」：若重送者本人是該班導師，立刻視同已完成導師核章該關（與初次上傳同一套邏輯），
-// 單導師/雙導師 any 直接進 pending_dept，雙導師 all 則停在 pending_tutor 等另一位導師。
+// 重送後「從該紀錄類型的第一關重跑」：meeting 回 pending_tutor（重送者必為導師，立即視同已完成
+// 導師核章該關，套用同一套 advanceOnTutorApproval_ 邏輯——單導師/雙導師 any 直接進 pending_dept，
+// 雙導師 all 則停在 pending_tutor 等另一位導師）；activity 沒有導師關，直接回 pending_staffLead。
+// approvals/topics 的 auto 欄位由呼叫端（recordResubmitAction_）視需要重新掃描關鍵字覆蓋；
+// 這裡只重置核章鏈本身。history 保留累加（不清空）。
 function applyResubmit_(record, updatedForm, updatedAttachments, byEmail, now) {
   return Object.assign({}, record, {
-    status: 'pending_tutor',
-    approvals: { tutor: [], dept: null, director: null },
+    status: initialStatusForType_(record.type),
+    approvals: { tutor: [], dept: null, staffLead: null, director: null },
     rejection: null,
     form: updatedForm || record.form,
     attachments: updatedAttachments || record.attachments,
@@ -616,10 +768,10 @@ function applyResubmit_(record, updatedForm, updatedAttachments, byEmail, now) {
 }
 
 function recordResubmit_(record, classInfo, actorEmail, actorName, updatedForm, updatedAttachments, now) {
-  const chk = canResubmit_(record, actorEmail);
+  const chk = canResubmit_(record, classInfo, actorEmail);
   if (!chk.ok) return chk;
   let next = applyResubmit_(record, updatedForm, updatedAttachments, actorEmail, now);
-  if (isClassTutor_(classInfo, actorEmail)) {
+  if (next.type !== 'activity' && isClassTutor_(classInfo, actorEmail)) {
     next = advanceOnTutorApproval_(next, classInfo, actorEmail, actorName, now);
   }
   return { ok: true, record: next };
@@ -658,6 +810,192 @@ function sanitizeClassesForViewer_(classes, roles) {
       delete copy.uploadWhitelist;
     }
     return copy;
+  });
+}
+
+// 依呼叫者角色過濾單筆 record 的敏感欄位（actualBy：助理代主責核章時的真實身分）。
+// 只有 admin / director / staffLead / staffAssistant 看得到 actualBy；其他人（含導師、系主任、
+// 提交者本人）拿到的 approvals.*.actualBy 與 history[].actualBy / rejection.actualBy 一律移除，
+// 只留「掛名」的主責姓名——助理不能替真人身分曝光給非學諮端角色。用深拷貝避免就地修改輸入。
+function sanitizeRecordForViewer_(record, roles) {
+  if (!record) return record;
+  const privileged = !!(roles && (roles.isAdmin || roles.isDirector || roles.isStaffLead || roles.isStaffAssistant));
+  if (privileged) return record;
+  const copy = JSON.parse(JSON.stringify(record));
+  if (copy.approvals) {
+    ['dept', 'staffLead', 'director'].forEach(function (k) {
+      if (copy.approvals[k] && copy.approvals[k].actualBy) delete copy.approvals[k].actualBy;
+    });
+    if (Array.isArray(copy.approvals.tutor)) {
+      copy.approvals.tutor.forEach(function (a) { if (a && a.actualBy) delete a.actualBy; });
+    }
+  }
+  if (copy.rejection && copy.rejection.actualBy) delete copy.rejection.actualBy;
+  if (Array.isArray(copy.history)) {
+    copy.history.forEach(function (h) { if (h && h.actualBy) delete h.actualBy; });
+  }
+  // editLog.by 記真實動作者；staffLead 關的編輯（主責或助理）對非學諮端角色一律隱藏 by，
+  // 否則助理在核章時順手改內容會經 editLog 洩漏真實身分（與 actualBy 同一套遮罩原則）。
+  if (Array.isArray(copy.editLog)) {
+    copy.editLog.forEach(function (e) { if (e && e.roleStage === 'staffLead' && e.by) delete e.by; });
+  }
+  return copy;
+}
+
+function sanitizeRecordsForViewer_(records, roles) {
+  return (records || []).map(function (r) { return sanitizeRecordForViewer_(r, roles); });
+}
+
+// ── 四類宣導關鍵字自動偵測（class.form 所有文字欄位 vs config.keywordRules）───────
+// auto:true 代表由關鍵字掃描自動勾選；auto:false 代表已被人工手動調整過（見 applySetTopics_）。
+// 重新掃描（提交/重送/編輯內容時）只覆蓋 auto:true 的項目，人工調整過的（auto:false）維持原狀，
+// 不被自動掃描蓋回去。
+function detectTopics_(form, keywordRules) {
+  const text = Object.keys(form || {}).map(function (k) { return String(form[k] || ''); }).join('\n');
+  const result = {};
+  Object.keys(keywordRules || {}).forEach(function (key) {
+    const kws = (keywordRules[key] && keywordRules[key].keywords) || [];
+    const hit = kws.some(function (kw) { return kw && text.indexOf(kw) !== -1; });
+    result[key] = { checked: hit, auto: true };
+  });
+  return result;
+}
+
+function mergeTopicsOnEdit_(existingTopics, form, keywordRules) {
+  const detected = detectTopics_(form, keywordRules);
+  const out = {};
+  Object.keys(detected).forEach(function (key) {
+    const prev = (existingTopics || {})[key];
+    out[key] = (prev && prev.auto === false) ? prev : detected[key];
+  });
+  return out;
+}
+
+// 手動勾選調整權限：只有 staffLead 關的驗證者（主責/已綁定助理）與 director/admin 能動。
+// 助理必須「已綁定且主責未停用」（assistantLead 非 null）才算數——與 resolveActionableStage_
+// 的 fail-closed 綁定規則一致，綁定失效的助理不能動 topics。
+function canSetTopics_(roles) {
+  if (!roles) return false;
+  if (roles.isAdmin || roles.isDirector || roles.isStaffLead) return true;
+  return !!(roles.isStaffAssistant && roles.assistantLead);
+}
+
+// 手動調整後該項目 auto 一律變 false（人工鎖定，之後自動掃描不會再覆蓋，見 mergeTopicsOnEdit_）。
+// topicsPatch 只認已存在於 record.topics 的鍵（四類固定 key），未知鍵忽略；checked 必須是布林。
+// byEmail = 對外顯示身分（助理代主責時為綁定主責的 email）；actualBy = 助理真實 email
+// （sanitizeRecordForViewer_ 會對非學諮端角色隱藏 history 的 actualBy，同核章的遮罩原則）。
+function applySetTopics_(record, topicsPatch, byEmail, actualBy, now) {
+  const cur = record.topics || {};
+  const next = Object.assign({}, cur);
+  Object.keys(topicsPatch || {}).forEach(function (key) {
+    if (!next[key]) return;
+    const patch = topicsPatch[key];
+    if (patch && typeof patch.checked === 'boolean') {
+      next[key] = { checked: patch.checked, auto: false };
+    }
+  });
+  return Object.assign({}, record, {
+    topics: next, updatedAt: now,
+    history: record.history.concat([{ action: 'setTopics', by: byEmail, at: now, note: null, actualBy: actualBy || null }]),
+  });
+}
+
+// ── displayName 自動融合（建議值，admin 可事後改）───────────────────────────────
+// 系簡稱 = 系所名去尾字「系」。四技一A→「四+系簡+一A」、四技進一A→「進四+系簡+一A」、
+// 碩一→「碩+系簡+一」、碩專一B→「碩專+系簡+一B」、博一→「博+系簡+一」、
+// 家族→「系簡+家族(導師名)」（家族由呼叫端帶 tutorName，未帶則不含括號）；
+// 技優/產訓/產專/海青等已知但無法歸入上述規則的前綴→前綴保留、系簡插入其後；
+// 完全無法判別 → 直接「系簡+原名」。純字串規則，不查資料庫，僅供 UI 預填建議值。
+function deptShortName_(deptName) {
+  const n = String(deptName || '').trim();
+  return (n.length > 1 && n.slice(-1) === '系') ? n.slice(0, -1) : n;
+}
+
+function fuseClassDisplayName_(className, deptName, systemId, tutorName) {
+  const name = String(className || '').trim();
+  const short = deptShortName_(deptName);
+  if (!name) return short;
+  if (name.indexOf('家族') !== -1) {
+    return tutorName ? (short + '家族(' + tutorName + ')') : (short + '家族');
+  }
+  if (name.indexOf('四技進') === 0) return '進四' + short + name.slice(3);
+  if (name.indexOf('四技') === 0) return '四' + short + name.slice(2);
+  if (name.indexOf('碩專') === 0) return '碩專' + short + name.slice(2);
+  if (name.indexOf('碩') === 0) return '碩' + short + name.slice(1);
+  if (name.indexOf('博') === 0) return '博' + short + name.slice(1);
+  const otherPrefixes = ['技優', '產訓', '產專', '海青'];
+  for (let i = 0; i < otherPrefixes.length; i++) {
+    const p = otherPrefixes[i];
+    if (name.indexOf(p) === 0) return p + short + name.slice(p.length);
+  }
+  return short + name;
+}
+
+// 應繳班會份數解析：requiredMeetingOverride 為數字（含 0＝本學期免繳）時優先套用；
+// 否則查 class.systemId 對應的 tutorSystem.requiredMeetingCount（停用的制度不採用其值，
+// 視同查無制度）；都查不到則用保底預設 DEFAULT_REQUIRED_MEETING_COUNT_。
+function resolveRequiredMeetingCount_(classInfo, tutorSystems) {
+  if (classInfo && classInfo.requiredMeetingOverride !== undefined && classInfo.requiredMeetingOverride !== null) {
+    const ov = Number(classInfo.requiredMeetingOverride);
+    if (!isNaN(ov)) return ov;
+  }
+  const sys = (tutorSystems || []).filter(function (s) {
+    return s && s.id === (classInfo && classInfo.systemId) && s.disabled !== true;
+  })[0];
+  if (sys && typeof sys.requiredMeetingCount === 'number') return sys.requiredMeetingCount;
+  return DEFAULT_REQUIRED_MEETING_COUNT_;
+}
+
+// ── 統計總表彙總（純函式）：依 學院→系所→班級 分組，只回彙總與日期，不回紀錄內文 ──────
+function overviewStats_(colleges, departments, classes, tutorSystems, records, keywordTopicKeys) {
+  const collegeById = {};
+  (colleges || []).forEach(function (c) { if (c) collegeById[c.id] = c; });
+  const deptById = {};
+  (departments || []).forEach(function (d) { if (d) deptById[d.id] = d; });
+  const recordsByClass = {};
+  (records || []).forEach(function (r) {
+    if (!r || !r.classId) return;
+    (recordsByClass[r.classId] = recordsByClass[r.classId] || []).push(r);
+  });
+  const topicKeys = keywordTopicKeys || ['traffic', 'gender', 'smoking', 'fraud'];
+
+  return (classes || []).filter(function (c) { return c && c.active !== false; }).map(function (c) {
+    const dept = deptById[c.deptId];
+    const college = (dept && dept.collegeId) ? collegeById[dept.collegeId] : null;
+    const classRecords = recordsByClass[c.id] || [];
+    const meetingRecords = classRecords.filter(function (r) { return r.type === 'meeting'; });
+    const activityRecords = classRecords.filter(function (r) { return r.type === 'activity'; });
+    const submittedCount = meetingRecords.length;
+    const approvedCount = meetingRecords.filter(function (r) { return r.status === 'approved'; }).length;
+    const pendingCount = meetingRecords.filter(function (r) { return String(r.status || '').indexOf('pending') === 0; }).length;
+
+    const topics = {};
+    topicKeys.forEach(function (key) {
+      const dates = meetingRecords
+        .filter(function (r) { return r.topics && r.topics[key] && r.topics[key].checked; })
+        .map(function (r) { return r.form && r.form.date; })
+        .filter(Boolean);
+      topics[key] = { checked: dates.length > 0, dates: dates };
+    });
+
+    const act = activityRecords[0] || null;
+    const activity = act
+      ? { submitted: true, date: (act.form && act.form.date) || null, approved: act.status === 'approved' }
+      : { submitted: false, date: null, approved: false };
+
+    return {
+      college: college ? college.name : null,
+      dept: dept ? dept.name : c.deptId,
+      classId: c.id,
+      displayName: c.displayName || c.name,
+      tutors: (c.tutors || []).map(function (t) { return t.name; }),
+      required: resolveRequiredMeetingCount_(c, tutorSystems),
+      submittedCount: submittedCount,
+      approvedCount: approvedCount,
+      pendingCount: pendingCount,
+      topics: topics,
+      activity: activity,
+    };
   });
 }
 
@@ -821,6 +1159,8 @@ function classResolveCore_(params, departments, classes, userEmail, now) {
     cls = {
       id: uniqueClassId_(dept.id + '_' + slugifyDeptId_(className), classes),
       name: className, deptId: dept.id,
+      systemId: null, displayName: fuseClassDisplayName_(className, dept.name, null),
+      requiredMeetingOverride: null,
       tutors: [], suggestedTutors: [],
       dualApprovalMode: 'any', uploadWhitelist: [], active: true,
     };
@@ -855,6 +1195,126 @@ function computeClassStats_(records, classId) {
   return stats;
 }
 
+// ── Excel 匯入 v2：學院/系所/導師制度以名稱比對，不存在就建立；停用的一律 fail-closed 拒絕 ──
+// （防重打同名繞過停用，同 classResolveCore_ 的既有安全規則，不可退化）。
+// 純函式：不做 I/O，输入/輸出都是完整陣列，供呼叫端（adminImportRosterAction_）逐列 fold，
+// 讓同一批匯入內、後面列可以命中前面列剛建立的學院/系所/制度，不會重複建立。
+function findByNameExact_(list, name) {
+  return (list || []).filter(function (x) { return x && x.name === name; })[0];
+}
+
+function resolveOrCreateCollege_(name, colleges) {
+  const t = String(name || '').trim();
+  if (!t) return { ok: true, colleges: colleges, college: null };
+  const found = findByNameExact_(colleges, t);
+  if (found && found.disabled === true) return { ok: false, error: 'college disabled: ' + found.name };
+  if (found) return { ok: true, colleges: colleges, college: found };
+  const created = { id: uniqueDeptId_(slugifyDeptId_(t), colleges), name: t, order: (colleges || []).length, disabled: false };
+  return { ok: true, colleges: (colleges || []).concat([created]), college: created };
+}
+
+function resolveOrCreateDept_(name, collegeId, departments) {
+  const t = String(name || '').trim();
+  if (!t) return { ok: false, error: 'deptName required' };
+  const found = findByNameExact_(departments, t);
+  if (found && found.active === false) return { ok: false, error: 'department disabled: ' + found.name };
+  if (found) return { ok: true, departments: departments, dept: found };
+  const created = { id: uniqueDeptId_(slugifyDeptId_(t), departments), name: t, headEmail: '', headName: '', collegeId: collegeId || null, active: true };
+  return { ok: true, departments: (departments || []).concat([created]), dept: created };
+}
+
+function resolveOrCreateSystem_(name, tutorSystems) {
+  const t = String(name || '').trim();
+  if (!t) return { ok: true, tutorSystems: tutorSystems, system: null };
+  const found = findByNameExact_(tutorSystems, t);
+  if (found && found.disabled === true) return { ok: false, error: 'tutorSystem disabled: ' + found.name };
+  if (found) return { ok: true, tutorSystems: tutorSystems, system: found };
+  const created = { id: uniqueDeptId_(slugifyDeptId_(t), tutorSystems), name: t, requiredMeetingCount: null, disabled: false };
+  return { ok: true, tutorSystems: (tutorSystems || []).concat([created]), system: created };
+}
+
+// 應繳班會份數欄位解析：空白 → null（用制度預設）；'0' → 0（本學期免繳）；其餘轉數字，非數字拒絕。
+function parseRequiredMeetingCountField_(v) {
+  if (v === undefined || v === null || String(v).trim() === '') return { ok: true, value: null };
+  const n = Number(v);
+  if (isNaN(n)) return { ok: false, error: 'invalid requiredMeetingCount: ' + v };
+  return { ok: true, value: n };
+}
+
+function buildImportTutors_(row) {
+  const tutors = [];
+  if (row.tutor1Name && String(row.tutor1Name).trim()) {
+    tutors.push({ name: String(row.tutor1Name).trim(), email: String(row.tutor1Email || '').trim().toLowerCase() });
+  }
+  if (row.tutor2Name && String(row.tutor2Name).trim()) {
+    tutors.push({ name: String(row.tutor2Name).trim(), email: String(row.tutor2Email || '').trim().toLowerCase() });
+  }
+  return tutors;
+}
+
+// 匯入一列（學院/系所/導師制度/班級名稱(原始)/班級顯示名稱/應繳班會份數/導師1/導師2）。
+// 班級以 (deptId, classNameRaw) 比對既有（同 classResolveCore_ 語意）；找不到就建立，
+// 找到則更新 deptId/systemId/displayName（若本列有給）/requiredMeetingOverride/tutors
+// （Excel 視為權威來源，這裡走 admin 匯入，直接寫入 tutors，不經 suggestedTutors 待確認流程）。
+function importRosterRow_(row, colleges, departments, tutorSystems, classes, now) {
+  if (!isValidClassName_(row && row.classNameRaw)) return { ok: false, error: 'invalid classNameRaw: ' + (row && row.classNameRaw) };
+  if (!isValidDeptName_(row && row.deptName)) return { ok: false, error: 'invalid deptName: ' + (row && row.deptName) };
+
+  const collegeRes = resolveOrCreateCollege_(row.collegeName, colleges);
+  if (!collegeRes.ok) return collegeRes;
+  const deptRes = resolveOrCreateDept_(row.deptName, collegeRes.college ? collegeRes.college.id : null, departments);
+  if (!deptRes.ok) return deptRes;
+  const systemRes = resolveOrCreateSystem_(row.systemName, tutorSystems);
+  if (!systemRes.ok) return systemRes;
+  const reqRes = parseRequiredMeetingCountField_(row.requiredMeetingCount);
+  if (!reqRes.ok) return reqRes;
+
+  const className = String(row.classNameRaw).trim();
+  let cls = (classes || []).filter(function (c) { return c && c.deptId === deptRes.dept.id && c.name === className; })[0];
+  if (cls && cls.active === false) return { ok: false, error: 'class disabled: ' + cls.id };
+
+  const tutors = buildImportTutors_(row);
+  const explicitDisplayName = row.classDisplayName && String(row.classDisplayName).trim();
+  let nextClasses = classes || [];
+  let classCreated = false;
+
+  if (!cls) {
+    const fused = explicitDisplayName || fuseClassDisplayName_(
+      className, deptRes.dept.name, systemRes.system ? systemRes.system.id : null,
+      tutors.length ? tutors[0].name : undefined
+    );
+    cls = {
+      id: uniqueClassId_(deptRes.dept.id + '_' + slugifyDeptId_(className), classes),
+      name: className, deptId: deptRes.dept.id,
+      systemId: systemRes.system ? systemRes.system.id : null,
+      displayName: fused,
+      requiredMeetingOverride: reqRes.value,
+      tutors: tutors, suggestedTutors: [],
+      dualApprovalMode: 'any', uploadWhitelist: [], active: true,
+    };
+    nextClasses = nextClasses.concat([cls]);
+    classCreated = true;
+  } else {
+    const updated = Object.assign({}, cls, {
+      deptId: deptRes.dept.id,
+      systemId: systemRes.system ? systemRes.system.id : cls.systemId,
+      displayName: explicitDisplayName || cls.displayName,
+      requiredMeetingOverride: reqRes.value,
+      tutors: tutors.length ? tutors : cls.tutors,
+    });
+    nextClasses = nextClasses.map(function (c) { return c.id === cls.id ? updated : c; });
+    cls = updated;
+  }
+
+  return {
+    ok: true,
+    colleges: collegeRes.colleges, departments: deptRes.departments,
+    tutorSystems: systemRes.tutorSystems, classes: nextClasses,
+    college: collegeRes.college, dept: deptRes.dept, system: systemRes.system,
+    cls: cls, classCreated: classCreated,
+  };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Action handlers（會呼叫 Drive/LockService，不是純函式，不在單元測試範圍）──
 // ══════════════════════════════════════════════════════════════════════════════
@@ -862,11 +1322,39 @@ function computeClassStats_(records, classId) {
 // bootstrap：一次回傳 config（去敏感欄位：users 只有 admin 看得到）/departments/classes/
 // semesters/當學期 records（依呼叫者角色過濾看得到的 records，用 canViewRecord_）。
 // 任何已通過認證的 Google 帳號都可以呼叫（這就是「學生」角色的入口）。
+// tutorSystems.json 首次不存在時以 DEFAULT_TUTOR_SYSTEMS_ 建立（雙重檢查鎖，避免併發首跑時
+// 兩個請求都判定「不存在」而各寫一次）。readJsonSafe_ 的 fallback 傳 null 以便和「存在但空陣列」區分。
+function ensureTutorSystemsSeeded_(ctx) {
+  const existing = readJsonSafe_('tutorSystems.json', ctx, null);
+  if (existing !== null) return existing;
+  return withLock_(function () {
+    const again = readJsonSafe_('tutorSystems.json', ctx, null);
+    if (again !== null) return again;
+    writeJsonPath_('tutorSystems.json', DEFAULT_TUTOR_SYSTEMS_, ctx);
+    return DEFAULT_TUTOR_SYSTEMS_;
+  });
+}
+
+// config.keywordRules 首次不存在時以 DEFAULT_KEYWORD_RULES_ 建立（同樣的雙重檢查鎖模式）。
+function ensureKeywordRulesSeeded_(ctx, config) {
+  if (config.keywordRules) return config.keywordRules;
+  return withLock_(function () {
+    const fresh = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    if (fresh.keywordRules) return fresh.keywordRules;
+    fresh.keywordRules = DEFAULT_KEYWORD_RULES_;
+    writeJsonPath_('config.json', fresh, ctx);
+    return fresh.keywordRules;
+  });
+}
+
 function bootstrapAction_(params, ctx, userEmail) {
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const departments = readJsonSafe_('departments.json', ctx, []);
   const classes = readJsonSafe_('classes.json', ctx, []);
   const semesters = readJsonSafe_('semesters.json', ctx, []);
+  const colleges = readJsonSafe_('colleges.json', ctx, []);
+  const tutorSystems = ensureTutorSystemsSeeded_(ctx);
+  const keywordRules = ensureKeywordRulesSeeded_(ctx, config);
   const roles = resolveRoles_(userEmail, config, departments, classes);
 
   // params.semester 為 client 傳入，必須通過白名單驗證（見 isValidSemesterId_ 註解）；
@@ -890,13 +1378,21 @@ function bootstrapAction_(params, ctx, userEmail) {
     email: userEmail,
     roles: roles,
     departments: departments,
+    colleges: colleges,
+    tutorSystems: tutorSystems,
     // uploadWhitelist（學生 gmail 清單）只給該班導師/admin 看，其他人只拿到 hasWhitelist 布林。
     classes: sanitizeClassesForViewer_(classes, roles),
     semesters: semesters,
     semester: semesterId,
-    records: visibleRecords,
+    // actualBy（助理代主責核章的真實身分）對非學諮端/admin 角色隱藏，見 sanitizeRecordForViewer_。
+    records: sanitizeRecordsForViewer_(visibleRecords, roles),
     settings: config.settings || {},
+    keywordRules: keywordRules,
     users: roles.isAdmin ? config.users : undefined,
+    // staffLeads/staffAssistants 名單含 email 個資，只有 admin 看得到完整清單；其他角色只需要
+    // 「自己是不是」，roles 已算好（isStaffLead/isStaffAssistant/assistantLead），不需整份名單。
+    staffLeads: roles.isAdmin ? (config.staffLeads || []) : undefined,
+    staffAssistants: roles.isAdmin ? (config.staffAssistants || []) : undefined,
   };
 }
 
@@ -927,6 +1423,12 @@ function recordSubmitAction_(params, ctx, userEmail) {
     isTutor: isTutor,
   };
 
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const keywordRules = config.keywordRules || DEFAULT_KEYWORD_RULES_;
+  const form = params.form || {};
+  // 四類宣導關鍵字自動偵測：只有班會紀錄（meeting）需要 topics；導生活動紀錄不適用。
+  const topics = type === 'meeting' ? detectTopics_(form, keywordRules) : null;
+
   return withLock_(function () {
     const path = 'records_' + semester + '.json';
     const data = readJsonSafe_(path, ctx, { records: [] });
@@ -935,7 +1437,7 @@ function recordSubmitAction_(params, ctx, userEmail) {
     const id = Utilities.getUuid();
     const record = buildNewRecord_({
       id: id, type: type, semester: semester, classId: classId, deptId: classInfo.deptId,
-      uploader: uploader, form: params.form || {}, attachments: params.attachments || [],
+      uploader: uploader, form: form, attachments: params.attachments || [], topics: topics,
     }, classInfo, now);
     data.records.push(record);
     writeJsonPath_(path, data, ctx);
@@ -944,12 +1446,17 @@ function recordSubmitAction_(params, ctx, userEmail) {
   });
 }
 
-// recordResubmit：只有原上傳者、且該筆目前是 rejected 狀態才可呼叫（canResubmit_ 把關）。
+// recordResubmit：一律「退回導師」——只有該班導師（isClassTutor_）能重送，不限原上傳者
+// （canResubmit_ 把關，見其註解）。重送後的表單重新掃描關鍵字，人工鎖定過的 topics（auto:false）
+// 不會被自動掃描覆蓋（mergeTopicsOnEdit_）。
 function recordResubmitAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId;
   if (!semester || !recordId) throw new Error('semester and recordId required');
   requireValidSemester_(semester, ctx);
   const classes = readJsonSafe_('classes.json', ctx, []);
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const keywordRules = config.keywordRules || DEFAULT_KEYWORD_RULES_;
+  const roles = loadRolesForCtx_(ctx, userEmail);
 
   return withLock_(function () {
     const path = 'records_' + semester + '.json';
@@ -963,25 +1470,39 @@ function recordResubmitAction_(params, ctx, userEmail) {
     const actorName = params.uploaderName || (record.uploader && record.uploader.name) || '';
     const res = recordResubmit_(record, classInfo, userEmail, actorName, params.form, params.attachments, now);
     if (!res.ok) throw new Error(res.error);
+    let updated = res.record;
+    if (updated.type === 'meeting' && params.form) {
+      updated = Object.assign({}, updated, { topics: mergeTopicsOnEdit_(record.topics, updated.form, keywordRules) });
+    }
     // 附件歸屬驗證：重送後的整組 attachments（含沿用的與新增的）全部重驗，簡單為上。
     // 用 record 上既有的 semester/classId（存檔值，非 client 傳入值）當基準。
-    assertAttachmentsBelong_(res.record.attachments, record.semester, record.classId, ctx);
-    list[idx] = res.record;
+    assertAttachmentsBelong_(updated.attachments, record.semester, record.classId, ctx);
+    list[idx] = updated;
     data.records = list;
     writeJsonPath_(path, data, ctx);
     appendAuditLog_(ctx, { action: 'recordResubmit', by: userEmail, recordId: recordId, at: now });
-    return { record: res.record };
+    return { record: sanitizeRecordForViewer_(updated, roles) };
   });
 }
 
-// recordGetMine：只回傳呼叫者自己上傳的紀錄，不需額外角色判斷（本來就只查自己）。
+// recordGetMine：回傳呼叫者自己上傳的紀錄；若呼叫者本身是某班導師，另外回傳該班本學期的
+// 全部紀錄（含他人上傳）供「導師個人後台」顯示繳交進度/繳交人/目前關卡/退件狀態——
+// 只回自己帶的班，不含未授權的其他班（roles.tutorOf 已由 resolveRoles_ 算好）。
 function recordGetMineAction_(params, ctx, userEmail) {
   const semester = params.semester;
   if (!semester) throw new Error('semester required');
   requireValidSemester_(semester, ctx);
+  const roles = loadRolesForCtx_(ctx, userEmail);
   const data = readJsonSafe_('records_' + semester + '.json', ctx, { records: [] });
-  const mine = (data.records || []).filter(function (r) { return r.uploader && r.uploader.email === userEmail; });
-  return { records: mine };
+  const all = data.records || [];
+  const mine = all.filter(function (r) { return r.uploader && r.uploader.email === userEmail; });
+  const tutorClassRecords = roles.tutorOf.length
+    ? all.filter(function (r) { return roles.tutorOf.indexOf(r.classId) !== -1; })
+    : [];
+  return {
+    records: sanitizeRecordsForViewer_(mine, roles),
+    tutorClassRecords: sanitizeRecordsForViewer_(tutorClassRecords, roles),
+  };
 }
 
 // uploadAttachment：與 recordSubmit 同一套白名單判斷（避免非授權帳號塞檔案進 Drive）。
@@ -1043,7 +1564,10 @@ function downloadAttachmentAction_(params, ctx, userEmail) {
 }
 
 // recordApprove：依 record.status 判斷輪到誰核章（resolveActionableStage_），錯誤角色/
-// 錯誤狀態一律拒絕；admin 可代為處理任何一關。
+// 錯誤狀態一律拒絕；admin 可代為處理任何一關。選填 params.updatedForm：僅該關的 actionable
+// 驗證者可帶，套用白名單過濾後 append editLog，核准照常推進，不重跑已過關卡（recordApprove_）。
+// 學諮中心主責關若由已綁定助理動作，approvals 顯示主責姓名、actualBy 記助理真實 email
+// （resolveApproverIdentity_）；回傳前依呼叫者角色 sanitize 掉非授權者看不到的 actualBy。
 function recordApproveAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId;
   if (!semester || !recordId) throw new Error('semester and recordId required');
@@ -1054,6 +1578,7 @@ function recordApproveAction_(params, ctx, userEmail) {
   const classes = readJsonSafe_('classes.json', ctx, []);
   const roles = resolveRoles_(userEmail, config, departments, classes);
   const actorName = (config.users && config.users[userEmail] && config.users[userEmail].name) || userEmail;
+  const keywordRules = config.keywordRules || DEFAULT_KEYWORD_RULES_;
 
   return withLock_(function () {
     const path = 'records_' + semester + '.json';
@@ -1065,17 +1590,23 @@ function recordApproveAction_(params, ctx, userEmail) {
     const classInfo = classes.filter(function (c) { return c.id === record.classId; })[0];
     const deptInfo = departments.filter(function (d) { return d.id === record.deptId; })[0];
     const now = new Date().toISOString();
-    const res = recordApprove_(record, classInfo, deptInfo, roles, userEmail, actorName, now);
+    const res = recordApprove_(record, classInfo, deptInfo, roles, userEmail, actorName, params.updatedForm, now);
     if (!res.ok) throw new Error(res.error);
-    list[idx] = res.record;
+    let updated = res.record;
+    if (updated.type === 'meeting' && params.updatedForm) {
+      updated = Object.assign({}, updated, { topics: mergeTopicsOnEdit_(record.topics, updated.form, keywordRules) });
+    }
+    list[idx] = updated;
     data.records = list;
     writeJsonPath_(path, data, ctx);
     appendAuditLog_(ctx, { action: 'recordApprove', by: userEmail, recordId: recordId, stage: res.stage, at: now });
-    return { record: res.record };
+    return { record: sanitizeRecordForViewer_(updated, roles) };
   });
 }
 
-// recordReject：同一套 resolveActionableStage_ 判斷「輪到誰」，加上必填理由。
+// recordReject：同一套 resolveActionableStage_ 判斷「輪到誰」，加上必填理由。一律退回導師
+// （applyRejection_ 內狀態統一設 rejected，重送資格由 canResubmit_ 限定該班導師，見其註解）。
+// 選填 params.updatedForm 語意同 recordApprove（白名單過濾 + editLog）。
 function recordRejectAction_(params, ctx, userEmail) {
   const semester = params.semester, recordId = params.recordId, reason = params.reason;
   if (!semester || !recordId) throw new Error('semester and recordId required');
@@ -1085,6 +1616,8 @@ function recordRejectAction_(params, ctx, userEmail) {
   const departments = readJsonSafe_('departments.json', ctx, []);
   const classes = readJsonSafe_('classes.json', ctx, []);
   const roles = resolveRoles_(userEmail, config, departments, classes);
+  const actorName = (config.users && config.users[userEmail] && config.users[userEmail].name) || userEmail;
+  const keywordRules = config.keywordRules || DEFAULT_KEYWORD_RULES_;
 
   return withLock_(function () {
     const path = 'records_' + semester + '.json';
@@ -1096,13 +1629,17 @@ function recordRejectAction_(params, ctx, userEmail) {
     const classInfo = classes.filter(function (c) { return c.id === record.classId; })[0];
     const deptInfo = departments.filter(function (d) { return d.id === record.deptId; })[0];
     const now = new Date().toISOString();
-    const res = recordReject_(record, classInfo, deptInfo, roles, userEmail, reason, now);
+    const res = recordReject_(record, classInfo, deptInfo, roles, userEmail, actorName, reason, params.updatedForm, now);
     if (!res.ok) throw new Error(res.error);
-    list[idx] = res.record;
+    let updated = res.record;
+    if (updated.type === 'meeting' && params.updatedForm) {
+      updated = Object.assign({}, updated, { topics: mergeTopicsOnEdit_(record.topics, updated.form, keywordRules) });
+    }
+    list[idx] = updated;
     data.records = list;
     writeJsonPath_(path, data, ctx);
     appendAuditLog_(ctx, { action: 'recordReject', by: userEmail, recordId: recordId, reason: reason, stage: res.stage, at: now });
-    return { record: res.record };
+    return { record: sanitizeRecordForViewer_(updated, roles) };
   });
 }
 
@@ -1184,39 +1721,199 @@ function adminUpsertSemesterAction_(params, ctx, userEmail) {
   });
 }
 
-// adminImportRoster：前端把 Excel 解析成 JSON diff（departmentUpserts / classUpserts）後
-// 呼叫本 action 套用，admin only。
+// adminImportRoster v2：前端把 Excel 每列解析成 params.rows（學院/系所/導師制度/班級名稱(原始)/
+// 班級顯示名稱/應繳班會份數/導師1姓名/導師1email/導師2姓名/導師2email），admin only。
+// 學院/系所/導師制度以名稱比對，不存在就建立；停用的一律 fail-closed 拒絕（importRosterRow_）。
+// 逐列處理、單列失敗不中斷整批（errors 陣列回報是哪一列/為什麼），成功的列一次寫檔。
 function adminImportRosterAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
-  const classUpserts = params.classUpserts || [];
-  const departmentUpserts = params.departmentUpserts || [];
+  const rows = params.rows || [];
+  if (!rows.length) throw new Error('rows required');
+  // 先在鎖外確保 tutorSystems.json 已播種（ensureTutorSystemsSeeded_ 首跑時自己會拿鎖；
+  // withLock_ 的 LockService 鎖不可重入，放進臨界區內會巢狀取鎖卡死）。
+  ensureTutorSystemsSeeded_(ctx);
 
   return withLock_(function () {
     const now = new Date().toISOString();
-    let depts = readJsonSafe_('departments.json', ctx, []);
-    if (departmentUpserts.length) {
-      departmentUpserts.forEach(function (entry) {
-        if (!entry || !entry.id) return;
-        const idx = depts.findIndex(function (d) { return d.id === entry.id; });
-        if (idx === -1) depts.push(entry); else depts[idx] = Object.assign({}, depts[idx], entry);
-      });
-      writeJsonPath_('departments.json', depts, ctx);
-    }
-    const classesData = readJsonSafe_('classes.json', ctx, []);
-    if (classUpserts.length) {
-      classUpserts.forEach(function (entry) {
-        if (!entry || !entry.id) return;
-        const idx = classesData.findIndex(function (c) { return c.id === entry.id; });
-        if (idx === -1) classesData.push(entry); else classesData[idx] = Object.assign({}, classesData[idx], entry);
-      });
-      writeJsonPath_('classes.json', classesData, ctx);
-    }
+    let colleges = readJsonSafe_('colleges.json', ctx, []);
+    let departments = readJsonSafe_('departments.json', ctx, []);
+    let tutorSystems = readJsonSafe_('tutorSystems.json', ctx, []);
+    let classes = readJsonSafe_('classes.json', ctx, []);
+    let successCount = 0;
+    const errors = [];
+
+    rows.forEach(function (row, i) {
+      const res = importRosterRow_(row, colleges, departments, tutorSystems, classes, now);
+      if (!res.ok) { errors.push({ row: i, error: res.error }); return; }
+      colleges = res.colleges; departments = res.departments; tutorSystems = res.tutorSystems; classes = res.classes;
+      successCount++;
+    });
+
+    writeJsonPath_('colleges.json', colleges, ctx);
+    writeJsonPath_('departments.json', departments, ctx);
+    writeJsonPath_('tutorSystems.json', tutorSystems, ctx);
+    writeJsonPath_('classes.json', classes, ctx);
     appendAuditLog_(ctx, {
       action: 'adminImportRoster', by: userEmail,
-      count: classUpserts.length + departmentUpserts.length, at: now,
+      count: successCount, errorCount: errors.length, at: now,
     });
-    return { departments: depts, classes: classesData };
+    return {
+      colleges: colleges, departments: departments, tutorSystems: tutorSystems, classes: classes,
+      successCount: successCount, errors: errors,
+    };
   });
+}
+
+// adminUpsertCollege：admin only，upsert-by-id（比照 adminUpsertDepartment 寫法）。
+function adminUpsertCollegeAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.college;
+  if (!entry || !entry.id) throw new Error('college.id required');
+
+  return withLock_(function () {
+    const data = readJsonSafe_('colleges.json', ctx, []);
+    const idx = data.findIndex(function (c) { return c.id === entry.id; });
+    if (idx === -1) data.push(entry); else data[idx] = Object.assign({}, data[idx], entry);
+    writeJsonPath_('colleges.json', data, ctx);
+    appendAuditLog_(ctx, { action: 'adminUpsertCollege', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    return { colleges: data };
+  });
+}
+
+// adminUpsertTutorSystem：admin only，upsert-by-id。
+function adminUpsertTutorSystemAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.tutorSystem;
+  if (!entry || !entry.id) throw new Error('tutorSystem.id required');
+  // 鎖外先播種，理由同 adminImportRosterAction_（withLock_ 不可重入）。
+  ensureTutorSystemsSeeded_(ctx);
+
+  return withLock_(function () {
+    const data = readJsonSafe_('tutorSystems.json', ctx, []);
+    const idx = data.findIndex(function (s) { return s.id === entry.id; });
+    const next = idx === -1 ? data.concat([entry]) : data.map(function (s, i) { return i === idx ? Object.assign({}, s, entry) : s; });
+    writeJsonPath_('tutorSystems.json', next, ctx);
+    appendAuditLog_(ctx, { action: 'adminUpsertTutorSystem', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    return { tutorSystems: next };
+  });
+}
+
+// adminUpsertStaffLead / adminUpsertStaffAssistant：admin only，upsert-by-email，存進
+// config.staffLeads / config.staffAssistants（比照現有職員帳號管理模式，見 adminUpsertUserAction_）。
+// staffAssistant.leadEmail 綁定的主責若不存在或已停用，resolveRoles_ 會 fail-closed 判該助理
+// 的 assistantLead 為 null（無法代為核章），故此處不額外擋——沿用既有 admin 信任邊界。
+function adminUpsertStaffLeadAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.staffLead;
+  if (!entry || !entry.email) throw new Error('staffLead.email required');
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    config.staffLeads = config.staffLeads || [];
+    const idx = config.staffLeads.findIndex(function (s) { return s && s.email === entry.email; });
+    if (idx === -1) config.staffLeads.push(entry); else config.staffLeads[idx] = Object.assign({}, config.staffLeads[idx], entry);
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: 'adminUpsertStaffLead', by: userEmail, targetId: entry.email, at: new Date().toISOString() });
+    return { staffLeads: config.staffLeads };
+  });
+}
+
+function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.staffAssistant;
+  if (!entry || !entry.email) throw new Error('staffAssistant.email required');
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    config.staffAssistants = config.staffAssistants || [];
+    const idx = config.staffAssistants.findIndex(function (s) { return s && s.email === entry.email; });
+    if (idx === -1) config.staffAssistants.push(entry); else config.staffAssistants[idx] = Object.assign({}, config.staffAssistants[idx], entry);
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: new Date().toISOString() });
+    return { staffAssistants: config.staffAssistants };
+  });
+}
+
+// recordSetTopics：四類宣導勾選的手動調整，只有 staffLead 關的驗證者（主責/已綁定助理）與
+// director/admin 能動（canSetTopics_）；只適用班會紀錄（meeting）。調整後該項目 auto 變 false，
+// 之後的關鍵字自動掃描（提交/重送/編輯）不會再覆蓋（mergeTopicsOnEdit_）。
+function recordSetTopicsAction_(params, ctx, userEmail) {
+  const semester = params.semester, recordId = params.recordId, topics = params.topics;
+  if (!semester || !recordId || !topics) throw new Error('semester, recordId, topics required');
+  requireValidSemester_(semester, ctx);
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  if (!canSetTopics_(roles)) throw new Error('only staffLead/staffAssistant/director/admin may adjust topics');
+
+  return withLock_(function () {
+    const path = 'records_' + semester + '.json';
+    const data = readJsonSafe_(path, ctx, { records: [] });
+    const list = data.records || [];
+    const idx = list.findIndex(function (r) { return r.id === recordId; });
+    if (idx === -1) throw new Error('record not found: ' + recordId);
+    const record = list[idx];
+    if (record.type !== 'meeting') throw new Error('topics only apply to meeting records');
+    if (!record.topics) throw new Error('record has no topics to adjust');
+    const now = new Date().toISOString();
+    // 助理（非主責本人）調整 topics 時，對外顯示身分掛綁定主責，真實身分進 actualBy——
+    // 與核章的 resolveApproverIdentity_ 同一套遮罩原則。
+    const identity = resolveApproverIdentity_('staffLead', roles, userEmail, userEmail);
+    const updated = applySetTopics_(record, topics, identity.email, identity.actualBy, now);
+    list[idx] = updated;
+    data.records = list;
+    writeJsonPath_(path, data, ctx);
+    appendAuditLog_(ctx, { action: 'recordSetTopics', by: userEmail, recordId: recordId, at: now });
+    return { record: sanitizeRecordForViewer_(updated, roles) };
+  });
+}
+
+// adminSetKeywordRules：四類宣導關鍵字庫調整，權限為 admin 與 staffLead（本身，不含助理——
+// 助理只在核章當下代主責動作，不代表可以改動全校共用的關鍵字庫設定）。四類 key 固定
+// （traffic/gender/smoking/fraud），只允許更新既有 key 的 label/keywords，不接受新增/刪除 key。
+function adminSetKeywordRulesAction_(params, ctx, userEmail) {
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  if (!roles.isAdmin && !roles.isStaffLead) throw new Error('only admin or staffLead may adjust keyword rules');
+  const patch = params.keywordRules;
+  if (!patch || typeof patch !== 'object') throw new Error('keywordRules required');
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const current = config.keywordRules || DEFAULT_KEYWORD_RULES_;
+    const next = {};
+    Object.keys(current).forEach(function (key) {
+      const p = patch[key];
+      const keywords = (p && Array.isArray(p.keywords)) ? p.keywords.filter(function (k) { return typeof k === 'string' && k.trim(); }).map(function (k) { return k.trim(); }) : current[key].keywords;
+      const label = (p && typeof p.label === 'string' && p.label.trim()) ? p.label.trim() : current[key].label;
+      next[key] = { label: label, keywords: keywords };
+    });
+    config.keywordRules = next;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: 'adminSetKeywordRules', by: userEmail, at: new Date().toISOString() });
+    return { keywordRules: next };
+  });
+}
+
+// overviewStats：全校彙總總表。staffLead/staffAssistant/director/admin 看全校；deptHead 限本系
+// （用 classId 先過濾，避免同名系所字串比對的脆弱性）；其餘一律拒絕。只回彙總與日期，不含紀錄內文
+// （見 overviewStats_ 純函式）。
+function overviewStatsAction_(params, ctx, userEmail) {
+  const semester = params.semester;
+  if (!semester) throw new Error('semester required');
+  requireValidSemester_(semester, ctx);
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  const fullAccess = roles.isAdmin || roles.isDirector || roles.isStaffLead || roles.isStaffAssistant;
+  if (!fullAccess && !(roles.deptHeadOf && roles.deptHeadOf.length)) {
+    throw new Error('not authorized to view overview stats');
+  }
+
+  const colleges = readJsonSafe_('colleges.json', ctx, []);
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  let classes = readJsonSafe_('classes.json', ctx, []);
+  if (!fullAccess) {
+    classes = classes.filter(function (c) { return c && roles.deptHeadOf.indexOf(c.deptId) !== -1; });
+  }
+  const tutorSystems = ensureTutorSystemsSeeded_(ctx);
+  const data = readJsonSafe_('records_' + semester + '.json', ctx, { records: [] });
+  return { rows: overviewStats_(colleges, departments, classes, tutorSystems, data.records, null) };
 }
 
 // classSetWhitelist：本班導師或 admin 才能設定。

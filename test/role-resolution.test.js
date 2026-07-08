@@ -95,3 +95,60 @@ test('isClassTutor_：命中/未命中/classInfo 為 null', () => {
   assert.equal(S.isClassTutor_(classInfo, 'other@x.com'), false);
   assert.equal(S.isClassTutor_(null, 't@x.com'), false);
 });
+
+// ── staffLead / staffAssistant（第二期新增角色）──────────────────────────────
+
+test('config.staffLeads 命中且未停用 → isStaffLead；停用則不算', () => {
+  const S = makeSandbox();
+  const config = { staffLeads: [{ email: 'lead@x.com', name: 'Lead' }, { email: 'old@x.com', name: 'Old', disabled: true }] };
+  assert.equal(S.resolveRoles_('lead@x.com', config, [], []).isStaffLead, true);
+  assert.equal(S.resolveRoles_('old@x.com', config, [], []).isStaffLead, false);
+});
+
+test('config.staffAssistants 命中且未停用 → isStaffAssistant，assistantLead 綁定對應的未停用主責', () => {
+  const S = makeSandbox();
+  const config = {
+    staffLeads: [{ email: 'lead@x.com', name: 'Lead' }],
+    staffAssistants: [{ email: 'assist@x.com', name: 'Assist', leadEmail: 'lead@x.com' }],
+  };
+  const roles = S.resolveRoles_('assist@x.com', config, [], []);
+  assert.equal(roles.isStaffAssistant, true);
+  assert.deepEqual(roles.assistantLead, { email: 'lead@x.com', name: 'Lead' });
+});
+
+test('assistantLead fail-closed：綁定的主責不存在或已停用 → assistantLead 為 null（無法代為核章）', () => {
+  const S = makeSandbox();
+  const configMissing = {
+    staffLeads: [],
+    staffAssistants: [{ email: 'assist@x.com', name: 'Assist', leadEmail: 'ghost@x.com' }],
+  };
+  assert.equal(S.resolveRoles_('assist@x.com', configMissing, [], []).assistantLead, null);
+
+  const configDisabledLead = {
+    staffLeads: [{ email: 'lead@x.com', name: 'Lead', disabled: true }],
+    staffAssistants: [{ email: 'assist@x.com', name: 'Assist', leadEmail: 'lead@x.com' }],
+  };
+  assert.equal(S.resolveRoles_('assist@x.com', configDisabledLead, [], []).assistantLead, null);
+});
+
+test('停用的助理帳號 → isStaffAssistant 為 false，assistantLead 也不算', () => {
+  const S = makeSandbox();
+  const config = {
+    staffLeads: [{ email: 'lead@x.com', name: 'Lead' }],
+    staffAssistants: [{ email: 'assist@x.com', name: 'Assist', leadEmail: 'lead@x.com', disabled: true }],
+  };
+  const roles = S.resolveRoles_('assist@x.com', config, [], []);
+  assert.equal(roles.isStaffAssistant, false);
+  assert.equal(roles.assistantLead, null);
+});
+
+test('一人可同時兼任導師 + 系主任 + staffLead（並集不互斥）', () => {
+  const S = makeSandbox();
+  const config = { staffLeads: [{ email: 'x@x.com', name: 'X' }] };
+  const departments = [{ id: 'dept1', headEmail: 'x@x.com', active: true }];
+  const classes = [{ id: 'c1', tutors: [{ email: 'x@x.com', name: 'X' }], active: true }];
+  const roles = S.resolveRoles_('x@x.com', config, departments, classes);
+  assert.equal(roles.isStaffLead, true);
+  assert.deepEqual(roles.deptHeadOf, ['dept1']);
+  assert.deepEqual(roles.tutorOf, ['c1']);
+});
