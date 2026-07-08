@@ -230,6 +230,11 @@ const CLIENT_ID       = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googl
 const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbypvwRn39uF4vsfSQHdNxCSrPhSEyCw7Sg0s6YUPdHC27OU_g4XCtcQZI7QIAnKhrbdkw/exec';
 const ROOT_FOLDER_ID  = '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT';
 
+// localStorage 鍵（dev/prod 同源 npustscc.github.io，必須以 ROOT_FOLDER_ID 命名空間隔離，
+// 否則 dev 密鑰簽的 session token 會被 prod 頁面撈去打 prod 後端）
+const LS_USER_KEY    = 'tutor_user_' + ROOT_FOLDER_ID;      // { email, name, picture }
+const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, email }
+
 // 學期物件若未設定額度，回退到系統設計的預設值（每學期 5 份班會 + 1 份導生活動）。
 const DEFAULT_QUOTA_MEETING  = 5;
 const DEFAULT_QUOTA_ACTIVITY = 1;
@@ -251,8 +256,9 @@ const KEYWORD_TOPIC_KEYS = ['traffic', 'gender', 'smoking', 'fraud'];
 // ── 全域狀態 ─────────────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 let currentUser   = null;   // { email, name, picture }
-let gIdToken      = null;
-let tokenExp      = 0;      // gIdToken 的 JWT exp（Unix 秒）
+let gIdToken      = null;   // Google ID token——只留記憶體，不再持久化（session token 才落地）
+let sessionToken  = null;   // 自建 session token（sessionStart 簽發，存 localStorage）
+let sessionExp    = 0;      // session 效期（Unix 秒＝當日台北 24:00；固定、不滑動延長）
 let bootstrapData = null;   // 最近一次 bootstrap 回傳（含 roles/departments/classes/semesters/records/semester）
 let currentPage   = null;
 let refreshPromise = null;
@@ -263,6 +269,23 @@ let refreshResolve = null;
 // ══════════════════════════════════════════════════════════════════════════════
 function $(id) { return document.getElementById(id); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// ── 自建 session（每日登入一次）helper；localStorage 讀寫皆包 try/catch ──
+function hasValidSession() {
+  return !!sessionToken && sessionExp > Math.floor(Date.now() / 1000) + 30;
+}
+function saveSession(token, exp) {
+  sessionToken = token;
+  sessionExp = Number(exp) || 0;
+  try {
+    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({ token: token, exp: sessionExp, email: currentUser && currentUser.email }));
+  } catch (e) {}
+}
+function clearSession() {
+  sessionToken = null;
+  sessionExp = 0;
+  try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+}
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -369,42 +392,39 @@ window.addEventListener('load', () => {
     if ($('g-signin-btn') && !$('g-signin-btn').firstElementChild) $('login-fallback').style.display = '';
   }, 1500);
 
-  // 嘗試從 sessionStorage 恢復登入
-  const storedUser = sessionStorage.getItem('tutor_user');
-  const storedToken = sessionStorage.getItem('tutor_idtoken');
-  if (storedUser && storedToken) {
-    try {
-      const payload = decodeJwt(storedToken);
-      const valid = payload && Number(payload.exp) > Math.floor(Date.now() / 1000) + 30;
-      currentUser = JSON.parse(storedUser);
-      if (valid) {
-        gIdToken = storedToken;
-        tokenExp = Number(payload.exp) || 0;
-        showLoading('自動登入中…');
-        afterLogin();
-      } else {
-        sessionStorage.removeItem('tutor_idtoken');
-        showLoading('驗證身分中…');
-        google.accounts.id.prompt((n) => {
-          if (n && ((n.isNotDisplayed && n.isNotDisplayed()) || (n.isSkippedMoment && n.isSkippedMoment()))) {
-            hideLoading();
-            sessionStorage.removeItem('tutor_user');
-            currentUser = null;
-          }
-        });
-      }
-    } catch (e) {
-      sessionStorage.removeItem('tutor_user');
-      sessionStorage.removeItem('tutor_idtoken');
+  // 一次性清除舊機制的 sessionStorage 鍵（登入狀態已改存 localStorage 的自建 session）
+  try { sessionStorage.removeItem('tutor_user'); sessionStorage.removeItem('tutor_idtoken'); } catch (e) {}
+
+  // 從 localStorage 恢復：session 有效 → 直接進系統（完全不碰 Google）；
+  // session 過期但 user 存在（昨天登入過）→ One Tap 靜默重登（成功會走
+  // handleCredentialResponse → sessionStart 換新 session）；都沒有 → 停在登入畫面。
+  let storedUser = null, storedSession = null;
+  try {
+    storedUser = JSON.parse(localStorage.getItem(LS_USER_KEY) || 'null');
+    storedSession = JSON.parse(localStorage.getItem(LS_SESSION_KEY) || 'null');
+  } catch (e) {}
+  if (storedUser && storedUser.email) {
+    currentUser = storedUser;
+    const valid = storedSession && storedSession.token &&
+                  storedSession.email === storedUser.email &&
+                  Number(storedSession.exp) > Math.floor(Date.now() / 1000) + 30;
+    if (valid) {
+      sessionToken = storedSession.token;
+      sessionExp = Number(storedSession.exp);
+      showLoading('自動登入中…');
+      afterLogin();
+    } else {
+      clearSession();
+      showLoading('驗證身分中…');
+      google.accounts.id.prompt((n) => {
+        if (n && ((n.isNotDisplayed && n.isNotDisplayed()) || (n.isSkippedMoment && n.isSkippedMoment()))) {
+          hideLoading();
+          try { localStorage.removeItem(LS_USER_KEY); } catch (e) {}
+          currentUser = null;
+        }
+      });
     }
   }
-
-  // 每 3 分鐘檢查一次，token 快過期（5 分鐘內）且分頁可見時提早背景刷新
-  setInterval(() => {
-    if (!gIdToken || !tokenExp) return;
-    if (document.visibilityState !== 'visible') return;
-    if ((Date.now() / 1000) > (tokenExp - 300)) refreshIdToken();
-  }, 3 * 60 * 1000);
 });
 
 function decodeJwt(token) {
@@ -414,21 +434,36 @@ function decodeJwt(token) {
   } catch (e) { return null; }
 }
 
-function handleCredentialResponse(response) {
+async function handleCredentialResponse(response) {
   const payload = decodeJwt(response.credential);
   if (!payload) { showLoginError('登入憑證解析失敗，請重新整理頁面再試。'); return; }
   const isRefresh = !!bootstrapData && currentUser && currentUser.email === payload.email;
   currentUser = { email: payload.email, name: payload.name, picture: payload.picture };
-  gIdToken = response.credential;
-  tokenExp = Number(payload.exp) || 0;
-  sessionStorage.setItem('tutor_user', JSON.stringify(currentUser));
-  sessionStorage.setItem('tutor_idtoken', gIdToken);
+  gIdToken = response.credential;   // 只留記憶體，不再持久化
+  try { localStorage.setItem(LS_USER_KEY, JSON.stringify(currentUser)); } catch (e) {}
   hideReloginModal();
+
+  // 每日首次登入：以 idToken 打 sessionStart 換發自建 session token（效期至當日台北 24:00）。
+  // sessionStart 失敗不阻斷登入——降級為記憶體 idToken 模式（doPost 的 idToken 路徑保留），
+  // SESSION_SECRET 尚未設置或後端異常時系統仍可用（效期一小時）。
+  clearSession();
+  try {
+    const s = await proxyCall('sessionStart', { ua: navigator.userAgent.slice(0, 200) });
+    saveSession(s.sessionToken, s.exp);
+  } catch (e) {
+    console.error('sessionStart 失敗，降級為一小時效期登入：', e);
+    showToast('登入憑證簽發失敗，本次以一小時效期登入', 'error');
+  }
+
+  // sessionStart 完成後才 resolve pending promise，讓等待中的 proxyCall 重試時已有新 session
   if (refreshResolve) { const r = refreshResolve; refreshResolve = null; refreshPromise = null; r(true); }
   if (isRefresh) { showToast('登入已於背景更新', 'success'); return; }
   afterLogin();
 }
 
+// 重走 Google 登入（One Tap 靜默優先，8 秒內沒完成 → relogin modal）。
+// 成功時 handleCredentialResponse 會自動打 sessionStart 換發新 session，
+// 之後才 resolve——await 本函式回來時新 session 已就緒，可直接重試原請求。
 function refreshIdToken() {
   if (refreshPromise) return refreshPromise;
   refreshPromise = new Promise((resolve) => { refreshResolve = resolve; });
@@ -445,7 +480,7 @@ function refreshIdToken() {
 }
 
 function showReloginModal() {
-  openModal('登入已逾時', '<p style="color:var(--color-text-light); font-size:.9rem;">閒置過久，Google 登入憑證已過期，請重新登入以繼續（畫面上的資料不會遺失）。</p><div id="relogin-btn-slot" style="display:flex; justify-content:center; margin-top:10px;"></div>');
+  openModal('登入已到期', '<p style="color:var(--color-text-light); font-size:.9rem;">今日登入憑證已到期（每日 00:00 重置），請重新登入以繼續（畫面上的資料不會遺失）。</p><div id="relogin-btn-slot" style="display:flex; justify-content:center; margin-top:10px;"></div>');
   try { google.accounts.id.renderButton($('relogin-btn-slot'), { theme: 'outline', size: 'large', text: 'signin_with', locale: 'zh-TW' }); } catch (e) {}
 }
 function hideReloginModal() {
@@ -453,8 +488,7 @@ function hideReloginModal() {
 }
 
 $('logout-btn').addEventListener('click', () => {
-  sessionStorage.removeItem('tutor_user');
-  sessionStorage.removeItem('tutor_idtoken');
+  try { localStorage.removeItem(LS_USER_KEY); localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
   location.reload();
 });
@@ -469,10 +503,22 @@ $('logout-btn').addEventListener('click', () => {
 // ══════════════════════════════════════════════════════════════════════════════
 async function proxyCall(action, params, retryHttp, retryAuth) {
   params = params || {}; retryHttp = retryHttp || 0; retryAuth = retryAuth || 0;
-  if (!gIdToken) throw new Error('尚未登入，請重新整理頁面登入。');
-  if (tokenExp && (Date.now() / 1000) > (tokenExp - 60)) await refreshIdToken();
+  // sessionStart 一律走 idToken（後端不許以舊 session 換新）；其他 action 有有效 session 就帶 sessionToken
+  const useSession = action !== 'sessionStart' && hasValidSession();
+  if (!useSession && !gIdToken) {
+    // 恢復的分頁跨過午夜：沒有效 session 也沒記憶體 idToken → 先靜默重登再重試一次
+    if (action !== 'sessionStart' && currentUser && retryAuth < 1) {
+      await refreshIdToken();
+      return proxyCall(action, params, retryHttp, retryAuth + 1);
+    }
+    throw new Error('尚未登入，請重新整理頁面登入。');
+  }
 
-  const payload = JSON.stringify(Object.assign({ idToken: gIdToken, action: action, rootFolderId: ROOT_FOLDER_ID }, params));
+  const payload = JSON.stringify(Object.assign(
+    { action: action, rootFolderId: ROOT_FOLDER_ID },
+    useSession ? { sessionToken: sessionToken } : { idToken: gIdToken },
+    params
+  ));
   const form = new URLSearchParams();
   form.append('payload', payload);
 
@@ -497,8 +543,11 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
     : (data.data && typeof data.data === 'object' && data.data.error) ? data.data.error : null;
 
   if (err) {
-    if (err === 'Unauthorized' && retryAuth < 1) {
-      tokenExp = 0;
+    // 過午夜或 token 失效/竄改：清 session → 靜默重走 Google 登入（handleCredentialResponse
+    // 會自動打 sessionStart 換新 session）→ 重試一次。sessionStart 自己失敗不重試
+    // （防 refreshIdToken → sessionStart → 又失敗的迴圈），retryAuth < 1 防整體重試迴圈。
+    if ((err === 'Session expired' || err === 'Unauthorized') && action !== 'sessionStart' && retryAuth < 1) {
+      clearSession();
       await refreshIdToken();
       return proxyCall(action, params, retryHttp, retryAuth + 1);
     }

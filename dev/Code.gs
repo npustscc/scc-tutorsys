@@ -53,17 +53,30 @@ function doPost(e) {
   try {
     const payload = JSON.parse(e.parameter.payload);
     const idToken = payload.idToken;
+    const sessionToken = payload.sessionToken;
     const action = payload.action;
     const rootFolderId = payload.rootFolderId;
     const params = {};
     Object.keys(payload).forEach(function (k) {
-      if (k !== 'idToken' && k !== 'action' && k !== 'rootFolderId') params[k] = payload[k];
+      if (k !== 'idToken' && k !== 'sessionToken' && k !== 'action' && k !== 'rootFolderId') params[k] = payload[k];
     });
 
     // 認證（所有 action 都要過，含 ping）——這一層只確認「這是誰」，不代表這個人
     // 有權限做這件事；授權判斷在每個 action 內部依角色/紀錄狀態進行（見檔頭註解）。
-    const userEmail = verifyIdToken_(idToken);
-    if (!userEmail) return jsonResp_({ error: 'Unauthorized' });
+    // 兩種憑證：
+    //   - sessionToken：自建 HMAC session（sessionStart 簽發，效期至當日台北 24:00），
+    //     純本地驗證、零外部 HTTP。失效回 'Session expired'（前端據此靜默重登＋重試）。
+    //   - idToken：Google ID token。sessionStart 只收 idToken——帶 sessionToken 打
+    //     sessionStart 一律拒絕，不允許「以舊 session 換新 session」無限續命。
+    let userEmail;
+    if (sessionToken) {
+      if (action === 'sessionStart') return jsonResp_({ error: 'sessionStart requires idToken' });
+      userEmail = verifySessionToken_(sessionToken);
+      if (!userEmail) return jsonResp_({ error: 'Session expired' });
+    } else {
+      userEmail = idToken ? verifyIdToken_(idToken) : null;
+      if (!userEmail) return jsonResp_({ error: 'Unauthorized' });
+    }
 
     let ctx = { root: ROOT_FOLDER_ID };
     if (rootFolderId) {
@@ -74,6 +87,7 @@ function doPost(e) {
     let result;
     switch (action) {
       case 'ping':                  result = { ok: true, email: userEmail }; break;
+      case 'sessionStart':           result = sessionStartAction_(params, ctx, userEmail); break;
       case 'bootstrap':              result = bootstrapAction_(params, ctx, userEmail); break;
       case 'recordSubmit':           result = recordSubmitAction_(params, ctx, userEmail); break;
       case 'recordResubmit':         result = recordResubmitAction_(params, ctx, userEmail); break;
@@ -135,6 +149,69 @@ function verifyIdToken_(idToken) {
     if (d.email_verified !== 'true' && d.email_verified !== true) return null;
     try { cache.put(cacheKey, d.email, 300); } catch (_) {}
     return d.email;
+  } catch (e) { return null; }
+}
+
+// ── 自建 Session Token（每日登入一次）────────────────────────────────────────
+// 動機：Google ID token 只有 1 小時效期，靠 One Tap 靜默續命常失敗跳 modal。
+// 改為：每天首次以 Google idToken 打 sessionStart 換發自建 HMAC token，效期固定至
+// 當日台北時間 24:00（不滑動延長），之後所有請求帶 sessionToken——後端純本地 HMAC
+// 驗證、零外部 HTTP。密鑰只存 Script Properties（SESSION_SECRET），永不進 repo。
+// token 格式：base64url(payloadJSON) + '.' + base64url(HMAC-SHA256(payloadB64, secret))
+// payload = { e: email, iat: 簽發秒, exp: 當日台北 24:00 的 epoch 秒 }
+
+function getSessionSecret_() {
+  return PropertiesService.getScriptProperties().getProperty('SESSION_SECRET');
+}
+
+// 一次性設置：部署者在 GAS 編輯器手動執行一次即可。已存在則不覆寫
+// （誤跑第二次不會讓全站 session 立即失效）。密鑰值只活在 Script Properties。
+function setupSessionSecret() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('SESSION_SECRET')) {
+    Logger.log('SESSION_SECRET 已存在，不覆寫。');
+    return;
+  }
+  // 兩個 UUID 去掉連字號 = 64 個隨機十六進位字元
+  const secret = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
+  props.setProperty('SESSION_SECRET', secret);
+  Logger.log('SESSION_SECRET 已產生並存入 Script Properties（長度 ' + secret.length + '）。');
+}
+
+// 簽發 session token；效期固定至當日台北 24:00（nextTaipeiMidnightEpochSec_，見純函式區）。
+function issueSessionToken_(email) {
+  const secret = getSessionSecret_();
+  if (!secret) throw new Error('SESSION_SECRET not configured（請在 GAS 編輯器執行一次 setupSessionSecret）');
+  const now = Date.now();
+  const exp = nextTaipeiMidnightEpochSec_(now);
+  const payloadB64 = Utilities.base64EncodeWebSafe(
+    JSON.stringify({ e: email, iat: Math.floor(now / 1000), exp: exp })
+  );
+  const sigB64 = Utilities.base64EncodeWebSafe(
+    Utilities.computeHmacSha256Signature(payloadB64, secret)
+  );
+  return { token: payloadB64 + '.' + sigB64, exp: exp };
+}
+
+// 驗證 session token：重算簽章比對 → decode payload → exp 未過 → 回 email。
+// 任何一步失敗（含 SESSION_SECRET 未設置）一律回 null——fail-closed，
+// doPost 據此回 'Session expired' 讓前端靜默重走 Google 登入。
+function verifySessionToken_(token) {
+  try {
+    const secret = getSessionSecret_();
+    if (!secret) return null;
+    const parts = String(token).split('.');
+    if (parts.length !== 2) return null;
+    const expected = Utilities.base64EncodeWebSafe(
+      Utilities.computeHmacSha256Signature(parts[0], secret)
+    );
+    if (expected !== parts[1]) return null;
+    const payload = JSON.parse(
+      Utilities.newBlob(Utilities.base64DecodeWebSafe(parts[0])).getDataAsString()
+    );
+    if (!payload || !payload.e) return null;
+    if (Number(payload.exp) <= Math.floor(Date.now() / 1000)) return null;
+    return payload.e;
   } catch (e) { return null; }
 }
 
@@ -1315,6 +1392,15 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   };
 }
 
+// ── Session 效期計算（供 issueSessionToken_ 使用）────────────────────────────
+// 下一個台北（UTC+8，1980 年起無日光節約）午夜 00:00 的 epoch 秒。刻意寫成純算術、
+// 不用 Utilities.formatDate，才能被 test/harness.js 抽進 Node vm 單元測試
+// （見 test/session-exp.test.js）。
+function nextTaipeiMidnightEpochSec_(nowMs) {
+  const OFF = 8 * 3600;
+  return (Math.floor((Math.floor(nowMs / 1000) + OFF) / 86400) + 1) * 86400 - OFF;
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Action handlers（會呼叫 Drive/LockService，不是純函式，不在單元測試範圍）──
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1394,6 +1480,45 @@ function bootstrapAction_(params, ctx, userEmail) {
     staffLeads: roles.isAdmin ? (config.staffLeads || []) : undefined,
     staffAssistants: roles.isAdmin ? (config.staffAssistants || []) : undefined,
   };
+}
+
+// sessionStart：以 Google idToken 換發自建 session token（效期至當日台北 24:00）。
+// 與 infosys 的關鍵差異：本系統「學生」= 任何已登入 Google 帳號、沒有全域允許清單閘門，
+// 因此任何通過 verifyIdToken_ 的帳號都直接簽發；簽發 session ≠ 授權任何操作——授權仍由
+// 各 action 內部 resolveRoles_ default-deny 判斷。
+// 登入通知信只寄給「有角色」的帳號（admin/director/staffLead/staffAssistant/系主任/導師），
+// 一般學生登入不寄（兼顧 MailApp 每日配額與擾民）；寄信失敗不阻斷登入（mailSent:false）。
+function sessionStartAction_(params, ctx, userEmail) {
+  const issued = issueSessionToken_(userEmail);
+
+  let mailSent = false;
+  try {
+    // 只做純讀（不觸發 tutorSystems/keywordRules seed 寫入），讀法同 bootstrapAction_。
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const hasRole = roles.isAdmin || roles.isDirector || roles.isStaffLead ||
+      roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0;
+    if (hasRole) {
+      const ua = String(params.ua || '').slice(0, 200);
+      const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
+      MailApp.sendEmail({
+        to: userEmail,
+        subject: '【屏科大導師資訊系統】登入通知（測試版）',
+        body:
+          '您的帳號剛剛登入導師資訊系統。\n\n' +
+          '環境：測試版\n' +
+          '時間：' + timeStr + '（台北時間）\n' +
+          '瀏覽器：' + (ua || '（未知）') + '\n\n' +
+          '本次登入憑證有效至今日 24:00（台北時間），到期後需重新登入。\n' +
+          '若非本人操作，請立即聯繫系統管理者停用帳號。',
+      });
+      mailSent = true;
+    }
+  } catch (e) { /* 寄信失敗不阻斷登入 */ }
+
+  return { sessionToken: issued.token, exp: issued.exp, email: userEmail, mailSent: mailSent };
 }
 
 // recordSubmit：任何已認證帳號都可呼叫，但該班若設了非空白名單、且此人不是該班導師，
