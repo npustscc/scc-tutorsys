@@ -88,6 +88,8 @@ function doPost(e) {
     switch (action) {
       case 'ping':                  result = { ok: true, email: userEmail }; break;
       case 'sessionStart':           result = sessionStartAction_(params, ctx, userEmail); break;
+      case 'sessionLogout':          result = sessionLogoutAction_(params, ctx, userEmail); break;
+      case 'listMySessions':         result = listMySessionsAction_(params, ctx, userEmail); break;
       case 'bootstrap':              result = bootstrapAction_(params, ctx, userEmail); break;
       case 'recordSubmit':           result = recordSubmitAction_(params, ctx, userEmail); break;
       case 'recordResubmit':         result = recordResubmitAction_(params, ctx, userEmail); break;
@@ -179,21 +181,50 @@ function setupSessionSecret() {
 }
 
 // 簽發 session token；效期固定至當日台北 24:00（nextTaipeiMidnightEpochSec_，見純函式區）。
+// jti = 每個 token 的唯一識別碼（登入紀錄頁標記「目前裝置」用；每台裝置各自一組）。
 function issueSessionToken_(email) {
   const secret = getSessionSecret_();
   if (!secret) throw new Error('SESSION_SECRET not configured（請在 GAS 編輯器執行一次 setupSessionSecret）');
   const now = Date.now();
+  const iat = Math.floor(now / 1000);
   const exp = nextTaipeiMidnightEpochSec_(now);
+  const jti = Utilities.getUuid();
   const payloadB64 = Utilities.base64EncodeWebSafe(
-    JSON.stringify({ e: email, iat: Math.floor(now / 1000), exp: exp })
+    JSON.stringify({ e: email, jti: jti, iat: iat, exp: exp })
   );
   const sigB64 = Utilities.base64EncodeWebSafe(
     Utilities.computeHmacSha256Signature(payloadB64, secret)
   );
-  return { token: payloadB64 + '.' + sigB64, exp: exp };
+  return { token: payloadB64 + '.' + sigB64, exp: exp, jti: jti, iat: iat };
 }
 
-// 驗證 session token：重算簽章比對 → decode payload → exp 未過 → 回 email。
+// ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
+// 登出時把 revokedBefore[email] 設為當下秒數；驗證時 iat < revokedBefore 一律拒絕，
+// 等於讓該帳號「登出前簽發的所有 token（不分裝置）」全部失效。存 Script Properties 單一 JSON，
+// 以 CacheService 快取 60 秒（登出時主動清快取→實質即時生效），避免每個請求都讀 Property。
+function sessionRevokedBeforeMap_() {
+  const cache = CacheService.getScriptCache();
+  try { const hit = cache.get('sess_rb'); if (hit) return JSON.parse(hit); } catch (_) {}
+  const raw = PropertiesService.getScriptProperties().getProperty('SESSION_REVOKED_BEFORE') || '{}';
+  try { cache.put('sess_rb', raw, 60); } catch (_) {}
+  try { return JSON.parse(raw); } catch (_) { return {}; }
+}
+
+// 註：這裡直接拿 LockService 而不用 withLock_，語意相同；獨立小臨界區、5 秒即可。
+function sessionRevokeAllDevices_(email) {
+  const lock = LockService.getScriptLock();
+  try { lock.waitLock(5000); } catch (_) {}
+  try {
+    const props = PropertiesService.getScriptProperties();
+    let map = {};
+    try { map = JSON.parse(props.getProperty('SESSION_REVOKED_BEFORE') || '{}'); } catch (_) { map = {}; }
+    map[email] = Math.floor(Date.now() / 1000);
+    props.setProperty('SESSION_REVOKED_BEFORE', JSON.stringify(map));
+    try { CacheService.getScriptCache().remove('sess_rb'); } catch (_) {}  // 清快取→下次驗證立即讀到新值
+  } finally { try { lock.releaseLock(); } catch (_) {} }
+}
+
+// 驗證 session token：重算簽章比對 → decode payload → exp 未過 → 未被登出註銷 → 回 email。
 // 任何一步失敗（含 SESSION_SECRET 未設置）一律回 null——fail-closed，
 // doPost 據此回 'Session expired' 讓前端靜默重走 Google 登入。
 function verifySessionToken_(token) {
@@ -211,6 +242,8 @@ function verifySessionToken_(token) {
     );
     if (!payload || !payload.e) return null;
     if (Number(payload.exp) <= Math.floor(Date.now() / 1000)) return null;
+    const rb = sessionRevokedBeforeMap_()[payload.e];  // 登出註銷檢查（全部裝置）
+    if (rb && Number(payload.iat) < Number(rb)) return null;
     return payload.e;
   } catch (e) { return null; }
 }
@@ -1490,6 +1523,9 @@ function bootstrapAction_(params, ctx, userEmail) {
 // 一般學生登入不寄（兼顧 MailApp 每日配額與擾民）；寄信失敗不阻斷登入（mailSent:false）。
 function sessionStartAction_(params, ctx, userEmail) {
   const issued = issueSessionToken_(userEmail);
+  const ua = String(params.ua || '').slice(0, 200);
+  const ip = String(params.ip || '').slice(0, 64);
+  const geo = String(params.geo || '').slice(0, 120);
 
   let mailSent = false;
   try {
@@ -1501,24 +1537,86 @@ function sessionStartAction_(params, ctx, userEmail) {
     const hasRole = roles.isAdmin || roles.isDirector || roles.isStaffLead ||
       roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0;
     if (hasRole) {
-      const ua = String(params.ua || '').slice(0, 200);
       const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
+      const lines = [
+        '您的帳號剛剛登入導師資訊系統。', '',
+        '環境：測試版',
+        '時間：' + timeStr + '（台北時間）',
+        '瀏覽器：' + (ua || '（未知）'),
+      ];
+      if (ip) lines.push('IP 位址：' + ip);
+      if (geo) lines.push('大致位置：' + geo);
+      lines.push('', '本次登入憑證有效至今日 24:00（台北時間），到期後需重新登入。',
+        '若非本人操作，請立即聯繫系統管理者停用帳號，並可於系統「登入紀錄」按「登出所有裝置」使所有憑證即時失效。');
       MailApp.sendEmail({
         to: userEmail,
         subject: '【屏科大導師資訊系統】登入通知（測試版）',
-        body:
-          '您的帳號剛剛登入導師資訊系統。\n\n' +
-          '環境：測試版\n' +
-          '時間：' + timeStr + '（台北時間）\n' +
-          '瀏覽器：' + (ua || '（未知）') + '\n\n' +
-          '本次登入憑證有效至今日 24:00（台北時間），到期後需重新登入。\n' +
-          '若非本人操作，請立即聯繫系統管理者停用帳號。',
+        body: lines.join('\n'),
       });
       mailSent = true;
     }
   } catch (e) { /* 寄信失敗不阻斷登入 */ }
 
+  try {
+    sessionsAppendRecord_({
+      jti: issued.jti, email: userEmail, ua: ua, ip: ip, geo: geo,
+      iat: issued.iat, exp: issued.exp, issuedAtMs: Date.now(), issuedAt: new Date().toISOString(),
+    }, ctx);
+  } catch (e) { /* 登入紀錄寫入失敗不阻斷登入 */ }
+
   return { sessionToken: issued.token, exp: issued.exp, email: userEmail, mailSent: mailSent };
+}
+
+// ── 登入紀錄（sessions.json）：供「登入紀錄」顯示與登入通知（仿 infosys v146）──
+// 每筆 { jti, email, ua, ip, geo, iat, exp, issuedAtMs, issuedAt }；
+// 寫入時 prune（>45 天丟棄、每人最多留 15 筆），檔案大小有自然上限。
+function sessionsAppendRecord_(rec, ctx) {
+  if (!ctx) return;
+  withLock_(function () {
+    const data = readJsonSafe_('sessions.json', ctx, { sessions: [] });
+    if (!Array.isArray(data.sessions)) data.sessions = [];
+    data.sessions.push(rec);
+    const cutoff = Date.now() - 45 * 24 * 3600 * 1000;
+    data.sessions = data.sessions.filter(function (s) { return s && s.issuedAtMs && s.issuedAtMs >= cutoff; });
+    data.sessions.sort(function (a, b) { return (b.issuedAtMs || 0) - (a.issuedAtMs || 0); });
+    const perUser = {};
+    data.sessions = data.sessions.filter(function (s) {
+      const e = s.email || '';
+      perUser[e] = (perUser[e] || 0) + 1;
+      return perUser[e] <= 15;
+    });
+    writeJsonPath_('sessions.json', data, ctx);
+  });
+}
+
+// sessionLogout：註銷「呼叫者自己」全部裝置的 token。任何已認證帳號都可呼叫，
+// 只影響自己的帳號（email 取自已驗證的憑證，不收 params）。
+function sessionLogoutAction_(params, ctx, userEmail) {
+  sessionRevokeAllDevices_(userEmail);
+  appendAuditLog_(ctx, { action: 'sessionLogout', by: userEmail, at: new Date().toISOString() });
+  return { ok: true };
+}
+
+// listMySessions：只回「呼叫者自己」的登入紀錄（新到舊），每筆標記 expired/revoked/active/current。
+// 不提供查他人紀錄的參數——email 一律取自已驗證的憑證。
+function listMySessionsAction_(params, ctx, userEmail) {
+  const data = readJsonSafe_('sessions.json', ctx, { sessions: [] });
+  const rb = sessionRevokedBeforeMap_()[userEmail];
+  const nowSec = Math.floor(Date.now() / 1000);
+  const curJti = String(params.currentJti || '');
+  const mine = (Array.isArray(data.sessions) ? data.sessions : [])
+    .filter(function (s) { return s && s.email === userEmail; })
+    .sort(function (a, b) { return (b.issuedAtMs || 0) - (a.issuedAtMs || 0); })
+    .map(function (s) {
+      const expired = Number(s.exp) <= nowSec;
+      const revoked = !!(rb && Number(s.iat) < Number(rb));
+      return Object.assign({}, s, {
+        expired: expired, revoked: revoked,
+        active: !expired && !revoked,
+        current: !!(curJti && s.jti === curJti),
+      });
+    });
+  return { sessions: mine };
 }
 
 // recordSubmit：任何已認證帳號都可呼叫，但該班若設了非空白名單、且此人不是該班導師，

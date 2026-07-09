@@ -87,7 +87,8 @@
   .row > .field{flex:1; min-width:160px;}
 
   .badge{display:inline-block; font-size:.74rem; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap;}
-  .badge-pending_tutor,.badge-pending_dept,.badge-pending_director{background:var(--color-warning-bg); color:var(--color-warning);}
+  .badge-pending_tutor,.badge-pending_dept,.badge-pending_staffLead,.badge-pending_director{background:var(--color-warning-bg); color:var(--color-warning);}
+  .badge-muted{background:var(--color-bg); color:var(--color-muted);}
   .badge-approved{background:var(--color-success-bg); color:var(--color-success);}
   .badge-rejected{background:var(--color-danger-bg); color:var(--color-danger);}
   .badge-type{background:#ebf4ff; color:var(--color-primary-dark);}
@@ -200,6 +201,7 @@
     <div class="user-box">
       <img id="user-avatar" class="user-avatar" alt="" />
       <span id="user-name" class="user-name"></span>
+      <button id="login-history-btn" class="btn btn-ghost btn-sm">登入紀錄</button>
       <button id="logout-btn" class="btn btn-ghost btn-sm">登出</button>
     </div>
   </header>
@@ -285,6 +287,28 @@ function clearSession() {
   sessionToken = null;
   sessionExp = 0;
   try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+}
+// 目前 session 的 jti（登入紀錄標記「目前裝置」用）
+function getSessionJti() {
+  try {
+    if (!sessionToken) return '';
+    const p = JSON.parse(atob(sessionToken.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')));
+    return p.jti || '';
+  } catch (e) { return ''; }
+}
+// 取用戶端 IP 與大致位置（供登入通知信與登入紀錄）。GAS 拿不到來源 IP，改由前端向公開 IP 服務查詢。
+// best-effort：逾 3 秒或失敗一律回空物件，絕不阻斷登入。
+async function fetchClientIpGeo() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    const r = await fetch('https://ipapi.co/json/', { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return {};
+    const d = await r.json();
+    const geo = [d.city, d.region, d.country_name].filter(Boolean).join(', ');
+    return { ip: d.ip || '', geo: geo };
+  } catch (e) { return {}; }
 }
 
 function escapeHtml(s) {
@@ -448,8 +472,13 @@ async function handleCredentialResponse(response) {
   // SESSION_SECRET 尚未設置或後端異常時系統仍可用（效期一小時）。
   clearSession();
   try {
-    const s = await proxyCall('sessionStart', { ua: navigator.userAgent.slice(0, 200) });
+    const ipgeo = await fetchClientIpGeo();  // best-effort，失敗回空物件、不阻斷登入
+    const s = await proxyCall('sessionStart', {
+      ua: navigator.userAgent.slice(0, 200), ip: ipgeo.ip || '', geo: ipgeo.geo || '',
+    });
     saveSession(s.sessionToken, s.exp);
+    // 有角色的帳號會收到登入通知信；Gmail 可能把它分到垃圾郵件/促銷，主動提醒一次
+    if (s.mailSent) showToast('已寄出登入通知信；若未在收件匣，請檢查垃圾郵件分類', 'info');
   } catch (e) {
     console.error('sessionStart 失敗，降級為一小時效期登入：', e);
     showToast('登入憑證簽發失敗，本次以一小時效期登入', 'error');
@@ -487,10 +516,72 @@ function hideReloginModal() {
   if ($('modal-box').querySelector('#relogin-btn-slot')) closeModal();
 }
 
-$('logout-btn').addEventListener('click', () => {
+// 本機登出（清鍵＋重載）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+function localSignOut() {
   try { localStorage.removeItem(LS_USER_KEY); localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
   location.reload();
+}
+$('logout-btn').addEventListener('click', async () => {
+  // 只在本機 session 仍有效時 best-effort 註銷；session 已過期就直接本機登出，
+  // 避免登出動作反而觸發 proxyCall 的「靜默重登→重試」流程跳出登入視窗。
+  if (hasValidSession()) {
+    try { await proxyCall('sessionLogout'); } catch (e) { /* 註銷失敗不阻斷登出 */ }
+  }
+  localSignOut();
+});
+
+// ── 登入紀錄（modal）：近期以此帳號登入的裝置/IP/位置；可一鍵登出所有裝置 ──
+$('login-history-btn').addEventListener('click', () => showLoginHistory());
+
+async function showLoginHistory() {
+  openModal('登入紀錄',
+    '<p class="field-hint">近期以你的帳號登入本系統的裝置、IP 與大致位置。若發現非本人登入，請按「登出所有裝置」使所有登入憑證即時失效，並儘速更改 Google 密碼、聯繫系統管理者。</p>' +
+    '<div id="login-history-body" class="field-hint">載入中…</div>' +
+    '<div class="modal-actions">' +
+      '<button class="btn btn-danger btn-sm" data-action="logout-all-devices">登出所有裝置</button>' +
+      '<button class="btn btn-sm" data-action="close-modal">關閉</button>' +
+    '</div>');
+  const body = $('login-history-body');
+  let list = [];
+  try {
+    const r = await proxyCall('listMySessions', { currentJti: getSessionJti() });
+    list = (r && r.sessions) || [];
+  } catch (e) {
+    body.innerHTML = '<span style="color:var(--color-danger);">登入紀錄載入失敗：' + escapeHtml(e.message) + '</span>';
+    return;
+  }
+  if (!list.length) { body.textContent = '目前沒有登入紀錄。'; return; }
+  const fmt = (iso) => { try { return new Date(iso).toLocaleString('zh-TW', { hour12: false }); } catch (e) { return iso || ''; } };
+  const uaShort = (ua) => {
+    if (!ua) return '（未知裝置）';
+    const os = /Windows/.test(ua) ? 'Windows' : /iPhone|iPad|iOS/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '其他';
+    const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '瀏覽器';
+    return os + '・' + br;
+  };
+  body.innerHTML = list.map((s) => {
+    const badge = s.current ? '<span class="badge badge-approved">目前裝置</span>'
+      : s.active ? '<span class="badge badge-pending_tutor">使用中</span>'
+      : s.revoked ? '<span class="badge badge-rejected">已登出</span>'
+      : '<span class="badge badge-muted">已過期</span>';
+    return '<div style="padding:8px 0; border-bottom:1px solid var(--color-border);">' +
+      '<div><strong>' + escapeHtml(uaShort(s.ua)) + '</strong> ' + badge + '</div>' +
+      '<div class="field-hint">登入時間：' + escapeHtml(fmt(s.issuedAt)) + '</div>' +
+      '<div class="field-hint">IP：' + escapeHtml(s.ip || '（未取得）') + (s.geo ? '　位置：' + escapeHtml(s.geo) : '') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+document.body.addEventListener('click', async (e) => {
+  if (!e.target.closest('[data-action="logout-all-devices"]')) return;
+  if (!confirm('確定要登出所有裝置嗎？\n\n所有目前有效的登入憑證（包含本裝置與其他電腦）都會立即失效，下次都需要重新登入。')) return;
+  try {
+    await proxyCall('sessionLogout');
+    showToast('已登出所有裝置，即將回到登入畫面…', 'success');
+    setTimeout(() => localSignOut(), 800);
+  } catch (err) {
+    showToast('登出所有裝置失敗：' + err.message, 'error');
+  }
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

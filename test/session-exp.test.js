@@ -55,15 +55,35 @@ const UtilitiesMock = {
   computeHmacSha256Signature: (v, k) =>
     Array.from(crypto.createHmac('sha256', k).update(v, 'utf8').digest()).map((b) => (b > 127 ? b - 256 : b)),
   newBlob: (bytes) => ({ getDataAsString: () => Buffer.from(bytes.map((b) => b & 255)).toString('utf8') }),
+  getUuid: () => crypto.randomUUID(),
 };
 
-function makeSession(secret) {
+// props = 可變的 Script Properties 內容（SESSION_SECRET / SESSION_REVOKED_BEFORE），
+// 供註銷測試在簽發後修改；CacheService 用簡單記憶體 map 模擬（含 remove 清快取語意）。
+function makeSession(secret, props) {
+  props = props || {};
+  if (secret !== undefined) props.SESSION_SECRET = secret;
+  const cache = {};
   return load(
-    ['getSessionSecret_', 'issueSessionToken_', 'verifySessionToken_', 'nextTaipeiMidnightEpochSec_'],
+    ['getSessionSecret_', 'issueSessionToken_', 'verifySessionToken_',
+     'sessionRevokedBeforeMap_', 'sessionRevokeAllDevices_', 'nextTaipeiMidnightEpochSec_'],
     {
       Utilities: UtilitiesMock,
       PropertiesService: {
-        getScriptProperties: () => ({ getProperty: (k) => (k === 'SESSION_SECRET' ? secret : null) }),
+        getScriptProperties: () => ({
+          getProperty: (k) => (k in props ? props[k] : null),
+          setProperty: (k, v) => { props[k] = String(v); },
+        }),
+      },
+      CacheService: {
+        getScriptCache: () => ({
+          get: (k) => (k in cache ? cache[k] : null),
+          put: (k, v) => { cache[k] = String(v); },
+          remove: (k) => { delete cache[k]; },
+        }),
+      },
+      LockService: {
+        getScriptLock: () => ({ waitLock: () => {}, releaseLock: () => {} }),
       },
     }
   );
@@ -126,4 +146,64 @@ test('SESSION_SECRET 未設置 → verifySessionToken_ fail-closed 回 null', ()
 test('SESSION_SECRET 未設置 → issueSessionToken_ throw', () => {
   const T = makeSession(null);
   assert.throws(() => T.issueSessionToken_('a@b.com'), /SESSION_SECRET/);
+});
+
+// ── 登出即註銷（全部裝置）：revokedBefore 機制 ────────────────────────────────
+
+test('每個 token 都有唯一 jti，並回傳 iat', () => {
+  const T = makeSession(SECRET);
+  const a = T.issueSessionToken_('a@b.com');
+  const b = T.issueSessionToken_('a@b.com');
+  assert.ok(a.jti && b.jti && a.jti !== b.jti, 'jti 應唯一');
+  assert.ok(a.iat > 0);
+});
+
+test('sessionRevokeAllDevices_ 後，先前簽發的 token（不分裝置）全部失效', () => {
+  const props = {};
+  const T = makeSession(SECRET, props);
+  const t1 = T.issueSessionToken_('a@b.com');
+  const t2 = T.issueSessionToken_('a@b.com');   // 模擬另一台裝置
+  assert.equal(T.verifySessionToken_(t1.token), 'a@b.com');
+  // iat 以「秒」為粒度，確保註銷時間戳 > 簽發秒（同一秒內 iat < rb 不成立）
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2000;
+  try {
+    T.sessionRevokeAllDevices_('a@b.com');
+    assert.equal(T.verifySessionToken_(t1.token), null, '本裝置 token 應失效');
+    assert.equal(T.verifySessionToken_(t2.token), null, '其他裝置 token 也應失效');
+  } finally { Date.now = realNow; }
+});
+
+test('註銷只影響該帳號；其他帳號的 token 不受影響', () => {
+  const props = {};
+  const T = makeSession(SECRET, props);
+  const victim = T.issueSessionToken_('a@b.com');
+  const other = T.issueSessionToken_('c@d.com');
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2000;
+  try {
+    T.sessionRevokeAllDevices_('a@b.com');
+    assert.equal(T.verifySessionToken_(victim.token), null);
+    assert.equal(T.verifySessionToken_(other.token), 'c@d.com');
+  } finally { Date.now = realNow; }
+});
+
+test('註銷後重新登入（rb 之後簽發）的 token 有效', () => {
+  const props = {};
+  const T = makeSession(SECRET, props);
+  const realNow = Date.now;
+  Date.now = () => realNow() + 2000;
+  try {
+    T.sessionRevokeAllDevices_('a@b.com');
+    Date.now = () => realNow() + 4000;  // 再過 2 秒重新登入
+    const fresh = T.issueSessionToken_('a@b.com');
+    assert.equal(T.verifySessionToken_(fresh.token), 'a@b.com');
+  } finally { Date.now = realNow; }
+});
+
+test('SESSION_REVOKED_BEFORE 內容毀損（非 JSON）→ 視同空 map，不擋合法 token', () => {
+  const props = { SESSION_REVOKED_BEFORE: 'not-json{{{' };
+  const T = makeSession(SECRET, props);
+  const issued = T.issueSessionToken_('a@b.com');
+  assert.equal(T.verifySessionToken_(issued.token), 'a@b.com');
 });
