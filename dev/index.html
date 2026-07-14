@@ -73,6 +73,17 @@
   .btn-sm{padding:5px 10px; font-size:.78rem;}
   .btn:disabled{opacity:.55; cursor:not-allowed;}
 
+  /* 儲存/送出按鈕統一回饋（withBtnPending helper 用）：按下→spinner+處理中；成功→短暫✓完成。 */
+  .btn-spinner{
+    display:inline-block; width:.9em; height:.9em; margin-right:6px; vertical-align:-.15em;
+    border:2px solid rgba(0,0,0,.18); border-top-color:currentColor; border-radius:50%;
+    animation:spin .7s linear infinite;
+  }
+  .btn-pending{cursor:wait;}
+  .btn-pending,.btn-done{opacity:1;}
+  .btn:disabled.btn-pending,.btn:disabled.btn-done{opacity:1;}
+  .btn-done{background:var(--color-success); border-color:var(--color-success); color:#fff; transition:background .15s ease, color .15s ease;}
+
   .card{background:var(--color-card); border:1px solid var(--color-border); border-radius:var(--radius); padding:18px; margin-bottom:16px;}
   .card h2{margin:0 0 14px; font-size:1.08rem;}
   .card h3{margin:0 0 10px; font-size:.96rem;}
@@ -82,6 +93,10 @@
     width:100%; padding:8px 10px; border:1px solid var(--color-border); border-radius:7px; background:#fff; color:var(--color-text);
   }
   .field textarea{min-height:80px; resize:vertical;}
+  /* checkbox/radio 不吃 .field input 的 width:100%/padding/border（否則撐成大方塊、位置跑掉）；
+     並統一 vertical-align，修正相對中文字「偏高」的視覺問題。 */
+  .field input[type="checkbox"],.field input[type="radio"]{width:auto; padding:0; border:none; background:transparent;}
+  input[type="checkbox"]{vertical-align:middle; margin:0 6px 2px 0; accent-color:var(--color-primary);}
   .field-hint{font-size:.75rem; color:var(--color-muted); margin-top:4px;}
   .row{display:flex; gap:14px; flex-wrap:wrap;}
   .row > .field{flex:1; min-width:160px;}
@@ -331,6 +346,37 @@ function showLoading(text) {
 }
 function hideLoading() { $('loading-overlay').classList.remove('open'); }
 
+// proxyCall 往返約 1–3 秒，按鈕按下後若無回饋會讓人以為系統沒反應。統一由此 helper 包裝：
+// 按下瞬間 disabled＋spinner＋「處理中…」；fn() 成功後短暫顯示「✓ 完成」再還原；失敗立刻還原
+// 並把錯誤 re-throw 出去，交由呼叫端既有的 try/catch（大多會 showToast）處理，不吞錯誤。
+// btn 可能在 fn() 執行期間因整頁/整區塊重繪而離開 DOM（例如儲存成功後 render 整個後台頁籤）；
+// 對已離開 DOM 的節點做 classList/innerHTML/disabled 操作在 JS 裡不會報錯，因此不特別處理。
+async function withBtnPending(btn, fn) {
+  if (!btn) return fn();
+  if (btn.disabled) return; // 已在處理中，忽略重複觸發（防連點）
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('btn-pending');
+  btn.innerHTML = '<span class="btn-spinner"></span>處理中…';
+  try {
+    const result = await fn();
+    btn.classList.remove('btn-pending');
+    btn.classList.add('btn-done');
+    btn.innerHTML = '✓ 完成';
+    setTimeout(function () {
+      btn.classList.remove('btn-done');
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }, 1200);
+    return result;
+  } catch (e) {
+    btn.classList.remove('btn-pending');
+    btn.innerHTML = orig;
+    btn.disabled = false;
+    throw e;
+  }
+}
+
 function showLoginError(msg) {
   const el = $('login-error');
   el.textContent = msg;
@@ -522,13 +568,15 @@ function localSignOut() {
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
   location.reload();
 }
-$('logout-btn').addEventListener('click', async () => {
+$('logout-btn').addEventListener('click', async (e) => {
   // 只在本機 session 仍有效時 best-effort 註銷；session 已過期就直接本機登出，
   // 避免登出動作反而觸發 proxyCall 的「靜默重登→重試」流程跳出登入視窗。
-  if (hasValidSession()) {
-    try { await proxyCall('sessionLogout'); } catch (e) { /* 註銷失敗不阻斷登出 */ }
-  }
-  localSignOut();
+  await withBtnPending(e.currentTarget, async function () {
+    if (hasValidSession()) {
+      try { await proxyCall('sessionLogout'); } catch (err) { /* 註銷失敗不阻斷登出 */ }
+    }
+    localSignOut();
+  });
 });
 
 // ── 登入紀錄（modal）：近期以此帳號登入的裝置/IP/位置；可一鍵登出所有裝置 ──
@@ -573,12 +621,15 @@ async function showLoginHistory() {
 }
 
 document.body.addEventListener('click', async (e) => {
-  if (!e.target.closest('[data-action="logout-all-devices"]')) return;
+  const btn = e.target.closest('[data-action="logout-all-devices"]');
+  if (!btn) return;
   if (!confirm('確定要登出所有裝置嗎？\n\n所有目前有效的登入憑證（包含本裝置與其他電腦）都會立即失效，下次都需要重新登入。')) return;
   try {
-    await proxyCall('sessionLogout');
-    showToast('已登出所有裝置，即將回到登入畫面…', 'success');
-    setTimeout(() => localSignOut(), 800);
+    await withBtnPending(btn, async function () {
+      await proxyCall('sessionLogout');
+      showToast('已登出所有裝置，即將回到登入畫面…', 'success');
+      setTimeout(() => localSignOut(), 800);
+    });
   } catch (err) {
     showToast('登出所有裝置失敗：' + err.message, 'error');
   }
@@ -1111,39 +1162,38 @@ async function onUploadSubmit(e) {
   const files = Array.from($('up-files').files || []);
   const semester = bootstrapData.semester;
   const submitBtn = e.target.querySelector('button[type=submit]');
-  submitBtn.disabled = true;
   try {
-    // 1) classResolve：find-or-create 系所/班級（含導師建議），拿 classId；用回傳同步本地清單。
-    $('up-progress').textContent = '確認班級中…';
-    const resolved = await proxyCall('classResolve', resolveParams);
-    bootstrapData.departments = resolved.departments;
-    bootstrapData.classes = resolved.classes;
-    if (resolved.suggestionsDropped > 0) showToast('部分導師建議未收錄（該班建議數已達上限）', 'info');
-    const classId = resolved.classId;
+    await withBtnPending(submitBtn, async function () {
+      // 1) classResolve：find-or-create 系所/班級（含導師建議），拿 classId；用回傳同步本地清單。
+      $('up-progress').textContent = '確認班級中…';
+      const resolved = await proxyCall('classResolve', resolveParams);
+      bootstrapData.departments = resolved.departments;
+      bootstrapData.classes = resolved.classes;
+      if (resolved.suggestionsDropped > 0) showToast('部分導師建議未收錄（該班建議數已達上限）', 'info');
+      const classId = resolved.classId;
 
-    // 2) 逐檔上傳附件（須在 recordSubmit 之前，後端 submit 時驗證附件歸屬資料夾）。
-    let attachments = [];
-    if (files.length) {
-      attachments = await uploadFilesForClass(semester, classId, files, function (i, total, fname) {
-        $('up-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+      // 2) 逐檔上傳附件（須在 recordSubmit 之前，後端 submit 時驗證附件歸屬資料夾）。
+      let attachments = [];
+      if (files.length) {
+        attachments = await uploadFilesForClass(semester, classId, files, function (i, total, fname) {
+          $('up-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+        });
+      }
+      $('up-progress').textContent = '';
+
+      // 3) 建立紀錄。
+      await proxyCall('recordSubmit', {
+        semester: semester, classId: classId, type: type,
+        form: form, attachments: attachments,
+        uploader: { name: name, studentId: sid },
       });
-    }
-    $('up-progress').textContent = '';
-
-    // 3) 建立紀錄。
-    await proxyCall('recordSubmit', {
-      semester: semester, classId: classId, type: type,
-      form: form, attachments: attachments,
-      uploader: { name: name, studentId: sid },
+      showToast('已送出，等待核章', 'success');
+      await refreshBootstrap();
+      showPage('mine');
     });
-    showToast('已送出，等待核章', 'success');
-    await refreshBootstrap();
-    showPage('mine');
   } catch (err) {
     $('up-progress').textContent = '';
     showToast('送出失敗：' + err.message, 'error');
-  } finally {
-    submitBtn.disabled = false;
   }
 }
 
@@ -1297,27 +1347,26 @@ function openResubmitModal(r, onDone) {
     if (invalid) { showToast(invalid, 'error'); return; }
     const files = Array.from($('re-files').files || []);
     const submitBtn = e.target.querySelector('button[type=submit]');
-    submitBtn.disabled = true;
     try {
-      let attachments = r.attachments || [];
-      if (files.length) {
-        const newOnes = await uploadFilesForClass(r.semester, r.classId, files, function (i, total, fname) {
-          $('re-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+      await withBtnPending(submitBtn, async function () {
+        let attachments = r.attachments || [];
+        if (files.length) {
+          const newOnes = await uploadFilesForClass(r.semester, r.classId, files, function (i, total, fname) {
+            $('re-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+          });
+          attachments = attachments.concat(newOnes);
+        }
+        await proxyCall('recordResubmit', {
+          semester: r.semester, recordId: r.id, form: form, attachments: attachments,
+          uploaderName: r.uploader.name,
         });
-        attachments = attachments.concat(newOnes);
-      }
-      await proxyCall('recordResubmit', {
-        semester: r.semester, recordId: r.id, form: form, attachments: attachments,
-        uploaderName: r.uploader.name,
+        showToast('已重新送出，等待核章', 'success');
+        closeModal();
+        if (onDone) await onDone(); else await loadMineList();
+        await refreshBootstrap();
       });
-      showToast('已重新送出，等待核章', 'success');
-      closeModal();
-      if (onDone) await onDone(); else await loadMineList();
-      await refreshBootstrap();
     } catch (err) {
       showToast('重新送出失敗：' + err.message, 'error');
-    } finally {
-      submitBtn.disabled = false;
     }
   });
 }
@@ -1383,18 +1432,22 @@ document.body.addEventListener('click', async function (e) {
   if (viewBtn) {
     // myclasses 頁自己的資料未存全域變數（避免與 mine 頁互相覆蓋），直接重查一次找出該筆。
     try {
-      const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
-      const r = (res.tutorClassRecords || []).find(function (x) { return x.id === viewBtn.dataset.id; });
-      openRecordViewModal(r);
+      await withBtnPending(viewBtn, async function () {
+        const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+        const r = (res.tutorClassRecords || []).find(function (x) { return x.id === viewBtn.dataset.id; });
+        openRecordViewModal(r);
+      });
     } catch (err) { showToast('讀取失敗：' + err.message, 'error'); }
     return;
   }
   const resubmitBtn = e.target.closest('[data-action="myclasses-resubmit"]');
   if (resubmitBtn) {
     try {
-      const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
-      const r = (res.tutorClassRecords || []).find(function (x) { return x.id === resubmitBtn.dataset.id; });
-      if (r) openResubmitModal(r, function () { loadMyClassesList(); });
+      await withBtnPending(resubmitBtn, async function () {
+        const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+        const r = (res.tutorClassRecords || []).find(function (x) { return x.id === resubmitBtn.dataset.id; });
+        if (r) openResubmitModal(r, function () { loadMyClassesList(); });
+      });
     } catch (err) { showToast('讀取失敗：' + err.message, 'error'); }
   }
 });
@@ -1529,16 +1582,16 @@ function openApproveModal(r) {
     if (invalid) { showToast(invalid, 'error'); return; }
     const topicsPatch = showTopics ? collectTopicsPatch(r.topics, 'apv-topic-') : null;
     const btn = $('approve-confirm-btn');
-    btn.disabled = true;
     try {
-      await proxyCall('recordApprove', { semester: r.semester, recordId: r.id, updatedForm: updatedForm });
-      if (topicsPatch) await proxyCall('recordSetTopics', { semester: r.semester, recordId: r.id, topics: topicsPatch });
-      showToast('已核准', 'success');
-      closeModal();
-      await refreshBootstrap();
+      await withBtnPending(btn, async function () {
+        await proxyCall('recordApprove', { semester: r.semester, recordId: r.id, updatedForm: updatedForm });
+        if (topicsPatch) await proxyCall('recordSetTopics', { semester: r.semester, recordId: r.id, topics: topicsPatch });
+        showToast('已核准', 'success');
+        closeModal();
+        await refreshBootstrap();
+      });
     } catch (err) {
       showToast('核准失敗：' + err.message, 'error');
-      btn.disabled = false;
     }
   });
 }
@@ -1558,11 +1611,14 @@ function openRejectModal(r) {
     const reason = $('reject-reason').value.trim();
     if (!reason) { showToast('請填寫退件理由', 'error'); return; }
     const updatedForm = readRecordFormFields(r.type, 'rej-');
+    const submitBtn = ev.target.querySelector('button[type=submit]');
     try {
-      await proxyCall('recordReject', { semester: r.semester, recordId: r.id, reason: reason, updatedForm: updatedForm });
-      showToast('已退件', 'success');
-      closeModal();
-      await refreshBootstrap();
+      await withBtnPending(submitBtn, async function () {
+        await proxyCall('recordReject', { semester: r.semester, recordId: r.id, reason: reason, updatedForm: updatedForm });
+        showToast('已退件', 'success');
+        closeModal();
+        await refreshBootstrap();
+      });
     } catch (err) { showToast('退件失敗：' + err.message, 'error'); }
   });
 }
@@ -1640,12 +1696,15 @@ document.body.addEventListener('click', function (e) {
   $('whitelist-form').addEventListener('submit', async function (ev) {
     ev.preventDefault();
     const emails = $('wl-emails').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    const submitBtn = ev.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('classSetWhitelist', { classId: c.id, uploadWhitelist: emails });
-      bootstrapData.classes = res.classes;
-      showToast('白名單已更新', 'success');
-      closeModal();
-      showPage('stats');
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('classSetWhitelist', { classId: c.id, uploadWhitelist: emails });
+        bootstrapData.classes = res.classes;
+        showToast('白名單已更新', 'success');
+        closeModal();
+        showPage('stats');
+      });
     } catch (err) { showToast('更新失敗：' + err.message, 'error'); }
   });
 });
@@ -1803,12 +1862,15 @@ function openCollegeForm(college) {
     if (!id) id = slugifyIdFront($('college-name').value.trim());
     if (!id) { showToast('請輸入學院名稱', 'error'); return; }
     const entry = { id: id, name: $('college-name').value.trim(), order: Number($('college-order').value) || 0, disabled: $('college-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertCollege', { college: entry });
-      bootstrapData.colleges = res.colleges;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminColleges();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertCollege', { college: entry });
+        bootstrapData.colleges = res.colleges;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminColleges();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -1855,12 +1917,15 @@ function openTutorSystemForm(sys) {
       requiredMeetingCount: countVal === '' ? null : Number(countVal),
       disabled: $('system-disabled').checked,
     };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertTutorSystem', { tutorSystem: entry });
-      bootstrapData.tutorSystems = res.tutorSystems;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminTutorSystems();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertTutorSystem', { tutorSystem: entry });
+        bootstrapData.tutorSystems = res.tutorSystems;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminTutorSystems();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -1910,12 +1975,15 @@ function openStaffLeadForm(email) {
     const targetEmail = $('lead-email').value.trim();
     if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
     const entry = { email: targetEmail, name: $('lead-name').value.trim(), disabled: $('lead-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertStaffLead', { staffLead: entry });
-      bootstrapData.staffLeads = res.staffLeads;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminStaffTeam();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertStaffLead', { staffLead: entry });
+        bootstrapData.staffLeads = res.staffLeads;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminStaffTeam();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -1943,12 +2011,15 @@ function openStaffAssistantForm(email) {
       email: targetEmail, name: $('assistant-name').value.trim(),
       leadEmail: $('assistant-lead').value, disabled: $('assistant-disabled').checked,
     };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertStaffAssistant', { staffAssistant: entry });
-      bootstrapData.staffAssistants = res.staffAssistants;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminStaffTeam();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertStaffAssistant', { staffAssistant: entry });
+        bootstrapData.staffAssistants = res.staffAssistants;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminStaffTeam();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -1986,15 +2057,14 @@ document.body.addEventListener('click', async function (e) {
     const keywords = el ? el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [];
     patch[key] = { label: (rules[key] && rules[key].label) || key, keywords: keywords };
   });
-  btn.disabled = true;
   try {
-    const res = await proxyCall('adminSetKeywordRules', { keywordRules: patch });
-    bootstrapData.keywordRules = res.keywordRules;
-    showToast('已儲存', 'success');
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminSetKeywordRules', { keywordRules: patch });
+      bootstrapData.keywordRules = res.keywordRules;
+      showToast('已儲存', 'success');
+    });
   } catch (err) {
     showToast('儲存失敗：' + err.message, 'error');
-  } finally {
-    btn.disabled = false;
   }
 });
 
@@ -2029,12 +2099,15 @@ function openDeptForm(dept) {
     const id = $('dept-id').value.trim();
     if (!id) { showToast('請輸入系所 ID', 'error'); return; }
     const entry = { id: id, name: $('dept-name').value.trim(), headName: $('dept-head-name').value.trim(), headEmail: $('dept-head-email').value.trim(), active: $('dept-active').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertDepartment', { department: entry });
-      bootstrapData.departments = res.departments;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminDepartments();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertDepartment', { department: entry });
+        bootstrapData.departments = res.departments;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminDepartments();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -2106,7 +2179,9 @@ function renderAdminClasses() {
 }
 
 // 建議轉正/移除：沿用 adminUpsertClass 送整包 class（tutors 只有 admin action 能動）。
-async function applySuggestionAction(classId, idx, promote, emailOverride) {
+// btn（選填）：觸發此動作的按鈕，走 withBtnPending 統一回饋；未附 email 需先跳補填 modal 的
+// 早退路徑（尚未真正呼叫後端）不套用 pending 視覺。
+async function applySuggestionAction(classId, idx, promote, emailOverride, btn) {
   const c = classById(classId);
   if (!c || !c.suggestedTutors || !c.suggestedTutors[idx]) { showToast('找不到該筆建議，請重新整理', 'error'); return; }
   const s = c.suggestedTutors[idx];
@@ -2120,12 +2195,14 @@ async function applySuggestionAction(classId, idx, promote, emailOverride) {
     entry.tutors = (c.tutors || []).concat([{ name: s.name, email: email }]);
   }
   try {
-    const res = await proxyCall('adminUpsertClass', { class: entry });
-    bootstrapData.classes = res.classes;
-    showToast(promote ? '已轉為正式導師' : '已移除建議', 'success');
-    closeModal();
-    renderNav();
-    renderAdminClasses();
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminUpsertClass', { class: entry });
+      bootstrapData.classes = res.classes;
+      showToast(promote ? '已轉為正式導師' : '已移除建議', 'success');
+      closeModal();
+      renderNav();
+      renderAdminClasses();
+    });
   } catch (err) { showToast('操作失敗：' + err.message, 'error'); }
 }
 
@@ -2141,15 +2218,16 @@ function openSuggestionEmailModal(classId, idx) {
   '</form>');
   $('sug-email-form').addEventListener('submit', function (e) {
     e.preventDefault();
-    applySuggestionAction(classId, idx, true, $('sug-email-input').value);
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    applySuggestionAction(classId, idx, true, $('sug-email-input').value, submitBtn);
   });
 }
 
 document.body.addEventListener('click', function (e) {
   const promoteBtn = e.target.closest('[data-action="sug-promote"]');
-  if (promoteBtn) { applySuggestionAction(promoteBtn.dataset.class, Number(promoteBtn.dataset.idx), true); return; }
+  if (promoteBtn) { applySuggestionAction(promoteBtn.dataset.class, Number(promoteBtn.dataset.idx), true, undefined, promoteBtn); return; }
   const removeBtn = e.target.closest('[data-action="sug-remove"]');
-  if (removeBtn) { applySuggestionAction(removeBtn.dataset.class, Number(removeBtn.dataset.idx), false); return; }
+  if (removeBtn) { applySuggestionAction(removeBtn.dataset.class, Number(removeBtn.dataset.idx), false, undefined, removeBtn); return; }
 });
 
 function openClassForm(cls) {
@@ -2207,13 +2285,16 @@ function openClassForm(cls) {
       requiredMeetingOverride: overrideVal === '' ? null : Number(overrideVal),
       tutors: newTutors, dualApprovalMode: $('class-dual').value, active: $('class-active').checked,
     };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertClass', { class: entry });
-      bootstrapData.classes = res.classes;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderNav();
-      renderAdminClasses();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertClass', { class: entry });
+        bootstrapData.classes = res.classes;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderNav();
+        renderAdminClasses();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -2259,12 +2340,15 @@ function openSemesterForm(sem) {
       quotaActivity: Number($('sem-quota-activity').value) || DEFAULT_QUOTA_ACTIVITY,
       isCurrent: $('sem-current').checked,
     };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertSemester', { semester: entry });
-      bootstrapData.semesters = res.semesters;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminSemesters();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertSemester', { semester: entry });
+        bootstrapData.semesters = res.semesters;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminSemesters();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -2307,12 +2391,15 @@ function openUserForm(email) {
     const targetEmail = $('uf-email').value.trim();
     if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
     const entry = { name: $('uf-name').value.trim(), role: $('uf-role').value, disabled: $('uf-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
     try {
-      const res = await proxyCall('adminUpsertUser', { email: targetEmail, user: entry });
-      bootstrapData.users = res.users;
-      showToast('已儲存', 'success');
-      closeModal();
-      renderAdminUsers();
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertUser', { email: targetEmail, user: entry });
+        bootstrapData.users = res.users;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminUsers();
+      });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
@@ -2401,27 +2488,26 @@ function renderRosterPreview() {
 document.body.addEventListener('click', async function (e) {
   const btn = e.target.closest('[data-action="roster-confirm"]');
   if (!btn || !rosterRows || !rosterRows.length) return;
-  btn.disabled = true;
   try {
-    const res = await proxyCall('adminImportRoster', { rows: rosterRows });
-    bootstrapData.colleges = res.colleges;
-    bootstrapData.departments = res.departments;
-    bootstrapData.tutorSystems = res.tutorSystems;
-    bootstrapData.classes = res.classes;
-    if (res.errors && res.errors.length) {
-      showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
-      $('roster-preview').innerHTML =
-        '<div class="empty-hint" style="color:var(--color-danger);">失敗列：</div>' +
-        '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
-    } else {
-      showToast('匯入完成，成功 ' + res.successCount + ' 列', 'success');
-      rosterRows = null;
-      renderAdminRoster();
-    }
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminImportRoster', { rows: rosterRows });
+      bootstrapData.colleges = res.colleges;
+      bootstrapData.departments = res.departments;
+      bootstrapData.tutorSystems = res.tutorSystems;
+      bootstrapData.classes = res.classes;
+      if (res.errors && res.errors.length) {
+        showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
+        $('roster-preview').innerHTML =
+          '<div class="empty-hint" style="color:var(--color-danger);">失敗列：</div>' +
+          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+      } else {
+        showToast('匯入完成，成功 ' + res.successCount + ' 列', 'success');
+        rosterRows = null;
+        renderAdminRoster();
+      }
+    });
   } catch (err) {
     showToast('匯入失敗：' + err.message, 'error');
-  } finally {
-    btn.disabled = false;
   }
 });
 </script>
