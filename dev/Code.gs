@@ -27,13 +27,16 @@ ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'dev' };
 const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw'];
 
 // 導師制度預設種子（bootstrap 時若 tutorSystems.json 不存在則以此建立；admin 可事後修改/停用）。
+// durationYears = 修業年限（年級升級/畢業判斷用，Ticket D）。注意：種子只在檔案不存在時
+// 生效，既有部署的 tutorSystems.json 不會自動補值——解析端（resolveDuration_）必須容忍
+// durationYears 缺值（fallback 鏈：班級覆寫 → 制度 → prefix 內建預設 → null）。
 const DEFAULT_TUTOR_SYSTEMS_ = [
-  { id: 'day_college',      name: '大學日間部', requiredMeetingCount: 4, disabled: false },
-  { id: 'evening_college',  name: '大學進修部', requiredMeetingCount: 4, disabled: false },
-  { id: 'master',           name: '碩士',       requiredMeetingCount: 4, disabled: false },
-  { id: 'master_inservice', name: '碩專',       requiredMeetingCount: 4, disabled: false },
-  { id: 'doctor',           name: '博士',       requiredMeetingCount: 4, disabled: false },
-  { id: 'family',           name: '家族',       requiredMeetingCount: 2, disabled: false },
+  { id: 'day_college',      name: '大學日間部', requiredMeetingCount: 4, durationYears: 4,    disabled: false },
+  { id: 'evening_college',  name: '大學進修部', requiredMeetingCount: 4, durationYears: 4,    disabled: false },
+  { id: 'master',           name: '碩士',       requiredMeetingCount: 4, durationYears: 2,    disabled: false },
+  { id: 'master_inservice', name: '碩專',       requiredMeetingCount: 4, durationYears: 2,    disabled: false },
+  { id: 'doctor',           name: '博士',       requiredMeetingCount: 4, durationYears: 4,    disabled: false },
+  { id: 'family',           name: '家族',       requiredMeetingCount: 2, durationYears: null, disabled: false },
 ];
 
 // 四類宣導關鍵字預設種子（bootstrap 時若 config.keywordRules 不存在則以此建立；admin/staffLead 可調整）。
@@ -112,6 +115,8 @@ function doPost(e) {
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
+      case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
+      case 'adminRolloverApply':        result = adminRolloverApplyAction_(params, ctx, userEmail); break;
       case 'recordSetTopics':        result = recordSetTopicsAction_(params, ctx, userEmail); break;
       case 'overviewStats':          result = overviewStatsAction_(params, ctx, userEmail); break;
       case 'adminSetKeywordRules':   result = adminSetKeywordRulesAction_(params, ctx, userEmail); break;
@@ -1073,7 +1078,9 @@ function resolveRequiredMeetingCount_(classInfo, tutorSystems) {
 }
 
 // ── 統計總表彙總（純函式）：依 學院→系所→班級 分組，只回彙總與日期，不回紀錄內文 ──────
-function overviewStats_(colleges, departments, classes, tutorSystems, records, keywordTopicKeys) {
+// semesterId（選填）：查歷史學期時，班名以 classNameForSemester_ 解析（升級改名後看舊學期
+// 統計仍顯示當時的班名）；未帶則用現行 displayName||name。
+function overviewStats_(colleges, departments, classes, tutorSystems, records, keywordTopicKeys, semesterId) {
   const collegeById = {};
   (colleges || []).forEach(function (c) { if (c) collegeById[c.id] = c; });
   const deptById = {};
@@ -1085,7 +1092,15 @@ function overviewStats_(colleges, departments, classes, tutorSystems, records, k
   });
   const topicKeys = keywordTopicKeys || ['traffic', 'gender', 'smoking', 'fraud'];
 
-  return (classes || []).filter(function (c) { return c && c.active !== false; }).map(function (c) {
+  // 統計納入規則（Ticket D 調整）：現役未刪一律納入；畢業班（升級時 active:false＋
+  // graduatedSemester）在其在學學期（查詢學期 ≤ graduatedSemester，NNN-N 定寬字串比較）
+  // 仍納入——升級後查歷史學期看得到當時的畢業班（含未繳交者）。手動停用班維持既有
+  // 排除行為；已刪除班一律排除。
+  return (classes || []).filter(function (c) {
+    if (!c || c.deleted === true) return false;
+    if (c.active !== false) return true;
+    return !!(c.graduatedSemester && semesterId && String(semesterId) <= String(c.graduatedSemester));
+  }).map(function (c) {
     const dept = deptById[c.deptId];
     const college = (dept && dept.collegeId) ? collegeById[dept.collegeId] : null;
     const classRecords = recordsByClass[c.id] || [];
@@ -1113,7 +1128,7 @@ function overviewStats_(colleges, departments, classes, tutorSystems, records, k
       college: college ? college.name : null,
       dept: dept ? dept.name : c.deptId,
       classId: c.id,
-      displayName: c.displayName || c.name,
+      displayName: classNameForSemester_(c, semesterId),
       tutors: (c.tutors || []).map(function (t) { return t.name; }),
       required: resolveRequiredMeetingCount_(c, tutorSystems),
       submittedCount: submittedCount,
@@ -1411,6 +1426,154 @@ function canViewTutorHistory_(roles, classInfo) {
   if ((roles.deptHeadOf || []).indexOf(classInfo.deptId) !== -1) return true;
   if ((roles.tutorOf || []).indexOf(classInfo.id) !== -1) return true;
   return false;
+}
+
+// ── 換學期帶入＋年級升級（Ticket D，純函式區）─────────────────────────────────
+// 班級實體 = 一屆學生（cohort）：升級 = 同實體改名（records 以 classId 關聯跨學期連續）；
+// 畢業 = active:false + graduatedSemester。管理員按鈕觸發、預覽逐列可修、確認才套用。
+// 班名歷史掛 class.nameHistory: [{upToSemester, name, displayName}]（升級時 append，
+// upToSemester = fromSemester，語意「到該學期為止叫這個名字」；一年最多一筆，體積有界）。
+
+const GRADE_CHARS_ = ['一', '二', '三', '四', '五', '六', '七'];
+
+// 依 prefix 的內建修業年限預設表（resolveDuration_ 第三順位；prefix 精確比對）。
+const DURATION_BY_PREFIX_ = { '四技': 4, '四技進': 4, '技優': 4, '產專': 4, '產訓': 4, '碩': 2, '碩專': 2, '博': 4 };
+
+// 解析班名中的年級：結尾為「年級字（一~七）＋選填班別字母」才算，回
+// { prefix, grade(1-7), section }；「家族」「海青班」「三A、四A共同指導」等
+// 非年級班名回 null（升級規劃時 keep 不動）。
+function parseClassGrade_(name) {
+  const m = /^(.*?)([一二三四五六七])([A-Za-z]?)$/.exec(String(name || ''));
+  if (!m) return null;
+  return { prefix: m[1], grade: GRADE_CHARS_.indexOf(m[2]) + 1, section: m[3] || '' };
+}
+
+// 修業年限解析鏈（fail-open 為 null，讓規劃端標 uncertain 交 admin 人工確認）：
+// 班級層級覆寫 graduationGrade（獸醫系四技五年制填 5）→ 制度 durationYears →
+// 依 parse 出的 prefix 查內建預設表 → null。
+function resolveDuration_(cls, system, parsed) {
+  if (cls && typeof cls.graduationGrade === 'number' && cls.graduationGrade >= 1 && cls.graduationGrade <= 7) {
+    return cls.graduationGrade;
+  }
+  if (system && typeof system.durationYears === 'number' && system.durationYears >= 1 && system.durationYears <= 7) {
+    return system.durationYears;
+  }
+  if (parsed && Object.prototype.hasOwnProperty.call(DURATION_BY_PREFIX_, parsed.prefix)) {
+    return DURATION_BY_PREFIX_[parsed.prefix];
+  }
+  return null;
+}
+
+// 產生升級規劃（預覽用，不寫入）：逐班判斷 advance（改名升級）/ graduate（畢業停用）/
+// keep（原樣保留）。年差 dy = 學年(to) - 學年(from)：dy ≤ 0（同學年換學期、或選反）全部 keep
+// ——名單本來就掛在班上自動沿用，無事可做。dy ≥ 1 逐班解析年級與修業年限；無法確定的
+// 一律標 uncertain（不擅自動作或標給 admin 在預覽逐列確認）。只納入 active 且未刪除的班。
+function computeRolloverPlan_(classes, departments, tutorSystems, fromId, toId) {
+  const deptById = {};
+  (departments || []).forEach(function (d) { if (d) deptById[d.id] = d; });
+  const sysById = {};
+  (tutorSystems || []).forEach(function (s) { if (s) sysById[s.id] = s; });
+  // 年差 = 學年(to) - 學年(from)；semester id 為 NNN-N（呼叫端已過 requireValidSemester_），
+  // 任一邊解析失敗保守視為 0（全部 keep，fail-closed 不動任何班）。
+  const fromYear = Number(String(fromId || '').slice(0, 3));
+  const toYear = Number(String(toId || '').slice(0, 3));
+  const dy = (isNaN(fromYear) || isNaN(toYear)) ? 0 : toYear - fromYear;
+
+  return (classes || [])
+    .filter(function (c) { return c && c.active !== false && c.deleted !== true; })
+    .map(function (c) {
+      const dept = deptById[c.deptId];
+      const deptNameStr = dept ? dept.name : c.deptId;
+      const system = sysById[c.systemId];
+      const parsed = parseClassGrade_(c.name);
+      const duration = resolveDuration_(c, system, parsed);
+      const row = {
+        classId: c.id, deptId: c.deptId, deptName: deptNameStr,
+        name: c.name, displayName: c.displayName || c.name,
+        tutors: (c.tutors || []).map(function (t) { return (t && t.name) || ''; }),
+        grade: parsed ? parsed.grade : null,
+        newGrade: null, duration: duration,
+        action: 'keep', newName: null, newDisplayName: null,
+        uncertain: false, reason: null,
+      };
+      if (dy <= 0) {
+        row.reason = '同學年換學期，名單自動沿用';
+        return row;
+      }
+      if (!parsed) {
+        row.uncertain = true;
+        row.reason = '無法解析年級';
+        return row;
+      }
+      const newGrade = parsed.grade + dy;
+      row.newGrade = newGrade;
+      if (duration !== null && newGrade > duration) {
+        row.action = 'graduate';
+        row.reason = '超過修業年限 ' + duration + ' 年';
+        return row;
+      }
+      if (duration === null && newGrade > GRADE_CHARS_.length) {
+        row.uncertain = true;
+        row.reason = '修業年限未設定且超出年級字表';
+        return row;
+      }
+      // duration 已知且未超 → 確定升級；duration 未知但年級字還排得出 → 升級但標 uncertain
+      row.action = 'advance';
+      row.newName = parsed.prefix + GRADE_CHARS_[newGrade - 1] + parsed.section;
+      row.newDisplayName = fuseClassDisplayName_(
+        row.newName, deptNameStr, c.systemId,
+        (c.tutors && c.tutors[0] && c.tutors[0].name) || undefined
+      );
+      if (duration === null) {
+        row.uncertain = true;
+        row.reason = '修業年限未設定';
+      }
+      return row;
+    });
+}
+
+// 套用前逐列驗證（apply 端只信 client 傳回的 classId/action/newName，其餘後端重算）：
+// classId 必須存在且未刪除；action 白名單；advance 的 newName 過 isValidClassName_ 且
+// 同系所內不得與其他班撞名（排除自己；含墓碑與停用班也算撞名，fail-closed——否則升級
+// 改名可撞出第二個同名班，繞過 classResolveCore_ 的同名防線）。
+// fromId 保留參數位（目前驗證不需要；nameHistory 的 upToSemester 由呼叫端寫入）。
+function validateRolloverRow_(row, classes, fromId) {
+  if (!row || !row.classId) return { ok: false, error: 'classId required' };
+  const cls = (classes || []).filter(function (c) { return c && c.id === row.classId; })[0];
+  if (!cls || cls.deleted === true) return { ok: false, error: 'class not found: ' + row.classId };
+  if (row.action !== 'advance' && row.action !== 'graduate' && row.action !== 'keep') {
+    return { ok: false, error: 'invalid action: ' + row.action };
+  }
+  if (row.action === 'advance') {
+    if (!isValidClassName_(row.newName)) return { ok: false, error: 'invalid newName: ' + row.newName };
+    const newName = String(row.newName).trim();
+    const clash = (classes || []).some(function (c) {
+      return c && c.id !== cls.id && c.deptId === cls.deptId && c.name === newName;
+    });
+    if (clash) return { ok: false, error: 'newName already exists in department: ' + newName };
+    return { ok: true, cls: cls, newName: newName };
+  }
+  return { ok: true, cls: cls, newName: null };
+}
+
+// 歷史學期班名解析：nameHistory 依 upToSemester 升冪，找第一筆 semesterId <= upToSemester
+// （NNN-N 固定寬度，字串比較即可）回其 displayName||name；找不到（或無歷史/未帶學期）
+// 回現行 displayName||name。供統計等有學期上下文的顯示使用，確保升級改名後看舊學期
+// 統計仍顯示當時的班名。
+function classNameForSemester_(cls, semesterId) {
+  if (!cls) return '';
+  const current = cls.displayName || cls.name;
+  if (!semesterId || !Array.isArray(cls.nameHistory) || !cls.nameHistory.length) return current;
+  const hist = cls.nameHistory.slice().sort(function (a, b) {
+    return String((a && a.upToSemester) || '').localeCompare(String((b && b.upToSemester) || ''));
+  });
+  for (let i = 0; i < hist.length; i++) {
+    const h = hist[i];
+    if (h && h.upToSemester && String(semesterId) <= String(h.upToSemester)) {
+      return h.displayName || h.name || current;
+    }
+  }
+  return current;
 }
 
 // ── Excel 匯入 v2：學院/系所/導師制度以名稱比對，不存在就建立；停用的一律 fail-closed 拒絕 ──
@@ -2283,6 +2446,104 @@ function tutorHistoryGetAction_(params, ctx, userEmail) {
   return { entries: entries };
 }
 
+// adminRolloverPreview：換學期升級規劃預覽（admin only；Ticket D）。純讀不拿鎖，
+// 只產生規劃 rows 回前端逐列確認，不寫任何東西。
+function adminRolloverPreviewAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const fromSemester = params.fromSemester, toSemester = params.toSemester;
+  if (!fromSemester || !toSemester) throw new Error('fromSemester and toSemester required');
+  requireValidSemester_(fromSemester, ctx);
+  requireValidSemester_(toSemester, ctx);
+
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const tutorSystems = ensureTutorSystemsSeeded_(ctx);
+  return { rows: computeRolloverPlan_(classes, departments, tutorSystems, fromSemester, toSemester) };
+}
+
+// adminRolloverApply：套用升級規劃（admin only；Ticket D）。rows 為前端可能逐列修改過的
+// 版本——每列只信 classId / action / newName（其餘後端重算），逐列 validateRolloverRow_，
+// 失敗列收進 errors 不中斷整批。withLock_ 內重讀 classes（不信 preview 當下的快照，防併發）：
+// - advance：nameHistory append {upToSemester: fromSemester, 舊 name/displayName}，改
+//   name/displayName（fuse 以新名重算），tutorHistory append changeType:'rollover'。
+// - graduate：active:false + graduatedSemester: fromSemester，tutorHistory 同上。
+// - keep：no-op（不寫任何東西，只計數）。
+// 撞名驗證是逐列對「套用中」的最新 classes 狀態比對——同批兩列都改成同名，第二列會被擋。
+function adminRolloverApplyAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const fromSemester = params.fromSemester, toSemester = params.toSemester;
+  if (!fromSemester || !toSemester) throw new Error('fromSemester and toSemester required');
+  requireValidSemester_(fromSemester, ctx);
+  requireValidSemester_(toSemester, ctx);
+  const rows = params.rows;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('rows required');
+
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const deptById = {};
+    departments.forEach(function (d) { if (d) deptById[d.id] = d; });
+    const applied = { advanced: 0, graduated: 0, kept: 0 };
+    const errors = [];
+    const historyEntries = [];
+    let classesChanged = false;
+
+    rows.forEach(function (row, i) {
+      const chk = validateRolloverRow_(row, classes, fromSemester);
+      if (!chk.ok) { errors.push({ row: i, classId: row && row.classId, error: chk.error }); return; }
+      const idx = classes.findIndex(function (c) { return c && c.id === chk.cls.id; });
+      const cls = classes[idx];
+
+      if (row.action === 'keep') { applied.kept++; return; }
+
+      if (row.action === 'advance') {
+        const oldName = cls.name;
+        const oldDisplayName = cls.displayName || cls.name;
+        const dept = deptById[cls.deptId];
+        const newDisplayName = fuseClassDisplayName_(
+          chk.newName, dept ? dept.name : cls.deptId, cls.systemId,
+          (cls.tutors && cls.tutors[0] && cls.tutors[0].name) || undefined
+        );
+        const nameHistory = (Array.isArray(cls.nameHistory) ? cls.nameHistory : []).concat([
+          { upToSemester: fromSemester, name: oldName, displayName: oldDisplayName },
+        ]);
+        const updated = Object.assign({}, cls, { name: chk.newName, displayName: newDisplayName, nameHistory: nameHistory });
+        classes[idx] = updated;
+        classesChanged = true;
+        applied.advanced++;
+        historyEntries.push(buildTutorHistoryEntry_(
+          updated, cls.tutors || [], 'rollover', null,
+          '升級：' + oldName + '→' + chk.newName + '（' + fromSemester + '→' + toSemester + '）',
+          toSemester, userEmail, now
+        ));
+        return;
+      }
+
+      // graduate
+      const graduated = Object.assign({}, cls, { active: false, graduatedSemester: fromSemester });
+      classes[idx] = graduated;
+      classesChanged = true;
+      applied.graduated++;
+      historyEntries.push(buildTutorHistoryEntry_(
+        graduated, cls.tutors || [], 'rollover', null,
+        '畢業（' + fromSemester + ' 止）',
+        toSemester, userEmail, now
+      ));
+    });
+
+    if (classesChanged) writeJsonPath_('classes.json', classes, ctx);
+    appendTutorHistory_(ctx, historyEntries);
+    appendAuditLog_(ctx, {
+      action: 'adminRolloverApply', by: userEmail,
+      targetId: fromSemester + '→' + toSemester,
+      advanced: applied.advanced, graduated: applied.graduated, kept: applied.kept,
+      errorCount: errors.length, at: now,
+    });
+    return { classes: classes, applied: applied, errors: errors };
+  });
+}
+
 // recordSetTopics：四類宣導勾選的手動調整，只有 staffLead 關的驗證者（主責/已綁定助理）與
 // director/admin 能動（canSetTopics_）；只適用班會紀錄（meeting）。調整後該項目 auto 變 false，
 // 之後的關鍵字自動掃描（提交/重送/編輯）不會再覆蓋（mergeTopicsOnEdit_）。
@@ -2362,7 +2623,8 @@ function overviewStatsAction_(params, ctx, userEmail) {
   }
   const tutorSystems = ensureTutorSystemsSeeded_(ctx);
   const data = readJsonSafe_('records_' + semester + '.json', ctx, { records: [] });
-  return { rows: overviewStats_(colleges, departments, classes, tutorSystems, data.records, null) };
+  // semester 傳入 overviewStats_：查歷史學期時班名用當時的名字（nameHistory，Ticket D）。
+  return { rows: overviewStats_(colleges, departments, classes, tutorSystems, data.records, null, semester) };
 }
 
 // classSetWhitelist：本班導師或 admin 才能設定。

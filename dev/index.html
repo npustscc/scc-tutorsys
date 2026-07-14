@@ -1931,6 +1931,8 @@ function openTutorSystemForm(sys) {
     '<div class="field"><label>制度 ID</label><input type="text" id="system-id" value="' + escapeHtml(sys.id || '') + '" ' + (sys.id ? 'readonly' : '') + ' required></div>' +
     '<div class="field"><label>制度名稱</label><input type="text" id="system-name" value="' + escapeHtml(sys.name || '') + '" required></div>' +
     '<div class="field"><label>應繳班會份數</label><input type="number" id="system-count" value="' + (sys.requiredMeetingCount != null ? sys.requiredMeetingCount : '') + '" min="0"></div>' +
+    '<div class="field"><label>修業年限（年，1–7；留空＝未設定）</label><input type="number" id="system-duration" value="' + (sys.durationYears != null ? sys.durationYears : '') + '" min="1" max="7">' +
+      '<p class="field-hint">供「換學期升級」判斷畢業；個別班級可在班級表單以「畢業年級」覆寫（如獸醫系四技五年制）。</p></div>' +
     '<div class="field"><label><input type="checkbox" id="system-disabled" ' + (sys.disabled ? 'checked' : '') + '> 停用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
@@ -1941,9 +1943,11 @@ function openTutorSystemForm(sys) {
     if (!id) id = slugifyIdFront($('system-name').value.trim());
     if (!id) { showToast('請輸入制度名稱', 'error'); return; }
     const countVal = $('system-count').value.trim();
+    const durationVal = $('system-duration').value.trim();
     const entry = {
       id: id, name: $('system-name').value.trim(),
       requiredMeetingCount: countVal === '' ? null : Number(countVal),
+      durationYears: durationVal === '' ? null : Number(durationVal),
       disabled: $('system-disabled').checked,
     };
     const submitBtn = e.target.querySelector('button[type=submit]');
@@ -2414,6 +2418,8 @@ function openClassForm(cls) {
     '<div class="field"><label>顯示名稱（可自行修改，留空則用自動融合建議值）</label><input type="text" id="class-display-name" value="' + escapeHtml(cls.displayName || '') + '"></div>' +
     '<div class="field"><label>班級 ID（自動衍生' + (isEdit ? '；既有班級不可變更' : '') + '）</label><input type="text" id="class-id" value="' + escapeHtml(cls.id || '') + '" readonly></div>' +
     '<div class="field"><label>應繳班會份數覆寫（留空＝用制度預設；0＝本學期免繳，如實習）</label><input type="number" id="class-required-override" min="0" value="' + (cls.requiredMeetingOverride != null ? cls.requiredMeetingOverride : '') + '"></div>' +
+    '<div class="field"><label>畢業年級（覆寫，選填 1–7；留空＝用制度修業年限）</label><input type="number" id="class-grad-grade" min="1" max="7" value="' + (cls.graduationGrade != null ? cls.graduationGrade : '') + '">' +
+      '<p class="field-hint">供「換學期升級」判斷畢業；獸醫系四技等五年制填 5。</p></div>' +
     '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="tutor1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '"></div>' +
     '<div class="field"><label>導師 1 Email</label><input type="email" id="tutor1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '"></div></div>' +
     (tutors[0] ? '<button type="button" class="btn btn-sm btn-danger" id="tutor1-remove" style="margin:-10px 0 14px;">移除導師 1（' + escapeHtml(tutors[0].name) + '）</button>' : '') +
@@ -2466,11 +2472,13 @@ function openClassForm(cls) {
     if ($('tutor2-name').value.trim() || $('tutor2-email').value.trim()) newTutors.push({ name: $('tutor2-name').value.trim(), email: $('tutor2-email').value.trim() });
     const displayName = $('class-display-name').value.trim();
     const overrideVal = $('class-required-override').value.trim();
+    const gradVal = $('class-grad-grade').value.trim();
     const entry = {
       id: id, name: name, deptId: $('class-dept').value,
       systemId: $('class-system').value || null,
       displayName: displayName || undefined, // 空字串不覆寫，交由後端保留既有值或前端 fallback 顯示 name
       requiredMeetingOverride: overrideVal === '' ? null : Number(overrideVal),
+      graduationGrade: gradVal === '' ? null : Number(gradVal),
       tutors: newTutors, dualApprovalMode: $('class-dual').value, active: $('class-active').checked,
     };
     const submitBtn = e.target.querySelector('button[type=submit]');
@@ -2517,7 +2525,123 @@ function renderAdminSemesters() {
         '<td data-label="目前學期">' + (s.isCurrent ? '✓' : '') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="semester-edit" data-id="' + escapeHtml(s.id) + '">編輯</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
-    '<button class="btn btn-primary" data-action="semester-new" style="margin-top:12px;">新增學期</button></div>';
+    '<button class="btn btn-primary" data-action="semester-new" style="margin-top:12px;">新增學期</button> ' +
+    '<button class="btn" data-action="rollover-open" style="margin-top:12px;">帶入上學期名單（升級預覽）</button></div>';
+}
+
+// ── 換學期帶入＋年級升級（Ticket D）──
+// 管理員按鈕觸發 → adminRolloverPreview 產生規劃 → 預覽表逐列可修（動作/新班名）→
+// 確認套用 adminRolloverApply（每列只送 classId/action/newName，其餘後端重算）。
+const ROLLOVER_ACTION_LABELS = { advance: '帶入升級', graduate: '畢業', keep: '原樣保留' };
+let rolloverRows = null; // 最近一次 preview 的 rows（套用時依 DOM 逐列讀回 admin 修改值）
+
+function openRolloverModal() {
+  rolloverRows = null;
+  const semesters = (bootstrapData.semesters || []).slice().sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+  if (semesters.length < 2) { showToast('至少需要兩個學期才能執行帶入', 'error'); return; }
+  const currentId = bootstrapData.semester || semesters[semesters.length - 1].id;
+  const curIdx = semesters.findIndex(function (s) { return s.id === currentId; });
+  const defaultTo = curIdx !== -1 ? semesters[curIdx].id : semesters[semesters.length - 1].id;
+  const defaultFrom = curIdx > 0 ? semesters[curIdx - 1].id : semesters[0].id;
+
+  function semOptions(selectedId) {
+    return semesters.map(function (s) {
+      return '<option value="' + escapeHtml(s.id) + '"' + (s.id === selectedId ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>';
+    }).join('');
+  }
+
+  openModal('帶入上學期名單（升級預覽）',
+    '<p class="field-hint">升級只處理既有班級的改名與畢業；新一年級班級請用 Excel 匯入或手動新增。' +
+    '同學年換學期（如 114-1→114-2）名單自動沿用，無需執行。</p>' +
+    '<div class="row">' +
+      '<div class="field"><label>來源學期</label><select id="roll-from">' + semOptions(defaultFrom) + '</select></div>' +
+      '<div class="field"><label>目標學期</label><select id="roll-to">' + semOptions(defaultTo) + '</select></div>' +
+    '</div>' +
+    '<button type="button" class="btn btn-primary" id="roll-preview-btn">產生預覽</button>' +
+    '<div id="roll-preview" style="margin-top:14px;"></div>',
+    { wide: true });
+
+  $('roll-preview-btn').addEventListener('click', async function () {
+    const btn = this;
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCall('adminRolloverPreview', { fromSemester: $('roll-from').value, toSemester: $('roll-to').value });
+        rolloverRows = (res && res.rows) || [];
+        renderRolloverPreview();
+      });
+    } catch (err) { showToast('預覽失敗：' + err.message, 'error'); }
+  });
+}
+
+function renderRolloverPreview() {
+  const el = $('roll-preview');
+  if (!el) return;
+  if (!rolloverRows || !rolloverRows.length) { el.innerHTML = '<div class="empty-hint">沒有可處理的班級（停用/已刪除班級不納入）。</div>'; return; }
+  el.innerHTML =
+    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>原班名</th><th>動作</th><th>新班名</th><th>導師</th><th>原因／提示</th></tr></thead><tbody>' +
+    rolloverRows.map(function (r, i) {
+      const actionSel = '<select data-roll-action="' + i + '">' +
+        ['advance', 'graduate', 'keep'].map(function (a) {
+          return '<option value="' + a + '"' + (a === r.action ? ' selected' : '') + '>' + ROLLOVER_ACTION_LABELS[a] + '</option>';
+        }).join('') + '</select>';
+      const nameInput = '<input type="text" data-roll-newname="' + i + '" maxlength="20" value="' + escapeHtml(r.newName || '') + '"' +
+        (r.action === 'advance' ? '' : ' disabled') + ' style="min-width:110px;">';
+      return '<tr' + (r.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+        '<td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
+        '<td data-label="原班名">' + escapeHtml(r.displayName || r.name) + '</td>' +
+        '<td data-label="動作">' + actionSel + '</td>' +
+        '<td data-label="新班名">' + nameInput + '</td>' +
+        '<td data-label="導師">' + escapeHtml((r.tutors || []).join('、')) + '</td>' +
+        '<td data-label="原因／提示">' + escapeHtml(r.reason || '') + '</td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<p class="field-hint">標黃列表示系統無法完全確定（如修業年限未設定），請逐列確認動作與新班名。</p>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="button" class="btn btn-primary" id="roll-apply-btn">確認套用</button></div>';
+
+  // 動作切換 → 新班名輸入框只在「帶入升級」時可編輯（listener 掛容器上，用 dataset 旗標
+  // 防重複「產生預覽」時重複掛載）
+  if (!el.dataset.rollBound) {
+    el.dataset.rollBound = '1';
+    el.addEventListener('change', function (e) {
+      const sel = e.target.closest('[data-roll-action]');
+      if (!sel) return;
+      const input = el.querySelector('[data-roll-newname="' + sel.dataset.rollAction + '"]');
+      if (input) input.disabled = sel.value !== 'advance';
+    });
+  }
+
+  $('roll-apply-btn').addEventListener('click', async function () {
+    const btn = this;
+    const rows = rolloverRows.map(function (r, i) {
+      const sel = el.querySelector('[data-roll-action="' + i + '"]');
+      const input = el.querySelector('[data-roll-newname="' + i + '"]');
+      const action = sel ? sel.value : r.action;
+      return { classId: r.classId, action: action, newName: action === 'advance' ? (input ? input.value.trim() : r.newName) : null };
+    });
+    const nAdv = rows.filter(function (r) { return r.action === 'advance'; }).length;
+    const nGrad = rows.filter(function (r) { return r.action === 'graduate'; }).length;
+    if (!confirm('將改名 ' + nAdv + ' 班、畢業 ' + nGrad + ' 班，確定套用？（原樣保留 ' + (rows.length - nAdv - nGrad) + ' 班不變動）')) return;
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCall('adminRolloverApply', {
+          fromSemester: $('roll-from').value, toSemester: $('roll-to').value, rows: rows,
+        });
+        bootstrapData.classes = res.classes;
+        renderNav();
+        const a = res.applied || {};
+        let html = '<div class="empty-hint" style="color:var(--color-success);">套用完成：改名 ' + (a.advanced || 0) +
+          ' 班、畢業 ' + (a.graduated || 0) + ' 班、原樣保留 ' + (a.kept || 0) + ' 班。</div>';
+        if (res.errors && res.errors.length) {
+          html += '<div class="empty-hint" style="color:var(--color-danger);">失敗 ' + res.errors.length + ' 列：</div><ul>' +
+            res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列（' + escapeHtml(er.classId || '') + '）：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+        }
+        html += '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button></div>';
+        el.innerHTML = html;
+        showToast('升級套用完成', res.errors && res.errors.length ? 'info' : 'success');
+        if (adminTab === 'semesters') renderAdminSemesters();
+      });
+    } catch (err) { showToast('套用失敗：' + err.message, 'error'); }
+  });
 }
 
 function openSemesterForm(sem) {
@@ -2556,6 +2680,7 @@ function openSemesterForm(sem) {
 
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="semester-new"]')) { openSemesterForm(); return; }
+  if (e.target.closest('[data-action="rollover-open"]')) { openRolloverModal(); return; }
   const editBtn = e.target.closest('[data-action="semester-edit"]');
   if (editBtn) openSemesterForm(semesterById(editBtn.dataset.id));
 });
