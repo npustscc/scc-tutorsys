@@ -2747,11 +2747,14 @@ document.body.addEventListener('click', function (e) {
   }
 });
 
-// ── Excel 匯入導師名單 v2 ──
-// Excel 欄位（表頭文字須完全相符）：學院 / 系所 / 導師制度 / 班級名稱(原始) / 班級顯示名稱(可修改)
-// / 應繳班會份數 / 導師1姓名 / 導師1email / 導師2姓名 / 導師2email（備註欄忽略）。
-// 學院/系所/導師制度以名稱比對，不存在就建立；停用的一律拒絕（後端 importRosterRow_ fail-closed，
-// 前端只做預覽，真正驗證與寫入都在後端）。應繳班會份數留空＝用制度預設，填 0＝本學期免繳。
+// ── Excel 匯入導師名單 v3：格式自動偵測＋差異預覽核對（Ticket E）──
+// 支援兩種格式：
+//   標準範本——表頭：學院 / 系所 / 導師制度 / 班級名稱(原始) / 班級顯示名稱(可修改) /
+//   應繳班會份數 / 導師1姓名 / 導師1email / 導師2姓名 / 導師2email（備註欄忽略）。
+//   統計表——學諮中心「班級、家族會議記錄暨班級業務統計」：分頁=學院、表頭 row0~4、
+//   資料自 row5，col0=系別(合併儲存格 forward-fill)、col2=班級、col3=導師姓名、col4=應開份數。
+// 兩種格式解析後統一為相同中間格式 rows＋flags，共用 email 姓名比對與差異預覽；
+// 確認匯入只送勾選列，沿用後端 adminImportRoster（fail-closed 驗證都在後端）。
 let _sheetJsLoading = null;
 function ensureSheetJsLoaded() {
   if (window.XLSX) return Promise.resolve();
@@ -2766,72 +2769,374 @@ function ensureSheetJsLoaded() {
   return _sheetJsLoading;
 }
 
-let rosterRows = null; // 解析後待送出的 rows（v2 格式，見上方欄位說明）
+// __IMPORT_PARSER_START__
+// 匯入解析器（純函式區）：test/import-parser.test.js 以本標記從 dev/index.html 抽取本區段，
+// 在 node:vm 沙箱內單元測試（比照 test/harness.js 精神）。因此本區段**禁止**依賴
+// DOM / bootstrapData / XLSX / escapeHtml 等外部符號——輸入一律由呼叫端整理好傳入。
+
+// 與 CLASS_NAME_RE 同值（本區段須自足以便測試抽取；改動白名單時兩處同步）。
+const IMPORT_CLASS_NAME_RE_ = /^[A-Za-z0-9一-鿿]{1,20}$/;
+
+// 格式自動偵測：任一分頁 row2 col0==='系別' 且 row2 col2==='班級' → 統計表格式；否則標準範本。
+// sheets = [{ name, rows }]，rows 為 sheet_to_json({header:1}) 的二維陣列。
+function detectImportFormat(sheets) {
+  const hit = (sheets || []).some(function (sh) {
+    const r2 = (sh && sh.rows && sh.rows[2]) || [];
+    return String(r2[0] == null ? '' : r2[0]).trim() === '系別' && String(r2[2] == null ? '' : r2[2]).trim() === '班級';
+  });
+  return hit ? 'stats' : 'standard';
+}
+
+function statsCell_(row, i) {
+  const v = (row || [])[i];
+  return String(v == null ? '' : v).trim();
+}
+
+// 特殊班名檢查：回 uncertain 原因字串或 null。
+function statsClassNameIssue_(name) {
+  if (name.indexOf('共同指導') !== -1) return '含「共同指導」，請人工確認';
+  if (name === '家族') return '班名「家族」需展開為各導師一班，請人工確認';
+  if (name.indexOf('海青') !== -1) return '海青班，請人工確認';
+  if (!IMPORT_CLASS_NAME_RE_.test(name)) return '班名含空白/符號等非法字元，請修改';
+  return null;
+}
+
+function addFlagReason_(flags, reason) {
+  flags.uncertain = true;
+  flags.reason = flags.reason ? flags.reason + '；' + reason : reason;
+}
+
+// 統計表解析：輸出與標準範本相同的中間格式（requiredMeetingCount 空白＝undefined，
+// 不是 null——後端「未帶＝保留既有覆寫」語意依賴這點）＋每列 flags {uncertain, reason, type}。
+// 規則（依 114-2 實檔實測）：
+// - 分頁 row0 col0=學院名；含「、」（如「獸醫學院、國際學院、達人學院」合併分頁）→
+//   學院不明，整頁 collegeName 空、逐列標 uncertain。
+// - col0 系別為合併儲存格 → forward-fill；「XX合計」「合計」列＝小計，跳過且不污染 forward-fill。
+// - 班級空但有導師的列：col4 有值 → 家族導師（每人獨立一班，班名=「家族」+姓名*）；
+//   col4 空 → 上一個班級列的導師2；上一列已有導師2 或找不到可併入列 → 標 uncertain。
+//   *規格原訂「家族-姓名」，但 '-' 不在班名白名單（會被後端 fail-closed 拒絕），故直接相連。
+// - 特殊班名（共同指導/家族/海青/非法字元）→ 標 uncertain（預覽中預設不勾、班名可改）。
+function parseStatsWorkbook(sheets) {
+  const out = [];
+  (sheets || []).forEach(function (sh) {
+    const rows = (sh && sh.rows) || [];
+    const collegeRaw = statsCell_(rows[0], 0);
+    const mergedCollege = collegeRaw.indexOf('、') !== -1;
+    const collegeName = mergedCollege ? '' : collegeRaw;
+    let currentDept = '';
+    let lastClassRow = null; // 本分頁最近一個「一般班級」列（導師2併入目標）
+    for (let i = 5; i < rows.length; i++) {
+      const deptCell = statsCell_(rows[i], 0);
+      const className = statsCell_(rows[i], 2);
+      const tutor = statsCell_(rows[i], 3);
+      const countCell = statsCell_(rows[i], 4);
+      if (deptCell && /合計$/.test(deptCell)) continue;   // 小計列：跳過、不更新 currentDept
+      if (deptCell) currentDept = deptCell;               // 系別合併儲存格 forward-fill
+      if (!className && !tutor) continue;                 // 空列（含尾端大量空白列）
+      // 全表統計列（實檔每分頁底部一列：導師欄=「264/341」之類的已開/應開比值）→ 跳過。
+      if (tutor && /^[0-9][0-9\/.%]*$/.test(tutor)) continue;
+
+      const flags = { uncertain: false, reason: null, type: null };
+      if (mergedCollege) addFlagReason_(flags, '學院不明（合併分頁）');
+      // 應開份數：空白=undefined（後端保留既有覆寫）；數字照帶；「實習」＝本學期免繳
+      // （系統慣例 override 0，同班級表單「0＝本學期免繳，如實習」）但標 uncertain 供確認；
+      // 其他非數字照帶原值並標 uncertain（勾選匯入會被後端擋下、逐列回報）。
+      let countVal;
+      if (countCell === '') {
+        countVal = undefined;
+      } else if (!isNaN(Number(countCell))) {
+        countVal = Number(countCell);
+      } else if (countCell === '實習') {
+        countVal = 0;
+        addFlagReason_(flags, '應開份數「實習」→ 視為免繳（0），請確認');
+      } else {
+        countVal = countCell;
+        addFlagReason_(flags, '應開份數非數字（' + countCell + '），請確認');
+      }
+      const base = {
+        collegeName: collegeName, deptName: currentDept, systemName: '',
+        classNameRaw: className, classDisplayName: '',
+        requiredMeetingCount: countVal,
+        tutor1Name: tutor, tutor1Email: '', tutor2Name: '', tutor2Email: '',
+        flags: flags,
+      };
+
+      if (!className && tutor) {
+        if (countCell !== '') {
+          // 家族導師：col4 有自己的應開份數 → 每人獨立一班
+          base.classNameRaw = '家族' + tutor;
+          flags.type = 'family';
+          out.push(base);
+        } else if (lastClassRow && lastClassRow.deptName === currentDept && !lastClassRow.tutor2Name) {
+          lastClassRow.tutor2Name = tutor;   // 上一個班級列的導師2
+        } else {
+          addFlagReason_(flags, (lastClassRow && lastClassRow.deptName === currentDept)
+            ? '第三位導師，請人工確認' : '找不到可併入的班級列，請人工確認');
+          out.push(base);
+        }
+        continue;
+      }
+
+      // 一般班級列
+      const issue = statsClassNameIssue_(className);
+      if (issue) addFlagReason_(flags, issue);
+      out.push(base);
+      lastClassRow = base;
+    }
+  });
+  return out;
+}
+
+// 從 classes（含墓碑——歷史班的導師 email 也是有效比對來源）的正式 tutors 建
+// 「姓名 → email 陣列（去重）」對照表。只認正式 tutors，不採 suggestedTutors（未經確認）。
+function buildTutorEmailIndex(classes) {
+  const idx = {};
+  (classes || []).forEach(function (c) {
+    ((c && c.tutors) || []).forEach(function (t) {
+      const name = String((t && t.name) || '').trim();
+      const email = String((t && t.email) || '').trim().toLowerCase();
+      if (!name || !email) return;
+      if (!idx[name]) idx[name] = [];
+      if (idx[name].indexOf(email) === -1) idx[name].push(email);
+    });
+  });
+  return idx;
+}
+
+// email 姓名比對（兩種格式共用；僅在該列該導師 email 空白時）：
+// 唯一命中 → 自動帶入（emailStatus 'auto'）；同名多 email → 留白、標 uncertain；
+// 無命中 → 留白（'missing'，UI 標黃待補，不算 uncertain——匯入後可再於班級管理補上）。
+function applyEmailLookup(rows, emailIndex) {
+  (rows || []).forEach(function (r) {
+    ['1', '2'].forEach(function (n) {
+      const name = String(r['tutor' + n + 'Name'] || '').trim();
+      if (!name || String(r['tutor' + n + 'Email'] || '').trim()) return;
+      const hits = (emailIndex || {})[name] || [];
+      if (hits.length === 1) {
+        r['tutor' + n + 'Email'] = hits[0];
+        r.flags['tutor' + n + 'EmailStatus'] = 'auto';
+      } else if (hits.length > 1) {
+        r.flags['tutor' + n + 'EmailStatus'] = 'ambiguous';
+        addFlagReason_(r.flags, '「' + name + '」同名多 email，請確認');
+      } else {
+        r.flags['tutor' + n + 'EmailStatus'] = 'missing';
+      }
+    });
+  });
+  return rows;
+}
+
+// 差異比對（上傳前核對用）：以（系所名→現有系所、(deptId, 班名)→現有班級）比對現況。
+// status：'new'（新班級）/ 'unchanged'（無變動，預設不勾）/ 'tutor_changed'（導師變更）/
+// 'tutor2_added'（新增導師2）。導師比對以姓名為主；匯入列 email 空白時不比 email
+// （統計表無 email 欄，自動帶入值本來就取自現況）。
+function classifyImportRow(row, departments, classes) {
+  const deptName = String(row.deptName || '').trim();
+  const dept = (departments || []).filter(function (d) { return d && d.name === deptName; })[0];
+  if (!dept) return { status: 'new', currentTutors: [] };
+  const className = String(row.classNameRaw || '').trim();
+  const cls = (classes || []).filter(function (c) { return c && c.deptId === dept.id && c.name === className; })[0];
+  if (!cls) return { status: 'new', currentTutors: [] };
+  const current = (cls.tutors || []).map(function (t) {
+    return { name: String((t && t.name) || '').trim(), email: String((t && t.email) || '').trim().toLowerCase() };
+  });
+  const imported = [];
+  if (String(row.tutor1Name || '').trim()) imported.push({ name: String(row.tutor1Name).trim(), email: String(row.tutor1Email || '').trim().toLowerCase() });
+  if (String(row.tutor2Name || '').trim()) imported.push({ name: String(row.tutor2Name).trim(), email: String(row.tutor2Email || '').trim().toLowerCase() });
+  if (!imported.length) return { status: 'unchanged', currentTutors: current };  // 本列未帶導師 → 後端沿用既有
+  function sameTutor(cur, imp) { return cur && cur.name === imp.name && (!imp.email || cur.email === imp.email); }
+  const identical = imported.length === current.length &&
+    imported.every(function (t, i) { return sameTutor(current[i], t); });
+  if (identical) return { status: 'unchanged', currentTutors: current };
+  if (current.length === 1 && imported.length === 2 && sameTutor(current[0], imported[0])) {
+    return { status: 'tutor2_added', currentTutors: current };
+  }
+  return { status: 'tutor_changed', currentTutors: current };
+}
+// __IMPORT_PARSER_END__
+
+let rosterRows = null; // 解析後的中間格式 rows（含 flags 與 diff），預覽表逐列可修
 
 function renderAdminRoster() {
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>Excel 匯入導師名單</h3>' +
-    '<p class="field-hint">欄位需含：學院、系所、導師制度、班級名稱(原始)、班級顯示名稱(可修改，留空則自動建議)、' +
-    '應繳班會份數（留空＝用制度預設，填 0＝本學期免繳）、導師1姓名、導師1email、導師2姓名（選填）、導師2email（選填）。' +
-    '其餘欄位（如備註）會被忽略。學院/系所/導師制度以名稱比對，不存在就建立；已停用的一律拒絕該列。</p>' +
+    '<p class="field-hint">支援兩種格式（自動偵測）：<b>標準範本</b>（學院／系所／導師制度／班級名稱(原始)／班級顯示名稱／' +
+    '應繳班會份數／導師1姓名／導師1email／導師2姓名／導師2email）；或<b>統計表</b>（「班級、家族會議記錄暨班級業務統計」，' +
+    '分頁＝學院、欄位＝系別/班級/導師姓名/應開份數）。統計表格式的家族導師會展開為每導師一班；' +
+    'email 空白列匯入後導師無法核章，請儘速在班級管理補上。上傳後先產生差異預覽，逐列核對勾選再確認匯入。</p>' +
     '<input type="file" id="roster-file" accept=".xlsx,.xls,.csv" />' +
+    '<div id="roster-format" class="field-hint" style="margin-top:8px; font-weight:600;"></div>' +
     '<div id="roster-preview" style="margin-top:16px;"></div>' +
     '</div>';
-  $('roster-file').addEventListener('change', async function (e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    $('roster-preview').innerHTML = '<div class="empty-hint">解析中…</div>';
-    try {
-      await ensureSheetJsLoaded();
-      const buf = await file.arrayBuffer();
-      const wb = XLSX.read(buf, { type: 'array' });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const sheetRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-      rosterRows = sheetRows.map(function (row) {
+  $('roster-file').addEventListener('change', onRosterFileChange);
+}
+
+async function onRosterFileChange(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('roster-preview').innerHTML = '<div class="empty-hint">解析中…</div>';
+  $('roster-format').textContent = '';
+  try {
+    await ensureSheetJsLoaded();
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheets = wb.SheetNames.map(function (n) {
+      return { name: n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }) };
+    });
+    const format = detectImportFormat(sheets);
+    $('roster-format').textContent = '偵測為：' + (format === 'stats' ? '統計表格式（班級、家族會議記錄暨班級業務統計）' : '標準範本格式');
+    let rows;
+    if (format === 'stats') {
+      rows = parseStatsWorkbook(sheets);
+    } else {
+      const objRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      rows = objRows.map(function (row) {
+        const countRaw = String(row['應繳班會份數'] != null ? row['應繳班會份數'] : '').trim();
         return {
           collegeName: String(row['學院'] || '').trim(),
           deptName: String(row['系所'] || '').trim(),
           systemName: String(row['導師制度'] || '').trim(),
           classNameRaw: String(row['班級名稱(原始)'] || row['班級名稱（原始）'] || '').trim(),
           classDisplayName: String(row['班級顯示名稱(可修改)'] || row['班級顯示名稱（可修改）'] || '').trim(),
-          requiredMeetingCount: String(row['應繳班會份數'] != null ? row['應繳班會份數'] : '').trim(),
+          // 空白＝undefined（後端「未帶＝保留既有覆寫」），不是空字串/null
+          requiredMeetingCount: countRaw === '' ? undefined : countRaw,
           tutor1Name: String(row['導師1姓名'] || '').trim(), tutor1Email: String(row['導師1email'] || '').trim(),
           tutor2Name: String(row['導師2姓名'] || '').trim(), tutor2Email: String(row['導師2email'] || '').trim(),
+          flags: { uncertain: false, reason: null, type: null },
         };
       }).filter(function (r) { return r.deptName && r.classNameRaw; });
-      renderRosterPreview();
-    } catch (err) {
-      $('roster-preview').innerHTML = '<div class="empty-hint">解析失敗：' + escapeHtml(err.message) + '</div>';
+      rows.forEach(function (r) {
+        if (!IMPORT_CLASS_NAME_RE_.test(r.classNameRaw)) addFlagReason_(r.flags, '班名含空白/符號等非法字元，請修改');
+      });
     }
-  });
+    applyEmailLookup(rows, buildTutorEmailIndex(bootstrapData.classes || []));
+    rows.forEach(function (r) { r.diff = classifyImportRow(r, bootstrapData.departments || [], bootstrapData.classes || []); });
+    rosterRows = rows;
+    renderRosterPreview();
+  } catch (err) {
+    $('roster-preview').innerHTML = '<div class="empty-hint">解析失敗：' + escapeHtml(err.message) + '</div>';
+  }
+}
+
+const IMPORT_DIFF_LABELS = { new: '新班級', unchanged: '無變動', tutor_changed: '導師變更', tutor2_added: '新增導師2' };
+const IMPORT_DIFF_BADGE = { new: 'badge-approved', unchanged: 'badge-muted', tutor_changed: 'badge-pending_tutor', tutor2_added: 'badge-pending_tutor' };
+
+function importTutorText(list) {
+  return (list || []).map(function (t) { return t.name + (t.email ? '（' + t.email + '）' : ''); }).join('、') || '（無）';
+}
+
+// email 欄渲染：空白（missing/ambiguous）→ 可編輯 input 標黃；自動帶入 → 文字＋提示；有值 → 文字。
+function importEmailCell(r, i, n) {
+  const email = r['tutor' + n + 'Email'] || '';
+  const status = r.flags['tutor' + n + 'EmailStatus'];
+  if (!r['tutor' + n + 'Name']) return '';
+  if (status === 'missing' || status === 'ambiguous') {
+    return '<input type="text" data-roster-email' + n + '="' + i + '" value="' + escapeHtml(email) + '" placeholder="待補 email" style="min-width:130px; background:var(--color-warning-bg);">';
+  }
+  return escapeHtml(email) + (status === 'auto' ? ' <span class="field-hint">（依姓名自動帶入）</span>' : '');
 }
 
 function renderRosterPreview() {
-  if (!rosterRows || !rosterRows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列（系所與班級名稱(原始)為必填）。</div>'; return; }
+  if (!rosterRows || !rosterRows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列。</div>'; return; }
+  const counts = { new: 0, unchanged: 0, tutor_changed: 0, tutor2_added: 0, uncertain: 0 };
+  rosterRows.forEach(function (r) {
+    counts[r.diff.status]++;
+    if (r.flags.uncertain) counts.uncertain++;
+  });
   $('roster-preview').innerHTML =
-    '<div class="table-wrap"><table><thead><tr><th>學院</th><th>系所</th><th>制度</th><th>班級(原始)</th><th>顯示名稱</th><th>應繳</th><th>導師</th></tr></thead><tbody>' +
-    rosterRows.map(function (r) {
-      const tutors = [r.tutor1Name ? (r.tutor1Name + '（' + r.tutor1Email + '）') : '', r.tutor2Name ? (r.tutor2Name + '（' + r.tutor2Email + '）') : ''].filter(Boolean).join('、');
-      return '<tr><td data-label="學院">' + escapeHtml(r.collegeName) + '</td><td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
-        '<td data-label="制度">' + escapeHtml(r.systemName) + '</td><td data-label="班級(原始)">' + escapeHtml(r.classNameRaw) + '</td>' +
-        '<td data-label="顯示名稱">' + escapeHtml(r.classDisplayName || '（自動建議）') + '</td>' +
-        '<td data-label="應繳">' + escapeHtml(r.requiredMeetingCount || '（制度預設）') + '</td>' +
-        '<td data-label="導師">' + escapeHtml(tutors) + '</td></tr>';
+    '<p class="field-hint">共 ' + rosterRows.length + ' 列：新班級 ' + counts.new + '、無變動 ' + counts.unchanged +
+    '、導師變更 ' + counts.tutor_changed + '、新增導師2 ' + counts.tutor2_added +
+    '、待人工確認（標黃）' + counts.uncertain + '。無變動與待確認列預設不勾選。</p>' +
+    '<div style="display:flex; gap:8px; margin-bottom:8px;">' +
+      '<button type="button" class="btn btn-sm" data-roster-select="all">全選</button>' +
+      '<button type="button" class="btn btn-sm" data-roster-select="none">全不選</button>' +
+      '<button type="button" class="btn btn-sm" data-roster-select="changed">只選有變動</button>' +
+    '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th></th><th>學院</th><th>系所</th><th>班級</th>' +
+    '<th>導師1</th><th>Email1</th><th>導師2</th><th>Email2</th><th>應繳</th><th>狀態</th><th>原因／提示</th></tr></thead><tbody>' +
+    rosterRows.map(function (r, i) {
+      const checked = !(r.flags.uncertain || r.diff.status === 'unchanged');
+      const nameCell = r.flags.uncertain
+        ? '<input type="text" data-roster-name="' + i + '" value="' + escapeHtml(r.classNameRaw) + '" maxlength="20" style="min-width:110px;">'
+        : escapeHtml(r.classNameRaw);
+      const notes = [];
+      if (r.flags.reason) notes.push(r.flags.reason);
+      if (r.diff.status === 'tutor_changed' || r.diff.status === 'tutor2_added') {
+        const imp = [];
+        if (r.tutor1Name) imp.push({ name: r.tutor1Name, email: r.tutor1Email });
+        if (r.tutor2Name) imp.push({ name: r.tutor2Name, email: r.tutor2Email });
+        notes.push('現行：' + importTutorText(r.diff.currentTutors) + ' → 匯入：' + importTutorText(imp));
+      }
+      return '<tr data-roster-row="' + i + '"' + (r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+        '<td><input type="checkbox" data-roster-check="' + i + '"' + (checked ? ' checked' : '') + '></td>' +
+        '<td data-label="學院">' + escapeHtml(r.collegeName) + '</td>' +
+        '<td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
+        '<td data-label="班級">' + nameCell + (r.flags.type === 'family' ? ' <span class="badge badge-type">家族</span>' : '') + '</td>' +
+        '<td data-label="導師1">' + escapeHtml(r.tutor1Name) + '</td>' +
+        '<td data-label="Email1">' + importEmailCell(r, i, '1') + '</td>' +
+        '<td data-label="導師2">' + escapeHtml(r.tutor2Name) + '</td>' +
+        '<td data-label="Email2">' + importEmailCell(r, i, '2') + '</td>' +
+        '<td data-label="應繳">' + (r.requiredMeetingCount === undefined ? '<span class="field-hint">（制度預設）</span>' : escapeHtml(String(r.requiredMeetingCount))) + '</td>' +
+        '<td data-label="狀態"><span class="badge ' + IMPORT_DIFF_BADGE[r.diff.status] + '">' + IMPORT_DIFF_LABELS[r.diff.status] + '</span></td>' +
+        '<td data-label="原因／提示">' + escapeHtml(notes.join('；')) + '</td></tr>';
     }).join('') + '</tbody></table></div>' +
-    '<p class="field-hint">共 ' + rosterRows.length + ' 列。確認匯入後由後端逐列驗證與寫入，單列失敗不影響其他列（結果會列出失敗列與原因）。</p>' +
-    '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入</button>';
+    '<p class="field-hint">勾選＝確認匯入該列（上傳前的核對就在此完成）；標黃列請確認班名/導師後再勾選。' +
+    '確認匯入後由後端逐列驗證與寫入，單列失敗不影響其他列。</p>' +
+    '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入勾選列</button>';
+
+  // 全選／全不選／只選有變動（有變動＝新班級/導師變更/新增導師2，且非待確認列）
+  $('roster-preview').querySelectorAll('[data-roster-select]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const mode = btn.dataset.rosterSelect;
+      rosterRows.forEach(function (r, i) {
+        const cb = document.querySelector('[data-roster-check="' + i + '"]');
+        if (!cb) return;
+        if (mode === 'all') cb.checked = true;
+        else if (mode === 'none') cb.checked = false;
+        else cb.checked = r.diff.status !== 'unchanged' && !r.flags.uncertain;
+      });
+    });
+  });
 }
 
 document.body.addEventListener('click', async function (e) {
   const btn = e.target.closest('[data-action="roster-confirm"]');
   if (!btn || !rosterRows || !rosterRows.length) return;
+  const root = $('roster-preview');
+  const selected = [];
+  let badCount = 0;
+  rosterRows.forEach(function (r, i) {
+    const tr = root.querySelector('[data-roster-row="' + i + '"]');
+    const cb = root.querySelector('[data-roster-check="' + i + '"]');
+    if (!cb || !cb.checked) return;
+    const nameInput = root.querySelector('[data-roster-name="' + i + '"]');
+    const className = String(nameInput ? nameInput.value : r.classNameRaw).trim();
+    // 送出前用既有白名單再驗一次班名，不合法列擋下標紅
+    if (!CLASS_NAME_RE.test(className)) {
+      badCount++;
+      if (tr) tr.style.background = 'var(--color-danger-bg)';
+      return;
+    }
+    const e1 = root.querySelector('[data-roster-email1="' + i + '"]');
+    const e2 = root.querySelector('[data-roster-email2="' + i + '"]');
+    selected.push({
+      collegeName: r.collegeName, deptName: r.deptName, systemName: r.systemName,
+      classNameRaw: className, classDisplayName: r.classDisplayName,
+      requiredMeetingCount: r.requiredMeetingCount,  // undefined＝未帶（保留既有覆寫）
+      tutor1Name: r.tutor1Name, tutor1Email: String(e1 ? e1.value : r.tutor1Email).trim().toLowerCase(),
+      tutor2Name: r.tutor2Name, tutor2Email: String(e2 ? e2.value : r.tutor2Email).trim().toLowerCase(),
+    });
+  });
+  if (badCount) { showToast('有 ' + badCount + ' 列班名不合法（已標紅），請修正後再匯入', 'error'); return; }
+  if (!selected.length) { showToast('未勾選任何列', 'error'); return; }
   try {
     await withBtnPending(btn, async function () {
-      const res = await proxyCall('adminImportRoster', { rows: rosterRows });
+      const res = await proxyCall('adminImportRoster', { rows: selected });
       bootstrapData.colleges = res.colleges;
       bootstrapData.departments = res.departments;
       bootstrapData.tutorSystems = res.tutorSystems;
       bootstrapData.classes = res.classes;
+      renderNav();
       if (res.errors && res.errors.length) {
         showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
         $('roster-preview').innerHTML =

@@ -1687,7 +1687,9 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
       deptId: deptRes.dept.id,
       systemId: systemRes.system ? systemRes.system.id : cls.systemId,
       displayName: explicitDisplayName || cls.displayName,
-      requiredMeetingOverride: reqRes.value,
+      // 應繳份數（Ticket E bug fix）：本列未帶（Excel 空白/undefined/null → parse 出 null）
+      // → 保留既有覆寫值不動；帶數字（含 0＝免繳）→ 設定。舊版空白會把既有覆寫洗回 null。
+      requiredMeetingOverride: reqRes.value === null ? cls.requiredMeetingOverride : reqRes.value,
       tutors: tutors.length ? tutors : cls.tutors,
     });
     nextClasses = nextClasses.map(function (c) { return c.id === cls.id ? updated : c; });
