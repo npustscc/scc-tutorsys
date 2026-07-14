@@ -707,6 +707,12 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
 async function loadBootstrap(semester) {
   const params = semester ? { semester: semester } : {};
   const data = await proxyCall('bootstrap', params);
+  // 後端 bootstrap 必回傳 roles 物件；缺少代表這不是 doPost 的 bootstrap 回應（曾發生：
+  // 2026-07-14 使用者環境拿到疑似 doGet 的 {ok,service}，前端在 renderNav 炸 TypeError）。
+  // 擋在這裡並把實際內容帶進錯誤訊息，讓登入畫面直接顯示收到什麼，以利回報診斷。
+  if (!data || !data.roles) {
+    throw new Error('bootstrap 回應異常，請截圖回報。實際收到：' + JSON.stringify(data).slice(0, 180));
+  }
   bootstrapData = data;
   return data;
 }

@@ -130,7 +130,12 @@ function doPost(e) {
 }
 
 function doGet(e) {
-  return jsonResp_({ ok: true, service: 'SCC Tutor System Drive Proxy (DEV)' });
+  // via/hasPayload 為診斷欄位：前端 loadBootstrap 的形狀防衛若回報收到本回應，
+  // 即證明瀏覽器的 POST 在途中被降級成 GET（doPost 從未執行），且可看出 query 是否還帶著 payload。
+  return jsonResp_({
+    ok: true, service: 'SCC Tutor System Drive Proxy (DEV)', via: 'doGet',
+    hasPayload: !!(e && e.parameter && e.parameter.payload),
+  });
 }
 
 // ── ID Token 驗證（與 infosys 相同模式）───────────────────────────────────────
