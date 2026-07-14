@@ -1,7 +1,9 @@
 node_modules/
 package-lock.json
 
-.claude/
+# .claude 只收 skills（驗證配方等工具），settings.local.json 等其餘一律忽略
+.claude/*
+!.claude/skills/
 
 # 機密與個資：絕對不可進入 public repo
 creds.json
