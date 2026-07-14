@@ -110,6 +110,8 @@ function doPost(e) {
       case 'adminUpsertTutorSystem': result = adminUpsertTutorSystemAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
+      case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
+      case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'recordSetTopics':        result = recordSetTopicsAction_(params, ctx, userEmail); break;
       case 'overviewStats':          result = overviewStatsAction_(params, ctx, userEmail); break;
       case 'adminSetKeywordRules':   result = adminSetKeywordRulesAction_(params, ctx, userEmail); break;
@@ -533,6 +535,18 @@ function appendAuditLog_(ctx, entry) {
   if (!log || !Array.isArray(log.entries)) log = { entries: [] };
   log.entries.push(entry);
   writeJsonPath_('audit_log.json', log, ctx);
+}
+
+// 導師異動歷史（tutorHistory.json，扁平陣列；Ticket C）。比照 appendAuditLog_ 的寫法：
+// 讀→push→寫回。**必須在與班級寫入同一個 withLock_ 臨界區內呼叫**（LockService 全域鎖，
+// 同臨界區可連續寫多個檔案；本函式自己不拿鎖——withLock_ 不可重入，內部再取鎖會卡死）。
+// entries 為陣列（匯入一批可能多筆，單筆呼叫端包成 [entry]），空陣列直接 no-op 不碰檔案。
+function appendTutorHistory_(ctx, entries) {
+  if (!entries || !entries.length) return;
+  let hist = readJsonSafe_('tutorHistory.json', ctx, []);
+  if (!Array.isArray(hist)) hist = [];
+  entries.forEach(function (e) { hist.push(e); });
+  writeJsonPath_('tutorHistory.json', hist, ctx);
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -1307,6 +1321,98 @@ function computeClassStats_(records, classId) {
   return stats;
 }
 
+// ── 導師歷史＋期中更換導師（Ticket C，純函式區）──────────────────────────────
+// tutorHistory.json = 扁平陣列，每筆 { classId, semester, changeType, effectiveDate,
+// previousTutors, tutors, classNameAtTime, note, at, by }。changeType：
+// 'manual'（後台編輯班級改名單）/ 'midterm'（期中更換，effectiveDate 必填）/
+// 'import'（Excel 匯入覆蓋名單）/ 'rollover'（升級帶入，保留給未來學期滾動功能）。
+
+// 導師名單是否有異動：長度或任一位置的 name/email 不同即 true（順序視為有意義——
+// 導師 1/導師 2 槽位對調也算異動，照實記錄）。
+function tutorsDiffer_(a, b) {
+  const x = a || [], y = b || [];
+  if (x.length !== y.length) return true;
+  for (let i = 0; i < x.length; i++) {
+    const p = x[i] || {}, q = y[i] || {};
+    if (p.name !== q.name || p.email !== q.email) return true;
+  }
+  return false;
+}
+
+// 組一筆 tutorHistory entry（cls 為「異動後」的班級物件；快照只留 name/email，
+// 不帶其他欄位進歷史檔）。
+function buildTutorHistoryEntry_(cls, previousTutors, changeType, effectiveDate, note, semesterId, byEmail, now) {
+  return {
+    classId: cls.id,
+    semester: semesterId || null,
+    changeType: changeType,
+    effectiveDate: effectiveDate || null,
+    previousTutors: (previousTutors || []).map(function (t) { return { name: (t && t.name) || '', email: (t && t.email) || '' }; }),
+    tutors: (cls.tutors || []).map(function (t) { return { name: (t && t.name) || '', email: (t && t.email) || '' }; }),
+    classNameAtTime: cls.displayName || cls.name,
+    note: note || null,
+    at: now,
+    by: byEmail,
+  };
+}
+
+// 期中更換導師的輸入驗證（純函式，供 adminChangeTutorMidtermAction_ 與單元測試共用）：
+// - classId 必須存在且未被軟刪除（deleted!==true，fail-closed）；inactive（停用）允許——
+//   停用班也可能需要正名單。
+// - effectiveDate 必填、格式 YYYY-MM-DD 且為真實存在的日期（2 月 30 日之類拒絕）。
+// - newTutors 1~2 位；name 走與匯入/自填建議相同的白名單 regex；email 必填（期中更換是
+//   正式名單、核章授權以 email 比對，不可空）且過標準格式檢查、轉小寫。
+// - note 選填、必須是字串、長度 ≤200。
+// 回傳 { ok:true, cls, tutors, note } 或 { ok:false, error }。
+function validateMidtermChange_(params, classes) {
+  const classId = params && params.classId;
+  if (!classId) return { ok: false, error: 'classId required' };
+  const cls = (classes || []).filter(function (c) { return c && c.id === classId; })[0];
+  if (!cls || cls.deleted === true) return { ok: false, error: 'class not found: ' + classId };
+
+  const ed = params.effectiveDate;
+  if (typeof ed !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(ed)) return { ok: false, error: 'invalid effectiveDate' };
+  const y = Number(ed.slice(0, 4)), m = Number(ed.slice(5, 7)), d = Number(ed.slice(8, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) {
+    return { ok: false, error: 'invalid effectiveDate' };
+  }
+
+  const list = params.newTutors;
+  if (!Array.isArray(list) || list.length < 1 || list.length > 2) return { ok: false, error: 'newTutors must contain 1-2 tutors' };
+  const tutors = [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i];
+    if (!t || typeof t.name !== 'string') return { ok: false, error: 'invalid tutor name' };
+    const name = t.name.trim();
+    if (!/^[A-Za-z0-9一-鿿·\s]{1,20}$/.test(name)) return { ok: false, error: 'invalid tutor name' };
+    const email = String(t.email === undefined || t.email === null ? '' : t.email).trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'invalid tutor email' };
+    tutors.push({ name: name, email: email });
+  }
+
+  let note = null;
+  if (params.note !== undefined && params.note !== null && params.note !== '') {
+    if (typeof params.note !== 'string') return { ok: false, error: 'invalid note' };
+    if (params.note.length > 200) return { ok: false, error: 'note too long (max 200)' };
+    note = params.note;
+  }
+
+  return { ok: true, cls: cls, tutors: tutors, note: note };
+}
+
+// 導師歷史可視權限（default-deny）：admin / director / staffLead / staffAssistant 任何班；
+// 系主任限本系（deptHeadOf 含該班 deptId）；導師限自班（tutorOf 含該 classId）；
+// 其他（含一般學生）一律拒絕。墓碑班級（deleted）也走同一套判斷——歷史正是刪除後
+// 還要查的東西（注意 resolveRoles_ 對 inactive 班不給 tutorOf，該情境導師需請 admin 代查）。
+function canViewTutorHistory_(roles, classInfo) {
+  if (!roles || !classInfo) return false;
+  if (roles.isAdmin || roles.isDirector || roles.isStaffLead || roles.isStaffAssistant) return true;
+  if ((roles.deptHeadOf || []).indexOf(classInfo.deptId) !== -1) return true;
+  if ((roles.tutorOf || []).indexOf(classInfo.id) !== -1) return true;
+  return false;
+}
+
 // ── Excel 匯入 v2：學院/系所/導師制度以名稱比對，不存在就建立；停用的一律 fail-closed 拒絕 ──
 // （防重打同名繞過停用，同 classResolveCore_ 的既有安全規則，不可退化）。
 // 純函式：不做 I/O，输入/輸出都是完整陣列，供呼叫端（adminImportRosterAction_）逐列 fold，
@@ -1389,6 +1495,11 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   const explicitDisplayName = row.classDisplayName && String(row.classDisplayName).trim();
   let nextClasses = classes || [];
   let classCreated = false;
+  // 導師歷史（Ticket C）：回傳本列是否造成導師名單異動＋異動前快照，供呼叫端
+  // （adminImportRosterAction_）在同一個 withLock_ 內 append tutorHistory（changeType:'import'）。
+  // 不改動既有回傳欄位語意，只新增 tutorsChanged / previousTutors。
+  let tutorsChanged = false;
+  let previousTutors = [];
 
   if (!cls) {
     const fused = explicitDisplayName || fuseClassDisplayName_(
@@ -1406,7 +1517,9 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     };
     nextClasses = nextClasses.concat([cls]);
     classCreated = true;
+    tutorsChanged = tutors.length > 0;  // 新班且本列有導師 = 從無到有的異動
   } else {
+    previousTutors = cls.tutors || [];
     const updated = Object.assign({}, cls, {
       deptId: deptRes.dept.id,
       systemId: systemRes.system ? systemRes.system.id : cls.systemId,
@@ -1416,6 +1529,8 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     });
     nextClasses = nextClasses.map(function (c) { return c.id === cls.id ? updated : c; });
     cls = updated;
+    // 本列未填導師時沿用既有名單（updated.tutors === previousTutors）→ 無異動。
+    tutorsChanged = tutors.length > 0 && tutorsDiffer_(previousTutors, tutors);
   }
 
   return {
@@ -1424,6 +1539,7 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     tutorSystems: systemRes.tutorSystems, classes: nextClasses,
     college: collegeRes.college, dept: deptRes.dept, system: systemRes.system,
     cls: cls, classCreated: classCreated,
+    tutorsChanged: tutorsChanged, previousTutors: previousTutors,
   };
 }
 
@@ -1930,9 +2046,19 @@ function adminUpsertClassAction_(params, ctx, userEmail) {
     const now = new Date().toISOString();
     const data = readJsonSafe_('classes.json', ctx, []);
     const idx = data.findIndex(function (c) { return c.id === entry.id; });
+    const prevTutors = (idx === -1 ? [] : (data[idx].tutors || []));
     const merged = applyUpsertDeleteFields_(idx === -1 ? {} : data[idx], entry, userEmail, now);
     if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('classes.json', data, ctx);
+    // 導師歷史（Ticket C）：名單有異動才記（changeType:'manual'）。刪除墓碑那次 upsert
+    // （entry 只帶 id+deleted，merged.tutors 沿用既有值）名單沒變，tutorsDiffer_ 為 false
+    // 自然不記；isDelete 再擋一層保險。同一個 withLock_ 臨界區內寫入。
+    if (!isDelete && tutorsDiffer_(prevTutors, merged.tutors)) {
+      const semesters = readJsonSafe_('semesters.json', ctx, []);
+      appendTutorHistory_(ctx, [buildTutorHistoryEntry_(
+        merged, prevTutors, 'manual', null, null, currentSemesterId_(semesters), userEmail, now
+      )]);
+    }
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteClass' : 'adminUpsertClass', by: userEmail, targetId: entry.id, at: now });
     return { classes: data };
   });
@@ -1993,13 +2119,21 @@ function adminImportRosterAction_(params, ctx, userEmail) {
     let departments = readJsonSafe_('departments.json', ctx, []);
     let tutorSystems = readJsonSafe_('tutorSystems.json', ctx, []);
     let classes = readJsonSafe_('classes.json', ctx, []);
+    const semesters = readJsonSafe_('semesters.json', ctx, []);
+    const semesterId = currentSemesterId_(semesters);
     let successCount = 0;
     const errors = [];
+    const historyEntries = [];  // 導師歷史（Ticket C）：名單有異動的列，批次收集、同鎖一次寫入
 
     rows.forEach(function (row, i) {
       const res = importRosterRow_(row, colleges, departments, tutorSystems, classes, now);
       if (!res.ok) { errors.push({ row: i, error: res.error }); return; }
       colleges = res.colleges; departments = res.departments; tutorSystems = res.tutorSystems; classes = res.classes;
+      if (res.tutorsChanged) {
+        historyEntries.push(buildTutorHistoryEntry_(
+          res.cls, res.previousTutors, 'import', null, null, semesterId, userEmail, now
+        ));
+      }
       successCount++;
     });
 
@@ -2007,6 +2141,7 @@ function adminImportRosterAction_(params, ctx, userEmail) {
     writeJsonPath_('departments.json', departments, ctx);
     writeJsonPath_('tutorSystems.json', tutorSystems, ctx);
     writeJsonPath_('classes.json', classes, ctx);
+    appendTutorHistory_(ctx, historyEntries);
     appendAuditLog_(ctx, {
       action: 'adminImportRoster', by: userEmail,
       count: successCount, errorCount: errors.length, at: now,
@@ -2098,6 +2233,54 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteStaffAssistant' : 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: now });
     return { staffAssistants: config.staffAssistants };
   });
+}
+
+// adminChangeTutorMidterm：期中更換導師（admin only；Ticket C）。與 adminUpsertClass 改名單
+// 的差異：這是「正式異動」入口——強制 effectiveDate、email 必填，寫入 tutorHistory
+// changeType:'midterm'。驗證抽純函式 validateMidtermChange_（含 classId 存在且未刪除、
+// 日期/名單/備註白名單），讀檔與驗證都在 withLock_ 內（拿最新 classes 驗、避免併發競態）。
+function adminChangeTutorMidtermAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const chk = validateMidtermChange_(params, classes);
+    if (!chk.ok) throw new Error(chk.error);
+    const idx = classes.findIndex(function (c) { return c && c.id === chk.cls.id; });
+    const prevTutors = classes[idx].tutors || [];
+    const updated = Object.assign({}, classes[idx], { tutors: chk.tutors });
+    classes[idx] = updated;
+    writeJsonPath_('classes.json', classes, ctx);
+    const semesters = readJsonSafe_('semesters.json', ctx, []);
+    const historyEntry = buildTutorHistoryEntry_(
+      updated, prevTutors, 'midterm', params.effectiveDate, chk.note, currentSemesterId_(semesters), userEmail, now
+    );
+    appendTutorHistory_(ctx, [historyEntry]);
+    appendAuditLog_(ctx, { action: 'adminChangeTutorMidterm', by: userEmail, targetId: chk.cls.id, at: now });
+    return { classes: classes, historyEntry: historyEntry };
+  });
+}
+
+// tutorHistoryGet：查單一班級的導師異動歷史（依 at 升冪）。授權 default-deny
+// （canViewTutorHistory_）：admin/director/staffLead/staffAssistant 任何班、系主任限本系、導師限自班，
+// 其他一律拒。墓碑班級（deleted）也允許上述角色查——歷史正是刪除後還要看的東西。
+// bootstrap 刻意不帶 tutorHistory（控制 payload），前端按需呼叫本 action。純讀取，不需 lock。
+function tutorHistoryGetAction_(params, ctx, userEmail) {
+  const classId = params.classId;
+  if (!classId) throw new Error('classId required');
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const classInfo = classes.filter(function (c) { return c && c.id === classId; })[0];
+  if (!classInfo) throw new Error('class not found: ' + classId);
+  if (!canViewTutorHistory_(roles, classInfo)) throw new Error('not authorized to view tutor history');
+
+  let hist = readJsonSafe_('tutorHistory.json', ctx, []);
+  if (!Array.isArray(hist)) hist = [];
+  const entries = hist
+    .filter(function (e) { return e && e.classId === classId; })
+    .sort(function (a, b) { return String(a.at || '').localeCompare(String(b.at || '')); });
+  return { entries: entries };
 }
 
 // recordSetTopics：四類宣導勾選的手動調整，只有 staffLead 關的驗證者（主責/已綁定助理）與

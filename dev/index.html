@@ -2245,9 +2245,106 @@ function renderAdminClasses() {
         '<td data-label="導師">' + (c.tutors || []).map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
         '<td data-label="狀態">' + (c.active === false ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm" data-action="class-history" data-id="' + escapeHtml(c.id) + '">歷史</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="class-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="class-new" style="margin-top:12px;">新增班級</button></div>';
+}
+
+// ── 導師歷史＋期中更換（Ticket C）──
+// 歷史 modal：按需呼叫 tutorHistoryGet（bootstrap 不帶 tutorHistory，控制 payload）。
+const TUTOR_CHANGE_TYPE_LABELS = { manual: '手動編輯', midterm: '期中更換', import: '匯入', rollover: '升級帶入' };
+
+function tutorListLabel(list) {
+  const names = (list || []).map(function (t) { return (t && t.name) || ''; }).filter(Boolean);
+  return names.length ? names.join('、') : '（無）';
+}
+
+// midterm 的生效日以「X月X日更換」呈現；其他類型不顯示生效日。
+function effectiveDateLabel(entry) {
+  if (!entry || entry.changeType !== 'midterm' || !entry.effectiveDate) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(entry.effectiveDate);
+  return m ? (Number(m[2]) + '月' + Number(m[3]) + '日更換') : entry.effectiveDate;
+}
+
+async function openClassHistoryModal(classId) {
+  const c = classById(classId);
+  if (!c) return;
+  const title = '歷年導師──' + (c.displayName || c.name);
+  openModal(title, '<div class="empty-hint">載入中…</div>', { wide: true });
+  let entries;
+  try {
+    const res = await proxyCall('tutorHistoryGet', { classId: classId });
+    entries = (res && res.entries) || [];
+  } catch (err) {
+    openModal(title, '<div class="empty-hint">載入失敗：' + escapeHtml(err.message) + '</div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button></div>', { wide: true });
+    return;
+  }
+  const tableHtml = entries.length
+    ? '<div class="table-wrap"><table><thead><tr><th>學期</th><th>類型</th><th>生效日</th><th>異動前</th><th>異動後</th><th>備註</th><th>操作者</th><th>時間</th></tr></thead><tbody>' +
+      entries.map(function (h) {
+        return '<tr><td data-label="學期">' + escapeHtml(h.semester || '') + '</td>' +
+          '<td data-label="類型">' + escapeHtml(TUTOR_CHANGE_TYPE_LABELS[h.changeType] || h.changeType || '') + '</td>' +
+          '<td data-label="生效日">' + escapeHtml(effectiveDateLabel(h)) + '</td>' +
+          '<td data-label="異動前">' + escapeHtml(tutorListLabel(h.previousTutors)) + '</td>' +
+          '<td data-label="異動後">' + escapeHtml(tutorListLabel(h.tutors)) + '</td>' +
+          '<td data-label="備註">' + escapeHtml(h.note || '') + '</td>' +
+          '<td data-label="操作者">' + escapeHtml(h.by || '') + '</td>' +
+          '<td data-label="時間">' + escapeHtml(formatDateTime(h.at)) + '</td></tr>';
+      }).join('') + '</tbody></table></div>'
+    : '<div class="empty-hint">尚無異動紀錄</div>';
+  openModal(title, tableHtml +
+    '<p class="field-hint" style="margin-top:12px;">「期中更換導師」會留下正式異動紀錄；一般資料修正（改名、制度、停用等）請用班級列表的「編輯」。</p>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button>' +
+    '<button type="button" class="btn btn-primary" data-action="midterm-open" data-id="' + escapeHtml(classId) + '">期中更換導師</button></div>', { wide: true });
+}
+
+function openMidtermChangeModal(classId) {
+  const c = classById(classId);
+  if (!c) return;
+  const tutors = c.tutors || [];
+  const d = new Date();
+  const today = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  openModal('期中更換導師──' + (c.displayName || c.name), '<form id="midterm-form">' +
+    '<p class="field-hint">「期中更換」會寫入正式導師異動紀錄（含生效日）；一般資料修正請用「編輯」。' +
+    '送出後名單立即生效，Email 必填（核章身分以 email 比對）。</p>' +
+    '<div class="field"><label>生效日期</label><input type="date" id="mid-date" value="' + today + '" required style="max-width:220px;"></div>' +
+    '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="mid-t1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '" required></div>' +
+    '<div class="field"><label>導師 1 Email</label><input type="email" id="mid-t1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '" required></div></div>' +
+    '<div class="row"><div class="field"><label>導師 2 姓名（選填）</label><input type="text" id="mid-t2-name" value="' + escapeHtml(tutors[1] && tutors[1].name || '') + '"></div>' +
+    '<div class="field"><label>導師 2 Email（選填）</label><input type="email" id="mid-t2-email" value="' + escapeHtml(tutors[1] && tutors[1].email || '') + '"></div></div>' +
+    '<div class="field"><label>備註（選填，200 字內）</label><input type="text" id="mid-note" maxlength="200" placeholder="如：原導師退休、留職停薪"></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">確認更換</button></div>' +
+  '</form>');
+  $('midterm-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const newTutors = [];
+    if ($('mid-t1-name').value.trim() || $('mid-t1-email').value.trim()) {
+      newTutors.push({ name: $('mid-t1-name').value.trim(), email: $('mid-t1-email').value.trim() });
+    }
+    if ($('mid-t2-name').value.trim() || $('mid-t2-email').value.trim()) {
+      newTutors.push({ name: $('mid-t2-name').value.trim(), email: $('mid-t2-email').value.trim() });
+    }
+    if (!newTutors.length) { showToast('至少需填一位導師', 'error'); return; }
+    if (newTutors.some(function (t) { return !t.name || !t.email; })) { showToast('每位導師的姓名與 Email 皆為必填', 'error'); return; }
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminChangeTutorMidterm', {
+          classId: classId,
+          effectiveDate: $('mid-date').value,
+          newTutors: newTutors,
+          note: $('mid-note').value.trim() || undefined,
+        });
+        bootstrapData.classes = res.classes;
+        showToast('已更換導師並寫入異動紀錄', 'success');
+        closeModal();
+        renderNav();
+        renderAdminClasses();
+      });
+    } catch (err) { showToast('更換失敗：' + err.message, 'error'); }
+  });
 }
 
 // 建議轉正/移除：沿用 adminUpsertClass 送整包 class（tutors 只有 admin action 能動）。
@@ -2394,6 +2491,10 @@ document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="class-new"]')) { openClassForm(); return; }
   const editBtn = e.target.closest('[data-action="class-edit"]');
   if (editBtn) { openClassForm(classById(editBtn.dataset.id)); return; }
+  const histBtn = e.target.closest('[data-action="class-history"]');
+  if (histBtn) { openClassHistoryModal(histBtn.dataset.id); return; }
+  const midtermBtn = e.target.closest('[data-action="midterm-open"]');
+  if (midtermBtn) { openMidtermChangeModal(midtermBtn.dataset.id); return; }
   const delBtn = e.target.closest('[data-action="class-delete"]');
   if (delBtn) {
     const c = classById(delBtn.dataset.id);
