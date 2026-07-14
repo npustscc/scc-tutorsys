@@ -110,6 +110,24 @@ test('classResolveCore_: deptName 命中 inactive 系所 → 拒絕（防重打�
   assert.match(r.error, /department disabled/);
 });
 
+// ── 軟刪除（deleted:true）：Ticket B ─────────────────────────────────────────
+
+test('classResolveCore_: deptId 命中已刪除系所 → 拒絕（同 inactive，不落入建同名新系所分支）', () => {
+  const s = S();
+  const depts = DEPTS.concat([{ id: '已刪除系', name: '已刪除系', headEmail: '', active: true, deleted: true }]);
+  const r = s.classResolveCore_({ deptId: '已刪除系', className: 'A' }, depts, [], STU, NOW);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /department not found/);
+});
+
+test('classResolveCore_: deptName 命中已刪除系所 → 拒絕，且絕不建同名新系所（防重打同名繞過刪除）', () => {
+  const s = S();
+  const depts = DEPTS.concat([{ id: '已刪除系', name: '已刪除系', headEmail: '', active: true, deleted: true }]);
+  const r = s.classResolveCore_({ deptName: '已刪除系', className: 'A' }, depts, [], STU, NOW);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /department disabled/);
+});
+
 test('classResolveCore_: deptName 全新 → 建新系所（slugify id、headEmail 空、active true）', () => {
   const s = S();
   const r = s.classResolveCore_({ deptName: '農園生產系 (農園)', className: '碩一' }, DEPTS, [], STU, NOW);
@@ -144,6 +162,16 @@ test('classResolveCore_: (deptId, name) 命中既有班級（含 trim）→ 不�
 test('classResolveCore_: 命中 inactive 班級 → 拒絕', () => {
   const s = S();
   const r = s.classResolveCore_({ deptId: '資訊管理系', className: '資管三B' }, DEPTS, baseClasses(), STU, NOW);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /class disabled/);
+});
+
+test('classResolveCore_: 命中已刪除班級（active 仍為 true）→ 拒絕，不落入建同名新班分支', () => {
+  const s = S();
+  const classes = baseClasses().concat([
+    { id: '資訊管理系_已刪除班', name: '已刪除班', deptId: '資訊管理系', tutors: [], active: true, deleted: true },
+  ]);
+  const r = s.classResolveCore_({ deptId: '資訊管理系', className: '已刪除班' }, DEPTS, classes, STU, NOW);
   assert.equal(r.ok, false);
   assert.match(r.error, /class disabled/);
 });

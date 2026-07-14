@@ -569,25 +569,27 @@ function resolveRoles_(email, config, departments, classes) {
     roles.isAdmin = true;
   }
 
+  // 軟刪除（deleted:true）帳號/系所視同不存在，一律不賦予角色——比照 disabled 的既有
+  // fail-closed 判斷點，就地加上 deleted 檢查（見 Ticket B：六類實體軟刪除）。
   const u = config && config.users && config.users[email];
-  if (u && u.disabled !== true) {
+  if (u && u.disabled !== true && u.deleted !== true) {
     if (u.role === 'admin') roles.isAdmin = true;
     if (u.role === 'director') roles.isDirector = true;
   }
 
   const staffLeads = (config && config.staffLeads) || [];
   const staffAssistants = (config && config.staffAssistants) || [];
-  const lead = staffLeads.filter(function (s) { return s && s.email === email && s.disabled !== true; })[0];
+  const lead = staffLeads.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
   if (lead) roles.isStaffLead = true;
-  const assistant = staffAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true; })[0];
+  const assistant = staffAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
   if (assistant) {
     roles.isStaffAssistant = true;
-    const boundLead = staffLeads.filter(function (s) { return s && s.email === assistant.leadEmail && s.disabled !== true; })[0];
+    const boundLead = staffLeads.filter(function (s) { return s && s.email === assistant.leadEmail && s.disabled !== true && s.deleted !== true; })[0];
     roles.assistantLead = boundLead ? { email: boundLead.email, name: boundLead.name } : null;
   }
 
   (departments || []).forEach(function (d) {
-    if (d && d.headEmail === email && d.active !== false) roles.deptHeadOf.push(d.id);
+    if (d && d.headEmail === email && d.active !== false && d.deleted !== true) roles.deptHeadOf.push(d.id);
   });
   (classes || []).forEach(function (c) {
     if (!c || c.active === false) return;
@@ -1241,15 +1243,15 @@ function classResolveCore_(params, departments, classes, userEmail, now) {
   let newDept = null;
   if (params.deptId) {
     dept = (departments || []).filter(function (d) { return d && d.id === params.deptId; })[0];
-    if (!dept || dept.active === false) return { ok: false, error: 'department not found: ' + params.deptId };
+    if (!dept || dept.active === false || dept.deleted === true) return { ok: false, error: 'department not found: ' + params.deptId };
   } else {
     if (!isValidDeptName_(params.deptName)) return { ok: false, error: 'invalid deptName' };
     const name = String(params.deptName).trim();
-    // 以名稱完全比對既有系所（含 inactive 也算命中，避免重複建同名系所）。
+    // 以名稱完全比對既有系所（含 inactive/deleted 也算命中，避免重複建同名系所）。
     dept = (departments || []).filter(function (d) { return d && d.name === name; })[0];
-    // 命中已停用系所一律拒絕（fail-closed）：停用是管理員下架垃圾/濫用 chip 的唯一手段，
-    // 若在此放行，重打同名即可繞過停用；命中後拒絕也同時避免落到「建同名新系所」分支。
-    if (dept && dept.active === false) return { ok: false, error: 'department disabled: ' + dept.id };
+    // 命中已停用/已刪除系所一律拒絕（fail-closed）：停用/刪除是管理員下架垃圾/濫用 chip 的
+    // 唯一手段，若在此放行，重打同名即可繞過；命中後拒絕也同時避免落到「建同名新系所」分支。
+    if (dept && (dept.active === false || dept.deleted === true)) return { ok: false, error: 'department disabled: ' + dept.id };
     if (!dept) {
       const id = uniqueDeptId_(slugifyDeptId_(name), departments);
       newDept = { id: id, name: name, headEmail: '', headName: '', active: true };
@@ -1262,8 +1264,8 @@ function classResolveCore_(params, departments, classes, userEmail, now) {
   let cls = (classes || []).filter(function (c) {
     return c && c.deptId === dept.id && c.name === className;
   })[0];
-  // 命中已停用班級一律拒絕（fail-closed，理由同上：防重打同名繞過停用）。
-  if (cls && cls.active === false) return { ok: false, error: 'class disabled: ' + cls.id };
+  // 命中已停用/已刪除班級一律拒絕（fail-closed，理由同上：防重打同名繞過停用/刪除）。
+  if (cls && (cls.active === false || cls.deleted === true)) return { ok: false, error: 'class disabled: ' + cls.id };
   let classCreated = false;
   if (!cls) {
     cls = {
@@ -1317,7 +1319,7 @@ function resolveOrCreateCollege_(name, colleges) {
   const t = String(name || '').trim();
   if (!t) return { ok: true, colleges: colleges, college: null };
   const found = findByNameExact_(colleges, t);
-  if (found && found.disabled === true) return { ok: false, error: 'college disabled: ' + found.name };
+  if (found && (found.disabled === true || found.deleted === true)) return { ok: false, error: 'college disabled: ' + found.name };
   if (found) return { ok: true, colleges: colleges, college: found };
   const created = { id: uniqueDeptId_(slugifyDeptId_(t), colleges), name: t, order: (colleges || []).length, disabled: false };
   return { ok: true, colleges: (colleges || []).concat([created]), college: created };
@@ -1327,7 +1329,7 @@ function resolveOrCreateDept_(name, collegeId, departments) {
   const t = String(name || '').trim();
   if (!t) return { ok: false, error: 'deptName required' };
   const found = findByNameExact_(departments, t);
-  if (found && found.active === false) return { ok: false, error: 'department disabled: ' + found.name };
+  if (found && (found.active === false || found.deleted === true)) return { ok: false, error: 'department disabled: ' + found.name };
   if (found) return { ok: true, departments: departments, dept: found };
   const created = { id: uniqueDeptId_(slugifyDeptId_(t), departments), name: t, headEmail: '', headName: '', collegeId: collegeId || null, active: true };
   return { ok: true, departments: (departments || []).concat([created]), dept: created };
@@ -1337,7 +1339,7 @@ function resolveOrCreateSystem_(name, tutorSystems) {
   const t = String(name || '').trim();
   if (!t) return { ok: true, tutorSystems: tutorSystems, system: null };
   const found = findByNameExact_(tutorSystems, t);
-  if (found && found.disabled === true) return { ok: false, error: 'tutorSystem disabled: ' + found.name };
+  if (found && (found.disabled === true || found.deleted === true)) return { ok: false, error: 'tutorSystem disabled: ' + found.name };
   if (found) return { ok: true, tutorSystems: tutorSystems, system: found };
   const created = { id: uniqueDeptId_(slugifyDeptId_(t), tutorSystems), name: t, requiredMeetingCount: null, disabled: false };
   return { ok: true, tutorSystems: (tutorSystems || []).concat([created]), system: created };
@@ -1381,7 +1383,7 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
 
   const className = String(row.classNameRaw).trim();
   let cls = (classes || []).filter(function (c) { return c && c.deptId === deptRes.dept.id && c.name === className; })[0];
-  if (cls && cls.active === false) return { ok: false, error: 'class disabled: ' + cls.id };
+  if (cls && (cls.active === false || cls.deleted === true)) return { ok: false, error: 'class disabled: ' + cls.id };
 
   const tutors = buildImportTutors_(row);
   const explicitDisplayName = row.classDisplayName && String(row.classDisplayName).trim();
@@ -1629,7 +1631,8 @@ function recordSubmitAction_(params, ctx, userEmail) {
 
   const classes = readJsonSafe_('classes.json', ctx, []);
   const classInfo = classes.filter(function (c) { return c.id === classId; })[0];
-  if (!classInfo || classInfo.active === false) throw new Error('class not found: ' + classId);
+  // 已刪除班級一律拒絕新增紀錄（fail-closed，同 active===false 的既有規則；見 Ticket B）。
+  if (!classInfo || classInfo.active === false || classInfo.deleted === true) throw new Error('class not found: ' + classId);
   if (!isUploadAllowed_(classInfo, userEmail)) throw new Error('not authorized to upload for this class (not in whitelist)');
 
   // 附件歸屬驗證（防禦縱深第一層；第二層在 downloadAttachmentAction_）：
@@ -1738,7 +1741,8 @@ function uploadAttachmentAction_(params, ctx, userEmail) {
 
   const classes = readJsonSafe_('classes.json', ctx, []);
   const classInfo = classes.filter(function (c) { return c.id === classId; })[0];
-  if (!classInfo || classInfo.active === false) throw new Error('class not found: ' + classId);
+  // 已刪除班級一律拒絕上傳（fail-closed，同 active===false 的既有規則；見 Ticket B）。
+  if (!classInfo || classInfo.active === false || classInfo.deleted === true) throw new Error('class not found: ' + classId);
   if (!isUploadAllowed_(classInfo, userEmail)) throw new Error('not authorized to upload for this class (not in whitelist)');
 
   return withLock_(function () {
@@ -1868,6 +1872,25 @@ function recordRejectAction_(params, ctx, userEmail) {
 
 // ── 後台管理 action：全部限 admin（BOOTSTRAP_ADMINS 或 config.users role==='admin'）──
 
+// 六類實體「軟刪除」共用邏輯（Ticket B）：entry.deleted===true → 蓋上刪除墓碑
+// （deleted/deletedAt/deletedBy 一律由後端算，deletedAt/deletedBy 不信任 client 帶的值，
+// 避免偽造刪除時間/刪除者）；否則（未設或 false）→ 明確清空墓碑欄位，等同「upsert 收到
+// 同 id 且 deleted 未設/false 時允許覆寫回未刪除」的復原後門（不擴 UI，只保留 API 可用，
+// 見 Ticket B 設計說明）。純函式，不做 I/O，供各 adminUpsert*Action_ 共用。
+function applyUpsertDeleteFields_(existing, entry, userEmail, now) {
+  const merged = Object.assign({}, existing, entry);
+  if (entry && entry.deleted === true) {
+    merged.deleted = true;
+    merged.deletedAt = now;
+    merged.deletedBy = userEmail;
+  } else {
+    merged.deleted = false;
+    delete merged.deletedAt;
+    delete merged.deletedBy;
+  }
+  return merged;
+}
+
 function requireAdmin_(roles) {
   if (!roles || !roles.isAdmin) throw new Error('admin only');
 }
@@ -1883,13 +1906,16 @@ function adminUpsertDepartmentAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.department;
   if (!entry || !entry.id) throw new Error('department.id required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const data = readJsonSafe_('departments.json', ctx, []);
     const idx = data.findIndex(function (d) { return d.id === entry.id; });
-    if (idx === -1) data.push(entry); else data[idx] = Object.assign({}, data[idx], entry);
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : data[idx], entry, userEmail, now);
+    if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('departments.json', data, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertDepartment', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDepartment' : 'adminUpsertDepartment', by: userEmail, targetId: entry.id, at: now });
     return { departments: data };
   });
 }
@@ -1898,13 +1924,16 @@ function adminUpsertClassAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.class;
   if (!entry || !entry.id) throw new Error('class.id required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const data = readJsonSafe_('classes.json', ctx, []);
     const idx = data.findIndex(function (c) { return c.id === entry.id; });
-    if (idx === -1) data.push(entry); else data[idx] = Object.assign({}, data[idx], entry);
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : data[idx], entry, userEmail, now);
+    if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('classes.json', data, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertClass', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteClass' : 'adminUpsertClass', by: userEmail, targetId: entry.id, at: now });
     return { classes: data };
   });
 }
@@ -1914,13 +1943,15 @@ function adminUpsertUserAction_(params, ctx, userEmail) {
   const targetEmail = params.email;
   const entry = params.user;
   if (!targetEmail || !entry) throw new Error('email and user required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
     config.users = config.users || {};
-    config.users[targetEmail] = Object.assign({}, config.users[targetEmail], entry);
+    config.users[targetEmail] = applyUpsertDeleteFields_(config.users[targetEmail] || {}, entry, userEmail, now);
     writeJsonPath_('config.json', config, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertUser', by: userEmail, targetId: targetEmail, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteUser' : 'adminUpsertUser', by: userEmail, targetId: targetEmail, at: now });
     return { users: config.users };
   });
 }
@@ -1992,13 +2023,16 @@ function adminUpsertCollegeAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.college;
   if (!entry || !entry.id) throw new Error('college.id required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const data = readJsonSafe_('colleges.json', ctx, []);
     const idx = data.findIndex(function (c) { return c.id === entry.id; });
-    if (idx === -1) data.push(entry); else data[idx] = Object.assign({}, data[idx], entry);
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : data[idx], entry, userEmail, now);
+    if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('colleges.json', data, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertCollege', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteCollege' : 'adminUpsertCollege', by: userEmail, targetId: entry.id, at: now });
     return { colleges: data };
   });
 }
@@ -2008,15 +2042,18 @@ function adminUpsertTutorSystemAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.tutorSystem;
   if (!entry || !entry.id) throw new Error('tutorSystem.id required');
+  const isDelete = entry.deleted === true;
   // 鎖外先播種，理由同 adminImportRosterAction_（withLock_ 不可重入）。
   ensureTutorSystemsSeeded_(ctx);
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const data = readJsonSafe_('tutorSystems.json', ctx, []);
     const idx = data.findIndex(function (s) { return s.id === entry.id; });
-    const next = idx === -1 ? data.concat([entry]) : data.map(function (s, i) { return i === idx ? Object.assign({}, s, entry) : s; });
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : data[idx], entry, userEmail, now);
+    const next = idx === -1 ? data.concat([merged]) : data.map(function (s, i) { return i === idx ? merged : s; });
     writeJsonPath_('tutorSystems.json', next, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertTutorSystem', by: userEmail, targetId: entry.id, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteTutorSystem' : 'adminUpsertTutorSystem', by: userEmail, targetId: entry.id, at: now });
     return { tutorSystems: next };
   });
 }
@@ -2029,14 +2066,17 @@ function adminUpsertStaffLeadAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffLead;
   if (!entry || !entry.email) throw new Error('staffLead.email required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
     config.staffLeads = config.staffLeads || [];
     const idx = config.staffLeads.findIndex(function (s) { return s && s.email === entry.email; });
-    if (idx === -1) config.staffLeads.push(entry); else config.staffLeads[idx] = Object.assign({}, config.staffLeads[idx], entry);
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : config.staffLeads[idx], entry, userEmail, now);
+    if (idx === -1) config.staffLeads.push(merged); else config.staffLeads[idx] = merged;
     writeJsonPath_('config.json', config, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertStaffLead', by: userEmail, targetId: entry.email, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteStaffLead' : 'adminUpsertStaffLead', by: userEmail, targetId: entry.email, at: now });
     return { staffLeads: config.staffLeads };
   });
 }
@@ -2045,14 +2085,17 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffAssistant;
   if (!entry || !entry.email) throw new Error('staffAssistant.email required');
+  const isDelete = entry.deleted === true;
 
   return withLock_(function () {
+    const now = new Date().toISOString();
     const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
     config.staffAssistants = config.staffAssistants || [];
     const idx = config.staffAssistants.findIndex(function (s) { return s && s.email === entry.email; });
-    if (idx === -1) config.staffAssistants.push(entry); else config.staffAssistants[idx] = Object.assign({}, config.staffAssistants[idx], entry);
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : config.staffAssistants[idx], entry, userEmail, now);
+    if (idx === -1) config.staffAssistants.push(merged); else config.staffAssistants[idx] = merged;
     writeJsonPath_('config.json', config, ctx);
-    appendAuditLog_(ctx, { action: 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: new Date().toISOString() });
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteStaffAssistant' : 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: now });
     return { staffAssistants: config.staffAssistants };
   });
 }

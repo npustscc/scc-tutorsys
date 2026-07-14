@@ -165,6 +165,35 @@ test('importRosterRow_: 命中已停用班級 → fail-closed 拒絕', () => {
   assert.match(r.error, /class disabled/);
 });
 
+// ── 軟刪除（deleted:true）：Ticket B ─────────────────────────────────────────
+
+test('importRosterRow_: 命中已刪除學院/系所/導師制度 → 各自 fail-closed 拒絕（active/disabled 仍為未停用也一樣拒絕）', () => {
+  const S = makeSandbox();
+  const colleges = [{ id: 'col1', name: '管理學院', disabled: false, deleted: true }];
+  const r1 = S.importRosterRow_(baseRow(), colleges, [], [], [], NOW);
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /college disabled/);
+
+  const departments = [{ id: 'd1', name: '資訊管理系', active: true, deleted: true }];
+  const r2 = S.importRosterRow_(baseRow(), [], departments, [], [], NOW);
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /department disabled/);
+
+  const tutorSystems = [{ id: 'sys1', name: '大學日間部', disabled: false, deleted: true }];
+  const r3 = S.importRosterRow_(baseRow(), [], [], tutorSystems, [], NOW);
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /tutorSystem disabled/);
+});
+
+test('importRosterRow_: 命中已刪除班級（active 仍為 true）→ fail-closed 拒絕', () => {
+  const S = makeSandbox();
+  const departments = [{ id: 'd1', name: '資訊管理系', active: true }];
+  const classes = [{ id: 'd1_x', name: '四技一A', deptId: 'd1', active: true, deleted: true }];
+  const r = S.importRosterRow_(baseRow(), [], departments, [], classes, NOW);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /class disabled/);
+});
+
 test('importRosterRow_: 班級已存在（同 dept+name）→ 更新而非新建，tutors/displayName/requiredMeetingOverride 套用本列', () => {
   const S = makeSandbox();
   const departments = [{ id: 'd1', name: '資訊管理系', active: true }];

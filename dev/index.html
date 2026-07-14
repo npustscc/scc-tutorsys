@@ -803,8 +803,12 @@ function tutorSystemById(id) { return (bootstrapData.tutorSystems || []).find(fu
 // 班級呈現一律用 displayName（無則 fallback name），比照既有慣例（fuseClassDisplayName_ 的
 // 建議值由 classResolve/adminImportRoster 自動填，admin 可事後改）。
 function className(id) { const c = classById(id); return c ? (c.displayName || c.name) : id; }
-function activeDepartments() { return (bootstrapData.departments || []).filter(function (d) { return d.active !== false; }); }
-function activeClasses() { return (bootstrapData.classes || []).filter(function (c) { return c.active !== false; }); }
+// 軟刪除（deleted:true）過濾（見 Ticket B）：deptById/classById/collegeById/tutorSystemById 等
+// 「以 id 找名稱」的查找函式故意不過濾——已刪除項目的名稱仍要能在歷史紀錄/統計頁正確顯示；
+// 只有「選單/chips/下拉」這類會讓使用者選取新項目的地方才套用 notDeleted 過濾。
+function notDeleted(x) { return !x || x.deleted !== true; }
+function activeDepartments() { return (bootstrapData.departments || []).filter(function (d) { return d.active !== false && notDeleted(d); }); }
+function activeClasses() { return (bootstrapData.classes || []).filter(function (c) { return c.active !== false && notDeleted(c); }); }
 function classesInDept(deptId) { return activeClasses().filter(function (c) { return c.deptId === deptId; }); }
 
 async function uploadFilesForClass(semester, classId, files, onProgress) {
@@ -1796,6 +1800,20 @@ document.body.addEventListener('click', function (e) {
 // action 呼叫點：adminUpsertDepartment、adminUpsertClass、adminUpsertSemester、
 // adminUpsertUser、adminImportRoster
 // ══════════════════════════════════════════════════════════════════════════════
+// 通用「軟刪除」呼叫（Ticket B）：confirm → proxyCall(action, payload) → onDone 更新 bootstrapData
+// 並重繪。payload 只需帶 id/email + deleted:true（後端 applyUpsertDeleteFields_ 會保留其餘既有
+// 欄位，見 dev/Code.gs）。cancel（confirm 取消）不呼叫後端、不顯示任何 toast。
+async function deleteEntity(opts) {
+  if (!confirm('確定刪除「' + opts.name + '」？刪除後將從所有選單消失，但不影響既有班級與歷史紀錄。')) return;
+  try {
+    await withBtnPending(opts.btn, async function () {
+      const res = await proxyCall(opts.action, opts.payload);
+      if (opts.onDone) opts.onDone(res);
+      showToast('已刪除', 'success');
+    });
+  } catch (err) { showToast('刪除失敗：' + err.message, 'error'); }
+}
+
 let adminTab = 'departments';
 const ADMIN_TABS = [
   { id: 'colleges', label: '學院' },
@@ -1834,14 +1852,15 @@ function renderAdminTab() {
 
 // ── 學院 ──
 function renderAdminColleges() {
-  const colleges = (bootstrapData.colleges || []).slice().sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+  const colleges = (bootstrapData.colleges || []).filter(notDeleted).slice().sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>學院清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>排序</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     colleges.map(function (c) {
       return '<tr><td data-label="ID">' + escapeHtml(c.id) + '</td><td data-label="名稱">' + escapeHtml(c.name) + '</td>' +
         '<td data-label="排序">' + (c.order || 0) + '</td>' +
         '<td data-label="狀態">' + (c.disabled ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="college-edit" data-id="' + escapeHtml(c.id) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="college-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="college-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="college-new" style="margin-top:12px;">新增學院</button></div>';
 }
@@ -1878,12 +1897,21 @@ function openCollegeForm(college) {
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="college-new"]')) { openCollegeForm(); return; }
   const editBtn = e.target.closest('[data-action="college-edit"]');
-  if (editBtn) openCollegeForm(collegeById(editBtn.dataset.id));
+  if (editBtn) { openCollegeForm(collegeById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="college-delete"]');
+  if (delBtn) {
+    const c = collegeById(delBtn.dataset.id);
+    if (!c) return;
+    deleteEntity({
+      btn: delBtn, name: c.name, action: 'adminUpsertCollege', payload: { college: { id: c.id, deleted: true } },
+      onDone: function (res) { bootstrapData.colleges = res.colleges; renderAdminColleges(); },
+    });
+  }
 });
 
 // ── 導師制度 ──
 function renderAdminTutorSystems() {
-  const systems = bootstrapData.tutorSystems || [];
+  const systems = (bootstrapData.tutorSystems || []).filter(notDeleted);
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>導師制度清單</h3><p class="field-hint">應繳班會份數為該制度的預設值；個別班級可在「班級」頁籤覆寫（0＝本學期免繳）。</p>' +
     '<div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>應繳班會份數</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
@@ -1891,7 +1919,8 @@ function renderAdminTutorSystems() {
       return '<tr><td data-label="ID">' + escapeHtml(s.id) + '</td><td data-label="名稱">' + escapeHtml(s.name) + '</td>' +
         '<td data-label="應繳班會份數">' + (s.requiredMeetingCount == null ? '（未設定）' : s.requiredMeetingCount) + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="system-edit" data-id="' + escapeHtml(s.id) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="system-edit" data-id="' + escapeHtml(s.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="system-delete" data-id="' + escapeHtml(s.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="system-new" style="margin-top:12px;">新增導師制度</button></div>';
 }
@@ -1933,19 +1962,29 @@ function openTutorSystemForm(sys) {
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="system-new"]')) { openTutorSystemForm(); return; }
   const editBtn = e.target.closest('[data-action="system-edit"]');
-  if (editBtn) openTutorSystemForm(tutorSystemById(editBtn.dataset.id));
+  if (editBtn) { openTutorSystemForm(tutorSystemById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="system-delete"]');
+  if (delBtn) {
+    const s = tutorSystemById(delBtn.dataset.id);
+    if (!s) return;
+    deleteEntity({
+      btn: delBtn, name: s.name, action: 'adminUpsertTutorSystem', payload: { tutorSystem: { id: s.id, deleted: true } },
+      onDone: function (res) { bootstrapData.tutorSystems = res.tutorSystems; renderAdminTutorSystems(); },
+    });
+  }
 });
 
 // ── 學諮主責／助理 ──
 function renderAdminStaffTeam() {
-  const leads = bootstrapData.staffLeads || [];
-  const assistants = bootstrapData.staffAssistants || [];
+  const leads = (bootstrapData.staffLeads || []).filter(notDeleted);
+  const assistants = (bootstrapData.staffAssistants || []).filter(notDeleted);
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>學諮中心主責</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     leads.map(function (s) {
       return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="lead-edit" data-email="' + escapeHtml(s.email) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="lead-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="lead-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="lead-new" style="margin-top:12px;">新增主責</button></div>' +
     '<div class="card"><h3>學諮中心助理</h3><p class="field-hint">助理在主責的核章關代為動作時，核章顯示掛主責姓名，真實身分只有 admin／學諮端角色看得到。</p>' +
@@ -1955,7 +1994,8 @@ function renderAdminStaffTeam() {
       return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
         '<td data-label="綁定主責">' + (lead ? escapeHtml(lead.name) + '（' + escapeHtml(lead.email) + '）' : '<span class="field-hint">（找不到，請重新綁定）</span>') + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="assistant-edit" data-email="' + escapeHtml(s.email) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="assistant-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="assistant-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="assistant-new" style="margin-top:12px;">新增助理</button></div>';
 }
@@ -1990,7 +2030,7 @@ function openStaffLeadForm(email) {
 
 function openStaffAssistantForm(email) {
   const assistants = bootstrapData.staffAssistants || [];
-  const leads = bootstrapData.staffLeads || [];
+  const leads = (bootstrapData.staffLeads || []).filter(notDeleted);
   const s = assistants.find(function (x) { return x.email === email; }) || {};
   const bodyHtml = '<form id="assistant-form">' +
     '<div class="field"><label>Email</label><input type="email" id="assistant-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
@@ -2028,9 +2068,30 @@ document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="lead-new"]')) { openStaffLeadForm(null); return; }
   const leadEdit = e.target.closest('[data-action="lead-edit"]');
   if (leadEdit) { openStaffLeadForm(leadEdit.dataset.email); return; }
+  const leadDelete = e.target.closest('[data-action="lead-delete"]');
+  if (leadDelete) {
+    const email = leadDelete.dataset.email;
+    const s = (bootstrapData.staffLeads || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: leadDelete, name: s.name || s.email, action: 'adminUpsertStaffLead', payload: { staffLead: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.staffLeads = res.staffLeads; renderAdminStaffTeam(); },
+    });
+    return;
+  }
   if (e.target.closest('[data-action="assistant-new"]')) { openStaffAssistantForm(null); return; }
   const assistantEdit = e.target.closest('[data-action="assistant-edit"]');
-  if (assistantEdit) openStaffAssistantForm(assistantEdit.dataset.email);
+  if (assistantEdit) { openStaffAssistantForm(assistantEdit.dataset.email); return; }
+  const assistantDelete = e.target.closest('[data-action="assistant-delete"]');
+  if (assistantDelete) {
+    const email = assistantDelete.dataset.email;
+    const s = (bootstrapData.staffAssistants || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: assistantDelete, name: s.name || s.email, action: 'adminUpsertStaffAssistant', payload: { staffAssistant: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.staffAssistants = res.staffAssistants; renderAdminStaffTeam(); },
+    });
+  }
 });
 
 // ── 宣導關鍵字 ──
@@ -2070,14 +2131,15 @@ document.body.addEventListener('click', async function (e) {
 
 // ── 系所 ──
 function renderAdminDepartments() {
-  const depts = bootstrapData.departments || [];
+  const depts = (bootstrapData.departments || []).filter(notDeleted);
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>系所清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>系主任</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     depts.map(function (d) {
       return '<tr><td data-label="ID">' + escapeHtml(d.id) + '</td><td data-label="名稱">' + escapeHtml(d.name) + '</td>' +
         '<td data-label="系主任">' + escapeHtml(d.headName || '') + (d.headEmail ? '（' + escapeHtml(d.headEmail) + '）' : '') + '</td>' +
         '<td data-label="狀態">' + (d.active === false ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="dept-edit" data-id="' + escapeHtml(d.id) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="dept-edit" data-id="' + escapeHtml(d.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="dept-delete" data-id="' + escapeHtml(d.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="dept-new" style="margin-top:12px;">新增系所</button></div>';
 }
@@ -2115,7 +2177,16 @@ function openDeptForm(dept) {
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="dept-new"]')) { openDeptForm(); return; }
   const editBtn = e.target.closest('[data-action="dept-edit"]');
-  if (editBtn) openDeptForm(deptById(editBtn.dataset.id));
+  if (editBtn) { openDeptForm(deptById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="dept-delete"]');
+  if (delBtn) {
+    const d = deptById(delBtn.dataset.id);
+    if (!d) return;
+    deleteEntity({
+      btn: delBtn, name: d.name, action: 'adminUpsertDepartment', payload: { department: { id: d.id, deleted: true } },
+      onDone: function (res) { bootstrapData.departments = res.departments; renderAdminDepartments(); },
+    });
+  }
 });
 
 // ── 班級 ──
@@ -2123,7 +2194,7 @@ document.body.addEventListener('click', function (e) {
 // 收集所有班級的待確認導師建議（admin 專用；admin 的 bootstrap classes 未過濾，含 by/email/at）。
 function pendingSuggestionList() {
   const out = [];
-  (bootstrapData.classes || []).forEach(function (c) {
+  (bootstrapData.classes || []).filter(notDeleted).forEach(function (c) {
     ((c && c.suggestedTutors) || []).forEach(function (s, i) {
       out.push({ classId: c.id, idx: i, className: c.name, deptId: c.deptId, name: s.name, email: s.email || '', by: s.by || '', at: s.at || '' });
     });
@@ -2140,7 +2211,7 @@ function requiredMeetingCountDisplay(c) {
 }
 
 function renderAdminClasses() {
-  const classes = bootstrapData.classes || [];
+  const classes = (bootstrapData.classes || []).filter(notDeleted);
   const pending = pendingSuggestionList();
 
   const pendingHtml = pending.length
@@ -2173,7 +2244,8 @@ function renderAdminClasses() {
         '<td data-label="應繳份數">' + requiredMeetingCountDisplay(c) + '</td>' +
         '<td data-label="導師">' + (c.tutors || []).map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
         '<td data-label="狀態">' + (c.active === false ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="class-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="class-new" style="margin-top:12px;">新增班級</button></div>';
 }
@@ -2234,7 +2306,7 @@ function openClassForm(cls) {
   cls = cls || {};
   const tutors = cls.tutors || [];
   const depts = activeDepartments();
-  const systems = bootstrapData.tutorSystems || [];
+  const systems = (bootstrapData.tutorSystems || []).filter(notDeleted);
   const isEdit = !!cls.id;
   const bodyHtml = '<form id="class-form">' +
     '<div class="field"><label>系所</label><select id="class-dept">' + depts.map(function (d) { return '<option value="' + escapeHtml(d.id) + '"' + (d.id === cls.deptId ? ' selected' : '') + '>' + escapeHtml(d.name) + '</option>'; }).join('') + '</select>' +
@@ -2247,13 +2319,32 @@ function openClassForm(cls) {
     '<div class="field"><label>應繳班會份數覆寫（留空＝用制度預設；0＝本學期免繳，如實習）</label><input type="number" id="class-required-override" min="0" value="' + (cls.requiredMeetingOverride != null ? cls.requiredMeetingOverride : '') + '"></div>' +
     '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="tutor1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '"></div>' +
     '<div class="field"><label>導師 1 Email</label><input type="email" id="tutor1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '"></div></div>' +
+    (tutors[0] ? '<button type="button" class="btn btn-sm btn-danger" id="tutor1-remove" style="margin:-10px 0 14px;">移除導師 1（' + escapeHtml(tutors[0].name) + '）</button>' : '') +
     '<div class="row"><div class="field"><label>導師 2 姓名（選填）</label><input type="text" id="tutor2-name" value="' + escapeHtml(tutors[1] && tutors[1].name || '') + '"></div>' +
     '<div class="field"><label>導師 2 Email（選填）</label><input type="email" id="tutor2-email" value="' + escapeHtml(tutors[1] && tutors[1].email || '') + '"></div></div>' +
+    (tutors[1] ? '<button type="button" class="btn btn-sm btn-danger" id="tutor2-remove" style="margin:-10px 0 14px;">移除導師 2（' + escapeHtml(tutors[1].name) + '）</button>' : '') +
     '<div class="field"><label>雙導師核章模式</label><select id="class-dual"><option value="any"' + (cls.dualApprovalMode !== 'all' ? ' selected' : '') + '>任一位核章即可</option><option value="all"' + (cls.dualApprovalMode === 'all' ? ' selected' : '') + '>需兩位皆核章</option></select></div>' +
     '<div class="field"><label><input type="checkbox" id="class-active" ' + (cls.active === false ? '' : 'checked') + '> 啟用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
   openModal(isEdit ? '編輯班級' : '新增班級', bodyHtml);
+
+  // 導師「移除」鈕：只清空欄位，實際刪除隨表單「儲存」一併送出（此表單本來就是固定 2 槽
+  // 姓名/Email 輸入框，沒有獨立的逐筆刪除 API；confirm 後清空即等同準備移除該位導師）。
+  if (tutors[0] && $('tutor1-remove')) {
+    $('tutor1-remove').addEventListener('click', function () {
+      if (!confirm('確定移除導師「' + tutors[0].name + '」？（需按下方「儲存」才會生效）')) return;
+      $('tutor1-name').value = ''; $('tutor1-email').value = '';
+      this.remove();
+    });
+  }
+  if (tutors[1] && $('tutor2-remove')) {
+    $('tutor2-remove').addEventListener('click', function () {
+      if (!confirm('確定移除導師「' + tutors[1].name + '」？（需按下方「儲存」才會生效）')) return;
+      $('tutor2-name').value = ''; $('tutor2-email').value = '';
+      this.remove();
+    });
+  }
 
   // 新增時 id 隨系所/名稱即時衍生（撞名加序號後綴，同後端規則）；
   // 編輯時 id 固定（records 以 classId 關聯，不可改）。
@@ -2302,7 +2393,16 @@ function openClassForm(cls) {
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="class-new"]')) { openClassForm(); return; }
   const editBtn = e.target.closest('[data-action="class-edit"]');
-  if (editBtn) openClassForm(classById(editBtn.dataset.id));
+  if (editBtn) { openClassForm(classById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="class-delete"]');
+  if (delBtn) {
+    const c = classById(delBtn.dataset.id);
+    if (!c) return;
+    deleteEntity({
+      btn: delBtn, name: c.displayName || c.name, action: 'adminUpsertClass', payload: { class: { id: c.id, deleted: true } },
+      onDone: function (res) { bootstrapData.classes = res.classes; renderNav(); renderAdminClasses(); },
+    });
+  }
 });
 
 // ── 學期 ──
@@ -2362,7 +2462,7 @@ document.body.addEventListener('click', function (e) {
 // ── 職員帳號 ──
 function renderAdminUsers() {
   const users = bootstrapData.users || {};
-  const emails = Object.keys(users);
+  const emails = Object.keys(users).filter(function (email) { return notDeleted(users[email]); });
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>職員帳號（admin / director）</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>角色</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     emails.map(function (email) {
@@ -2370,7 +2470,8 @@ function renderAdminUsers() {
       return '<tr><td data-label="Email">' + escapeHtml(email) + '</td><td data-label="姓名">' + escapeHtml(u.name || '') + '</td>' +
         '<td data-label="角色">' + (u.role === 'admin' ? '管理員' : u.role === 'director' ? '學諮主任' : escapeHtml(u.role || '')) + '</td>' +
         '<td data-label="狀態">' + (u.disabled ? '已停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="user-edit" data-email="' + escapeHtml(email) + '">編輯</button></td></tr>';
+        '<td data-label="操作"><button class="btn btn-sm" data-action="user-edit" data-email="' + escapeHtml(email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="user-delete" data-email="' + escapeHtml(email) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="user-new" style="margin-top:12px;">新增職員帳號</button></div>';
 }
@@ -2407,7 +2508,17 @@ function openUserForm(email) {
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="user-new"]')) { openUserForm(null); return; }
   const editBtn = e.target.closest('[data-action="user-edit"]');
-  if (editBtn) openUserForm(editBtn.dataset.email);
+  if (editBtn) { openUserForm(editBtn.dataset.email); return; }
+  const delBtn = e.target.closest('[data-action="user-delete"]');
+  if (delBtn) {
+    const email = delBtn.dataset.email;
+    const u = (bootstrapData.users && bootstrapData.users[email]) || null;
+    if (!u) return;
+    deleteEntity({
+      btn: delBtn, name: u.name || email, action: 'adminUpsertUser', payload: { email: email, user: { deleted: true } },
+      onDone: function (res) { bootstrapData.users = res.users; renderAdminUsers(); },
+    });
+  }
 });
 
 // ── Excel 匯入導師名單 v2 ──
