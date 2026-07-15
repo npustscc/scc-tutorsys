@@ -3,18 +3,3161 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>導師資訊系統（尚未建置）</title>
+<title>導師資訊系統</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --color-primary:#3182ce; --color-primary-dark:#2b6cb0; --color-bg:#f7fafc;
+    --color-card:#ffffff; --color-border:#e2e8f0; --color-text:#2d3748;
+    --color-text-light:#4a5568; --color-muted:#a0aec0; --color-danger:#c53030;
+    --color-danger-bg:#fff5f5; --color-success:#2f855a; --color-success-bg:#f0fff4;
+    --color-warning:#dd6b20; --color-warning-bg:#fffaf0; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:"Noto Sans TC","Microsoft JhengHei",-apple-system,BlinkMacSystemFont,sans-serif;
+    background:var(--color-bg); color:var(--color-text); line-height:1.6; min-height:100vh;
+  }
+  button{font-family:inherit; cursor:pointer}
+  input,select,textarea{font-family:inherit; font-size:.92rem}
+  a{color:var(--color-primary)}
+
+  /* ── 登入頁 ── */
+  .login-page{min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;}
+  .login-card{
+    background:var(--color-card); border-radius:16px; box-shadow:0 4px 24px rgba(0,0,0,.08);
+    padding:40px 36px; max-width:400px; width:100%; text-align:center;
+  }
+  .login-card h1{font-size:1.4rem; margin:0 0 6px;}
+  .login-sub{color:var(--color-text-light); font-size:.88rem; margin:0 0 28px;}
+  .login-fallback{font-size:.82rem; color:var(--color-text-light); margin-top:16px;}
+  .login-error{font-size:.85rem; color:var(--color-danger); margin-top:14px; background:var(--color-danger-bg); padding:10px 12px; border-radius:8px;}
+  #g-signin-btn{display:flex; justify-content:center;}
+  .env-badge{
+    display:inline-block; font-size:.68rem; font-weight:700; color:#fff; background:var(--color-warning);
+    border-radius:999px; padding:2px 9px; margin-left:8px; vertical-align:middle;
+  }
+
+  /* ── App shell ── */
+  #app{min-height:100vh; display:flex; flex-direction:column;}
+  .app-header{
+    background:var(--color-card); border-bottom:1px solid var(--color-border);
+    display:flex; align-items:center; gap:16px; padding:10px 20px; flex-wrap:wrap;
+  }
+  .app-title{font-weight:700; font-size:1.08rem; white-space:nowrap;}
+  .main-nav{display:flex; gap:4px; flex-wrap:wrap; flex:1; overflow-x:auto;}
+  .nav-btn{
+    border:none; background:transparent; color:var(--color-text-light); padding:8px 14px;
+    border-radius:8px; font-size:.9rem; font-weight:600; white-space:nowrap;
+  }
+  .nav-btn:hover{background:var(--color-bg);}
+  .nav-btn.active{background:var(--color-primary); color:#fff;}
+  .user-box{display:flex; align-items:center; gap:8px; margin-left:auto;}
+  .user-avatar{width:30px; height:30px; border-radius:50%; background:var(--color-border);}
+  .user-name{font-size:.85rem; font-weight:600; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .page-root{flex:1; padding:20px; max-width:1180px; width:100%; margin:0 auto; box-sizing:border-box;}
+
+  /* ── 通用元件 ── */
+  .btn{
+    border:1px solid var(--color-border); background:#fff; color:var(--color-text);
+    padding:8px 16px; border-radius:8px; font-size:.88rem; font-weight:600;
+  }
+  .btn:hover{background:var(--color-bg);}
+  .btn-primary{background:var(--color-primary); border-color:var(--color-primary); color:#fff;}
+  .btn-primary:hover{background:var(--color-primary-dark);}
+  .btn-danger{background:var(--color-danger); border-color:var(--color-danger); color:#fff;}
+  .btn-danger:hover{background:#9b2c2c;}
+  .btn-success{background:var(--color-success); border-color:var(--color-success); color:#fff;}
+  .btn-ghost{background:transparent; border-color:transparent;}
+  .btn-sm{padding:5px 10px; font-size:.78rem;}
+  .btn:disabled{opacity:.55; cursor:not-allowed;}
+
+  /* 儲存/送出按鈕統一回饋（withBtnPending helper 用）：按下→spinner+處理中；成功→短暫✓完成。 */
+  .btn-spinner{
+    display:inline-block; width:.9em; height:.9em; margin-right:6px; vertical-align:-.15em;
+    border:2px solid rgba(0,0,0,.18); border-top-color:currentColor; border-radius:50%;
+    animation:spin .7s linear infinite;
+  }
+  .btn-pending{cursor:wait;}
+  .btn-pending,.btn-done{opacity:1;}
+  .btn:disabled.btn-pending,.btn:disabled.btn-done{opacity:1;}
+  .btn-done{background:var(--color-success); border-color:var(--color-success); color:#fff; transition:background .15s ease, color .15s ease;}
+
+  .card{background:var(--color-card); border:1px solid var(--color-border); border-radius:var(--radius); padding:18px; margin-bottom:16px;}
+  .card h2{margin:0 0 14px; font-size:1.08rem;}
+  .card h3{margin:0 0 10px; font-size:.96rem;}
+  .field{margin-bottom:14px;}
+  .field label{display:block; font-size:.82rem; font-weight:600; color:var(--color-text-light); margin-bottom:5px;}
+  .field input,.field select,.field textarea{
+    width:100%; padding:8px 10px; border:1px solid var(--color-border); border-radius:7px; background:#fff; color:var(--color-text);
+  }
+  .field textarea{min-height:80px; resize:vertical;}
+  /* checkbox/radio 不吃 .field input 的 width:100%/padding/border（否則撐成大方塊、位置跑掉）；
+     並統一 vertical-align，修正相對中文字「偏高」的視覺問題。 */
+  .field input[type="checkbox"],.field input[type="radio"]{width:auto; padding:0; border:none; background:transparent;}
+  input[type="checkbox"]{vertical-align:middle; margin:0 6px 2px 0; accent-color:var(--color-primary);}
+  .field-hint{font-size:.75rem; color:var(--color-muted); margin-top:4px;}
+  .row{display:flex; gap:14px; flex-wrap:wrap;}
+  .row > .field{flex:1; min-width:160px;}
+
+  .badge{display:inline-block; font-size:.74rem; font-weight:700; padding:3px 9px; border-radius:999px; white-space:nowrap;}
+  .badge-pending_tutor,.badge-pending_dept,.badge-pending_staffLead,.badge-pending_director{background:var(--color-warning-bg); color:var(--color-warning);}
+  .badge-muted{background:var(--color-bg); color:var(--color-muted);}
+  .badge-approved{background:var(--color-success-bg); color:var(--color-success);}
+  .badge-rejected{background:var(--color-danger-bg); color:var(--color-danger);}
+  .badge-type{background:#ebf4ff; color:var(--color-primary-dark);}
+
+  table{width:100%; border-collapse:collapse; font-size:.88rem;}
+  th,td{text-align:left; padding:9px 8px; border-bottom:1px solid var(--color-border); vertical-align:middle;}
+  th{color:var(--color-text-light); font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
+  .table-wrap{overflow-x:auto;}
+
+  .empty-hint{color:var(--color-muted); text-align:center; padding:30px 10px; font-size:.9rem;}
+  .attachment-list{list-style:none; margin:6px 0 0; padding:0; display:flex; flex-direction:column; gap:4px;}
+  .attachment-list li{display:flex; align-items:center; gap:8px; font-size:.84rem;}
+
+  .chips{display:flex; flex-wrap:wrap; gap:6px;}
+  .chip{
+    border:1px solid var(--color-border); background:#fff; color:var(--color-text);
+    border-radius:999px; padding:5px 13px; font-size:.84rem; font-weight:600;
+  }
+  .chip:hover{background:var(--color-bg);}
+  .chip.active{background:var(--color-primary); border-color:var(--color-primary); color:#fff;}
+  .chip-new{border-style:dashed; color:var(--color-text-light);}
+  .chip-static{cursor:default;}
+  .chip-static:hover{background:#fff;}
+  .chip-official{background:var(--color-primary); border-color:var(--color-primary); color:#fff;}
+  .chip-official:hover{background:var(--color-primary);}
+  .chip-suggested{border-style:dashed; border-color:var(--color-warning); color:var(--color-warning); background:var(--color-warning-bg);}
+  .chip-suggested:hover{background:var(--color-warning-bg);}
+  .chip .chip-x{border:none; background:transparent; color:inherit; font-weight:700; padding:0 0 0 6px; font-size:.9em; cursor:pointer;}
+  .nav-badge{
+    display:inline-block; background:var(--color-danger); color:#fff; border-radius:999px;
+    font-size:.68rem; font-weight:700; padding:1px 7px; margin-left:5px; vertical-align:middle;
+  }
+
+  .tab-bar{display:flex; gap:4px; flex-wrap:wrap; margin-bottom:16px; border-bottom:1px solid var(--color-border);}
+  .tab-btn{background:transparent; border:none; padding:9px 14px; font-size:.86rem; font-weight:600; color:var(--color-text-light); border-bottom:2px solid transparent;}
+  .tab-btn.active{color:var(--color-primary); border-bottom-color:var(--color-primary);}
+
+  /* ── Modal ── */
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,.45); display:none; align-items:center;
+    justify-content:center; z-index:1000; padding:16px;
+  }
+  .modal-overlay.open{display:flex;}
+  .modal-box{
+    background:#fff; border-radius:14px; max-width:560px; width:100%; max-height:88vh;
+    overflow-y:auto; padding:24px; box-shadow:0 10px 40px rgba(0,0,0,.2);
+  }
+  .modal-box.modal-wide{max-width:820px;}
+  .modal-title{font-size:1.05rem; font-weight:700; margin:0 0 16px;}
+  .modal-actions{display:flex; justify-content:flex-end; gap:8px; margin-top:20px;}
+
+  /* ── Toast ── */
+  #toast-container{position:fixed; top:16px; right:16px; z-index:2000; display:flex; flex-direction:column; gap:8px;}
+  .toast{
+    background:#2d3748; color:#fff; padding:11px 16px; border-radius:8px; font-size:.86rem;
+    box-shadow:0 4px 16px rgba(0,0,0,.2); max-width:320px;
+  }
+  .toast-success{background:var(--color-success);}
+  .toast-error{background:var(--color-danger);}
+  .toast-info{background:#2d3748;}
+
+  .stats-matrix td.qty{font-weight:700;}
+  .stats-matrix .pending-note{color:var(--color-warning); font-weight:400; font-size:.78rem;}
+  .stats-matrix .topic-dates{color:var(--color-text-light); font-size:.74rem; white-space:nowrap;}
+  .dept-group-header td{background:var(--color-bg); font-weight:700; font-size:.86rem; padding-top:14px;}
+
+  .loading-overlay{
+    position:fixed; inset:0; background:rgba(255,255,255,.75); z-index:3000; display:none;
+    align-items:center; justify-content:center; flex-direction:column; gap:10px; font-size:.9rem; color:var(--color-text-light);
+  }
+  .loading-overlay.open{display:flex;}
+  .spinner{
+    width:34px; height:34px; border:3px solid var(--color-border); border-top-color:var(--color-primary);
+    border-radius:50%; animation:spin .8s linear infinite;
+  }
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  @media (max-width:640px){
+    .app-header{padding:8px 12px;}
+    .app-title{font-size:.95rem;}
+    .page-root{padding:12px;}
+    .user-name{display:none;}
+    table,thead,tbody,th,td,tr{display:block;}
+    thead{display:none;}
+    tr{border:1px solid var(--color-border); border-radius:8px; margin-bottom:10px; padding:8px 10px;}
+    td{border:none; padding:4px 0; display:flex; justify-content:space-between; gap:8px;}
+    td::before{content:attr(data-label); font-weight:600; color:var(--color-text-light); font-size:.76rem;}
+  }
+</style>
 </head>
 <body>
-<!--
-  Placeholder：正式版前端。依 CLAUDE.md 的晉升流程，日後由 dev/index.html 用
-  Copy-Item 覆蓋本檔，並記得把下面兩個環境專屬常數改回正式版的值。
--->
+
+<div id="login-page" class="login-page">
+  <div class="login-card">
+    <h1>導師資訊系統</h1>
+    <p class="login-sub">國立屏東科技大學學生諮商中心</p>
+    <div id="g-signin-btn"></div>
+    <p id="login-fallback" class="login-fallback" style="display:none;">
+      若登入按鈕未顯示，可能是瀏覽器封鎖了第三方登入視窗，請
+      <a href="javascript:location.reload()">重新整理頁面</a>後再試一次。
+    </p>
+    <p id="login-error" class="login-error" style="display:none;"></p>
+  </div>
+</div>
+
+<div id="app" style="display:none;">
+  <header class="app-header">
+    <div class="app-title">導師資訊系統</div>
+    <nav id="main-nav" class="main-nav"></nav>
+    <div class="user-box">
+      <img id="user-avatar" class="user-avatar" alt="" />
+      <span id="user-name" class="user-name"></span>
+      <button id="login-history-btn" class="btn btn-ghost btn-sm">登入紀錄</button>
+      <button id="logout-btn" class="btn btn-ghost btn-sm">登出</button>
+    </div>
+  </header>
+  <main id="page-root" class="page-root"></main>
+</div>
+
+<div id="modal-overlay" class="modal-overlay">
+  <div id="modal-box" class="modal-box"></div>
+</div>
+
+<div id="loading-overlay" class="loading-overlay">
+  <div class="spinner"></div>
+  <div id="loading-text">載入中…</div>
+</div>
+
+<div id="toast-container"></div>
+
 <script>
-  const CLIENT_ID       = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googleusercontent.com';
-  const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxsMTiA4bzY5m72nyjd2V-wiJ2e-J5374jGbXOze2iKmZRTcUznesS5kWypY_0fGw8/exec';
-  const ROOT_FOLDER_ID  = '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik';
+// ══════════════════════════════════════════════════════════════════════════════
+// 導師資訊系統（正式版）— 前端 SPA
+// 單檔 vanilla JS，架構比照 scc-infosys 的 GIS 登入 / proxyCall 慣例。
+// 後端 API 定義見 dev/Code.gs（doPost dispatcher），本檔的 proxyCall 呼叫點皆以其
+// 實際參數/回傳形狀為準。
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── 環境專屬常數（placeholder，勿改；由步驟 4 外部資源設置後填入實際值）──────────
+const CLIENT_ID       = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googleusercontent.com';
+const APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxsMTiA4bzY5m72nyjd2V-wiJ2e-J5374jGbXOze2iKmZRTcUznesS5kWypY_0fGw8/exec';
+const ROOT_FOLDER_ID  = '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik';
+
+// localStorage 鍵（dev/prod 同源 npustscc.github.io，必須以 ROOT_FOLDER_ID 命名空間隔離，
+// 否則 dev 密鑰簽的 session token 會被 prod 頁面撈去打 prod 後端）
+const LS_USER_KEY    = 'tutor_user_' + ROOT_FOLDER_ID;      // { email, name, picture }
+const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, email }
+
+// 學期物件若未設定額度，回退到系統設計的預設值（每學期 5 份班會 + 1 份導生活動）。
+const DEFAULT_QUOTA_MEETING  = 5;
+const DEFAULT_QUOTA_ACTIVITY = 1;
+
+const TYPE_LABELS   = { meeting: '班會紀錄', activity: '導生活動紀錄' };
+const STATUS_LABELS = {
+  pending_tutor: '待導師核章', pending_dept: '待系主任核章',
+  pending_staffLead: '待學諮中心主責核章', pending_director: '待學諮主任核章',
+  approved: '已核准', rejected: '已退件',
+};
+const STAGE_LABELS = { tutor: '導師', dept: '系主任', staffLead: '學諮中心主責', director: '學諮主任' };
+// 核章鏈：班會紀錄 4 關（導師→系主任→學諮中心主責→學諮主任）；
+// 導生活動紀錄 2 關（學諮中心主責→學諮主任，跳過導師與系主任）。與 dev/Code.gs 的
+// chainForType_ 語意一致（前端只是顯示用，後端才是真正的授權邊界）。
+const APPROVAL_CHAIN = { meeting: ['tutor', 'dept', 'staffLead', 'director'], activity: ['staffLead', 'director'] };
+const KEYWORD_TOPIC_KEYS = ['traffic', 'gender', 'smoking', 'fraud'];
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 全域狀態 ─────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+let currentUser   = null;   // { email, name, picture }
+let gIdToken      = null;   // Google ID token——只留記憶體，不再持久化（session token 才落地）
+let sessionToken  = null;   // 自建 session token（sessionStart 簽發，存 localStorage）
+let sessionExp    = 0;      // session 效期（Unix 秒＝當日台北 24:00；固定、不滑動延長）
+let bootstrapData = null;   // 最近一次 bootstrap 回傳（含 roles/departments/classes/semesters/records/semester）
+let currentPage   = null;
+let refreshPromise = null;
+let refreshResolve = null;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 小工具 ───────────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function $(id) { return document.getElementById(id); }
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// ── 自建 session（每日登入一次）helper；localStorage 讀寫皆包 try/catch ──
+function hasValidSession() {
+  return !!sessionToken && sessionExp > Math.floor(Date.now() / 1000) + 30;
+}
+function saveSession(token, exp) {
+  sessionToken = token;
+  sessionExp = Number(exp) || 0;
+  try {
+    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({ token: token, exp: sessionExp, email: currentUser && currentUser.email }));
+  } catch (e) {}
+}
+function clearSession() {
+  sessionToken = null;
+  sessionExp = 0;
+  try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+}
+// 目前 session 的 jti（登入紀錄標記「目前裝置」用）
+function getSessionJti() {
+  try {
+    if (!sessionToken) return '';
+    const p = JSON.parse(atob(sessionToken.split('.')[0].replace(/-/g, '+').replace(/_/g, '/')));
+    return p.jti || '';
+  } catch (e) { return ''; }
+}
+// 取用戶端 IP 與大致位置（供登入通知信與登入紀錄）。GAS 拿不到來源 IP，改由前端向公開 IP 服務查詢。
+// best-effort：逾 3 秒或失敗一律回空物件，絕不阻斷登入。
+async function fetchClientIpGeo() {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 3000);
+    const r = await fetch('https://ipapi.co/json/', { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) return {};
+    const d = await r.json();
+    const geo = [d.city, d.region, d.country_name].filter(Boolean).join(', ');
+    return { ip: d.ip || '', geo: geo };
+  } catch (e) { return {}; }
+}
+
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+
+function showToast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + (type || 'info');
+  el.textContent = msg;
+  $('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 4200);
+}
+
+function showLoading(text) {
+  $('loading-text').textContent = text || '載入中…';
+  $('loading-overlay').classList.add('open');
+}
+function hideLoading() { $('loading-overlay').classList.remove('open'); }
+
+// proxyCall 往返約 1–3 秒，按鈕按下後若無回饋會讓人以為系統沒反應。統一由此 helper 包裝：
+// 按下瞬間 disabled＋spinner＋「處理中…」；fn() 成功後短暫顯示「✓ 完成」再還原；失敗立刻還原
+// 並把錯誤 re-throw 出去，交由呼叫端既有的 try/catch（大多會 showToast）處理，不吞錯誤。
+// btn 可能在 fn() 執行期間因整頁/整區塊重繪而離開 DOM（例如儲存成功後 render 整個後台頁籤）；
+// 對已離開 DOM 的節點做 classList/innerHTML/disabled 操作在 JS 裡不會報錯，因此不特別處理。
+async function withBtnPending(btn, fn) {
+  if (!btn) return fn();
+  if (btn.disabled) return; // 已在處理中，忽略重複觸發（防連點）
+  const orig = btn.innerHTML;
+  btn.disabled = true;
+  btn.classList.add('btn-pending');
+  btn.innerHTML = '<span class="btn-spinner"></span>處理中…';
+  try {
+    const result = await fn();
+    btn.classList.remove('btn-pending');
+    btn.classList.add('btn-done');
+    btn.innerHTML = '✓ 完成';
+    setTimeout(function () {
+      btn.classList.remove('btn-done');
+      btn.innerHTML = orig;
+      btn.disabled = false;
+    }, 1200);
+    return result;
+  } catch (e) {
+    btn.classList.remove('btn-pending');
+    btn.innerHTML = orig;
+    btn.disabled = false;
+    throw e;
+  }
+}
+
+function showLoginError(msg) {
+  const el = $('login-error');
+  el.textContent = msg;
+  el.style.display = '';
+}
+
+// ── Modal ──
+function openModal(title, bodyHtml, opts) {
+  opts = opts || {};
+  const box = $('modal-box');
+  box.className = 'modal-box' + (opts.wide ? ' modal-wide' : '');
+  box.innerHTML = '<div class="modal-title">' + escapeHtml(title) + '</div>' + bodyHtml;
+  $('modal-overlay').classList.add('open');
+}
+function closeModal() { $('modal-overlay').classList.remove('open'); }
+$('modal-overlay').addEventListener('click', (e) => { if (e.target.id === 'modal-overlay') closeModal(); });
+
+// ── 系所/班級/導師 前端驗證與 id 衍生（規則與 dev/Code.gs 的 classResolve 純函式一致；
+//    前端只是 UI 閘門，後端 classResolveCore_ 才是安全邊界）──
+const CLASS_NAME_RE = /^[A-Za-z0-9一-鿿]{1,20}$/;
+const DEPT_NAME_RE  = /^[A-Za-z0-9一-鿿()（）\s]{1,30}$/;
+const TUTOR_NAME_RE = /^[A-Za-z0-9一-鿿·\s]{1,20}$/;
+const EMAIL_RE      = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+function slugifyIdFront(name) { return String(name || '').replace(/[^A-Za-z0-9一-鿿_]/g, ''); }
+// 撞既有 id 加序號後綴（同後端 uniqueDeptId_/uniqueClassId_ 模式）；existing 為含 id 的物件陣列。
+function uniqueIdFront(base, existing) {
+  const ids = {};
+  (existing || []).forEach(function (x) { if (x && x.id) ids[x.id] = true; });
+  base = base || 'id';
+  if (!ids[base]) return base;
+  let i = 2;
+  while (ids[base + '_' + i]) i++;
+  return base + '_' + i;
+}
+function buildClassIdFront(deptId, className, existingClasses) {
+  return uniqueIdFront(deptId + '_' + slugifyIdFront(className), existingClasses);
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      const idx = result.indexOf(',');
+      resolve(idx === -1 ? result : result.slice(idx + 1));
+    };
+    reader.onerror = () => reject(new Error('讀取檔案失敗：' + file.name));
+    reader.readAsDataURL(file);
+  });
+}
+
+function base64ToBlob(b64, mime) {
+  const byteChars = atob(b64);
+  const byteNumbers = new Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteNumbers[i] = byteChars.charCodeAt(i);
+  return new Blob([new Uint8Array(byteNumbers)], { type: mime || 'application/octet-stream' });
+}
+
+function formatDateTime(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toLocaleString('zh-TW', { hour12: false }); } catch (e) { return iso; }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── Google Identity Services 登入 ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+window.addEventListener('load', () => {
+  if (!CLIENT_ID || CLIENT_ID.indexOf('__') === 0) {
+    showLoginError('尚未設定 Google OAuth Client ID。');
+    return;
+  }
+
+  google.accounts.id.initialize({
+    client_id: CLIENT_ID,
+    callback: handleCredentialResponse,
+    auto_select: true,
+    use_fedcm_for_prompt: true,
+  });
+  google.accounts.id.renderButton($('g-signin-btn'), { theme: 'outline', size: 'large', text: 'signin_with', locale: 'zh-TW' });
+
+  setTimeout(() => {
+    if ($('g-signin-btn') && !$('g-signin-btn').firstElementChild) $('login-fallback').style.display = '';
+  }, 1500);
+
+  // 一次性清除舊機制的 sessionStorage 鍵（登入狀態已改存 localStorage 的自建 session）
+  try { sessionStorage.removeItem('tutor_user'); sessionStorage.removeItem('tutor_idtoken'); } catch (e) {}
+
+  // 從 localStorage 恢復：session 有效 → 直接進系統（完全不碰 Google）；
+  // session 過期但 user 存在（昨天登入過）→ One Tap 靜默重登（成功會走
+  // handleCredentialResponse → sessionStart 換新 session）；都沒有 → 停在登入畫面。
+  let storedUser = null, storedSession = null;
+  try {
+    storedUser = JSON.parse(localStorage.getItem(LS_USER_KEY) || 'null');
+    storedSession = JSON.parse(localStorage.getItem(LS_SESSION_KEY) || 'null');
+  } catch (e) {}
+  if (storedUser && storedUser.email) {
+    currentUser = storedUser;
+    const valid = storedSession && storedSession.token &&
+                  storedSession.email === storedUser.email &&
+                  Number(storedSession.exp) > Math.floor(Date.now() / 1000) + 30;
+    if (valid) {
+      sessionToken = storedSession.token;
+      sessionExp = Number(storedSession.exp);
+      showLoading('自動登入中…');
+      afterLogin();
+    } else {
+      clearSession();
+      showLoading('驗證身分中…');
+      google.accounts.id.prompt((n) => {
+        if (n && ((n.isNotDisplayed && n.isNotDisplayed()) || (n.isSkippedMoment && n.isSkippedMoment()))) {
+          hideLoading();
+          try { localStorage.removeItem(LS_USER_KEY); } catch (e) {}
+          currentUser = null;
+        }
+      });
+    }
+  }
+});
+
+function decodeJwt(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(decodeURIComponent(atob(b64).split('').map((c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')).join('')));
+  } catch (e) { return null; }
+}
+
+async function handleCredentialResponse(response) {
+  const payload = decodeJwt(response.credential);
+  if (!payload) { showLoginError('登入憑證解析失敗，請重新整理頁面再試。'); return; }
+  const isRefresh = !!bootstrapData && currentUser && currentUser.email === payload.email;
+  currentUser = { email: payload.email, name: payload.name, picture: payload.picture };
+  gIdToken = response.credential;   // 只留記憶體，不再持久化
+  try { localStorage.setItem(LS_USER_KEY, JSON.stringify(currentUser)); } catch (e) {}
+  hideReloginModal();
+
+  // 每日首次登入：以 idToken 打 sessionStart 換發自建 session token（效期至當日台北 24:00）。
+  // sessionStart 失敗不阻斷登入——降級為記憶體 idToken 模式（doPost 的 idToken 路徑保留），
+  // SESSION_SECRET 尚未設置或後端異常時系統仍可用（效期一小時）。
+  clearSession();
+  try {
+    const ipgeo = await fetchClientIpGeo();  // best-effort，失敗回空物件、不阻斷登入
+    const s = await proxyCall('sessionStart', {
+      ua: navigator.userAgent.slice(0, 200), ip: ipgeo.ip || '', geo: ipgeo.geo || '',
+    });
+    saveSession(s.sessionToken, s.exp);
+    // 有角色的帳號會收到登入通知信；Gmail 可能把它分到垃圾郵件/促銷，主動提醒一次
+    if (s.mailSent) showToast('已寄出登入通知信；若未在收件匣，請檢查垃圾郵件分類', 'info');
+  } catch (e) {
+    console.error('sessionStart 失敗，降級為一小時效期登入：', e);
+    showToast('登入憑證簽發失敗，本次以一小時效期登入', 'error');
+  }
+
+  // sessionStart 完成後才 resolve pending promise，讓等待中的 proxyCall 重試時已有新 session
+  if (refreshResolve) { const r = refreshResolve; refreshResolve = null; refreshPromise = null; r(true); }
+  if (isRefresh) { showToast('登入已於背景更新', 'success'); return; }
+  afterLogin();
+}
+
+// 重走 Google 登入（One Tap 靜默優先，8 秒內沒完成 → relogin modal）。
+// 成功時 handleCredentialResponse 會自動打 sessionStart 換發新 session，
+// 之後才 resolve——await 本函式回來時新 session 已就緒，可直接重試原請求。
+function refreshIdToken() {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = new Promise((resolve) => { refreshResolve = resolve; });
+  const timer = setTimeout(() => { if (refreshResolve) showReloginModal(); }, 8000);
+  try {
+    google.accounts.id.prompt((n) => {
+      if (n && ((n.isNotDisplayed && n.isNotDisplayed()) || (n.isSkippedMoment && n.isSkippedMoment()))) {
+        if (refreshResolve) showReloginModal();
+      }
+    });
+  } catch (e) { if (refreshResolve) showReloginModal(); }
+  refreshPromise.finally(() => clearTimeout(timer));
+  return refreshPromise;
+}
+
+function showReloginModal() {
+  openModal('登入已到期', '<p style="color:var(--color-text-light); font-size:.9rem;">今日登入憑證已到期（每日 00:00 重置），請重新登入以繼續（畫面上的資料不會遺失）。</p><div id="relogin-btn-slot" style="display:flex; justify-content:center; margin-top:10px;"></div>');
+  try { google.accounts.id.renderButton($('relogin-btn-slot'), { theme: 'outline', size: 'large', text: 'signin_with', locale: 'zh-TW' }); } catch (e) {}
+}
+function hideReloginModal() {
+  if ($('modal-box').querySelector('#relogin-btn-slot')) closeModal();
+}
+
+// 本機登出（清鍵＋重載）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+function localSignOut() {
+  try { localStorage.removeItem(LS_USER_KEY); localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+  try { google.accounts.id.disableAutoSelect(); } catch (e) {}
+  location.reload();
+}
+$('logout-btn').addEventListener('click', async (e) => {
+  // 只在本機 session 仍有效時 best-effort 註銷；session 已過期就直接本機登出，
+  // 避免登出動作反而觸發 proxyCall 的「靜默重登→重試」流程跳出登入視窗。
+  await withBtnPending(e.currentTarget, async function () {
+    if (hasValidSession()) {
+      try { await proxyCall('sessionLogout'); } catch (err) { /* 註銷失敗不阻斷登出 */ }
+    }
+    localSignOut();
+  });
+});
+
+// ── 登入紀錄（modal）：近期以此帳號登入的裝置/IP/位置；可一鍵登出所有裝置 ──
+$('login-history-btn').addEventListener('click', () => showLoginHistory());
+
+async function showLoginHistory() {
+  openModal('登入紀錄',
+    '<p class="field-hint">近期以你的帳號登入本系統的裝置、IP 與大致位置。若發現非本人登入，請按「登出所有裝置」使所有登入憑證即時失效，並儘速更改 Google 密碼、聯繫系統管理者。</p>' +
+    '<div id="login-history-body" class="field-hint">載入中…</div>' +
+    '<div class="modal-actions">' +
+      '<button class="btn btn-danger btn-sm" data-action="logout-all-devices">登出所有裝置</button>' +
+      '<button class="btn btn-sm" data-action="close-modal">關閉</button>' +
+    '</div>');
+  const body = $('login-history-body');
+  let list = [];
+  try {
+    const r = await proxyCall('listMySessions', { currentJti: getSessionJti() });
+    list = (r && r.sessions) || [];
+  } catch (e) {
+    body.innerHTML = '<span style="color:var(--color-danger);">登入紀錄載入失敗：' + escapeHtml(e.message) + '</span>';
+    return;
+  }
+  if (!list.length) { body.textContent = '目前沒有登入紀錄。'; return; }
+  const fmt = (iso) => { try { return new Date(iso).toLocaleString('zh-TW', { hour12: false }); } catch (e) { return iso || ''; } };
+  const uaShort = (ua) => {
+    if (!ua) return '（未知裝置）';
+    const os = /Windows/.test(ua) ? 'Windows' : /iPhone|iPad|iOS/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'macOS' : /Linux/.test(ua) ? 'Linux' : '其他';
+    const br = /Edg\//.test(ua) ? 'Edge' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '瀏覽器';
+    return os + '・' + br;
+  };
+  body.innerHTML = list.map((s) => {
+    const badge = s.current ? '<span class="badge badge-approved">目前裝置</span>'
+      : s.active ? '<span class="badge badge-pending_tutor">使用中</span>'
+      : s.revoked ? '<span class="badge badge-rejected">已登出</span>'
+      : '<span class="badge badge-muted">已過期</span>';
+    return '<div style="padding:8px 0; border-bottom:1px solid var(--color-border);">' +
+      '<div><strong>' + escapeHtml(uaShort(s.ua)) + '</strong> ' + badge + '</div>' +
+      '<div class="field-hint">登入時間：' + escapeHtml(fmt(s.issuedAt)) + '</div>' +
+      '<div class="field-hint">IP：' + escapeHtml(s.ip || '（未取得）') + (s.geo ? '　位置：' + escapeHtml(s.geo) : '') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+document.body.addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-action="logout-all-devices"]');
+  if (!btn) return;
+  if (!confirm('確定要登出所有裝置嗎？\n\n所有目前有效的登入憑證（包含本裝置與其他電腦）都會立即失效，下次都需要重新登入。')) return;
+  try {
+    await withBtnPending(btn, async function () {
+      await proxyCall('sessionLogout');
+      showToast('已登出所有裝置，即將回到登入畫面…', 'success');
+      setTimeout(() => localSignOut(), 800);
+    });
+  } catch (err) {
+    showToast('登出所有裝置失敗：' + err.message, 'error');
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── proxyCall：呼叫 GAS doPost 的統一入口 ─────────────────────────────────────
+// 回應形狀（見 dev/Code.gs）：
+//   - action 內部 throw               → doPost 外層 catch → { success:false, error }
+//   - action 正常回傳                  → { success:true, data:{ ...實際結果... } }
+//   - doPost 認證/switch 分派層直接回應 → { success:true, data:{ error:'Unauthorized'|'Unknown action: ...' } }
+// 因此兩種「看起來成功但其實是錯誤」的形狀都要擋下來，統一以 throw 往上拋。
+// ══════════════════════════════════════════════════════════════════════════════
+async function proxyCall(action, params, retryHttp, retryAuth) {
+  params = params || {}; retryHttp = retryHttp || 0; retryAuth = retryAuth || 0;
+  // sessionStart 一律走 idToken（後端不許以舊 session 換新）；其他 action 有有效 session 就帶 sessionToken
+  const useSession = action !== 'sessionStart' && hasValidSession();
+  if (!useSession && !gIdToken) {
+    // 恢復的分頁跨過午夜：沒有效 session 也沒記憶體 idToken → 先靜默重登再重試一次
+    if (action !== 'sessionStart' && currentUser && retryAuth < 1) {
+      await refreshIdToken();
+      return proxyCall(action, params, retryHttp, retryAuth + 1);
+    }
+    throw new Error('尚未登入，請重新整理頁面登入。');
+  }
+
+  const payload = JSON.stringify(Object.assign(
+    { action: action, rootFolderId: ROOT_FOLDER_ID },
+    useSession ? { sessionToken: sessionToken } : { idToken: gIdToken },
+    params
+  ));
+  const form = new URLSearchParams();
+  form.append('payload', payload);
+
+  let res;
+  try {
+    res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
+  } catch (e) {
+    throw new Error('網路連線失敗，請確認網路後再試一次。');
+  }
+
+  if (!res.ok) {
+    if ((res.status === 404 || res.status === 503) && retryHttp < 2) {
+      await sleep(1200 * (retryHttp + 1));
+      return proxyCall(action, params, retryHttp + 1, retryAuth);
+    }
+    throw new Error('伺服器錯誤（HTTP ' + res.status + '）');
+  }
+
+  const data = await res.json();
+  const err = (data.success === false)
+    ? data.error
+    : (data.data && typeof data.data === 'object' && data.data.error) ? data.data.error : null;
+
+  if (err) {
+    // 過午夜或 token 失效/竄改：清 session → 靜默重走 Google 登入（handleCredentialResponse
+    // 會自動打 sessionStart 換新 session）→ 重試一次。sessionStart 自己失敗不重試
+    // （防 refreshIdToken → sessionStart → 又失敗的迴圈），retryAuth < 1 防整體重試迴圈。
+    if ((err === 'Session expired' || err === 'Unauthorized') && action !== 'sessionStart' && retryAuth < 1) {
+      clearSession();
+      await refreshIdToken();
+      return proxyCall(action, params, retryHttp, retryAuth + 1);
+    }
+    throw new Error(err);
+  }
+  return data.data;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 登入後流程：bootstrap ──────────────────────────────────────────────────
+// bootstrapAction_（Code.gs）一次回傳 email/roles/departments/classes/semesters/
+// semester/records/settings/(admin 才有 users)。roles 已由後端 resolveRoles_ 算好，
+// 前端只需依 roles 決定 UI 顯示，不必自己重算角色。
+// ══════════════════════════════════════════════════════════════════════════════
+async function loadBootstrap(semester) {
+  const params = semester ? { semester: semester } : {};
+  const data = await proxyCall('bootstrap', params);
+  // 後端 bootstrap 必回傳 roles 物件；缺少代表這不是 doPost 的 bootstrap 回應（曾發生：
+  // 2026-07-14 使用者環境拿到疑似 doGet 的 {ok,service}，前端在 renderNav 炸 TypeError）。
+  // 擋在這裡並把實際內容帶進錯誤訊息，讓登入畫面直接顯示收到什麼，以利回報診斷。
+  if (!data || !data.roles) {
+    throw new Error('bootstrap 回應異常，請截圖回報。實際收到：' + JSON.stringify(data).slice(0, 180));
+  }
+  bootstrapData = data;
+  return data;
+}
+
+async function afterLogin() {
+  showLoading('讀取使用者設定…');
+  $('login-page').style.display = 'none';
+  try {
+    await loadBootstrap();
+    $('user-avatar').src = currentUser.picture || '';
+    $('user-name').textContent = currentUser.name || currentUser.email;
+    $('app').style.display = '';
+    renderNav();
+    showPage(defaultPageId());
+  } catch (e) {
+    console.error(e);
+    $('app').style.display = 'none';
+    $('login-page').style.display = '';
+    showLoginError('讀取資料失敗：' + e.message);
+  } finally {
+    hideLoading();
+  }
+}
+
+async function refreshBootstrap(semester) {
+  showLoading('重新整理資料…');
+  try {
+    await loadBootstrap(semester || (bootstrapData && bootstrapData.semester));
+    renderNav();
+    if (currentPage) showPage(currentPage);
+  } finally {
+    hideLoading();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 導覽 / 路由 ──────────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+const NAV_PAGES = [
+  { id: 'upload', label: '上傳', show: function () { return true; } },
+  { id: 'mine',   label: '我的上傳', show: function () { return true; } },
+  { id: 'myclasses', label: '導師個人後台', show: function (r) { return r.tutorOf.length > 0; } },
+  { id: 'queue',  label: '核章匣', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant; } },
+  { id: 'stats',  label: '班級統計', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin; } },
+  { id: 'overview', label: '全校總表', show: function (r) { return r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0; } },
+  { id: 'admin',  label: '後台管理', show: function (r) { return r.isAdmin; } },
+];
+const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
+
+function defaultPageId() { return 'upload'; }
+
+// 全校待確認導師建議總數（admin 後台導覽 badge 用）。
+function pendingSuggestionCount() {
+  return (bootstrapData.classes || []).reduce(function (n, c) {
+    return n + ((c && c.suggestedTutors) ? c.suggestedTutors.length : 0);
+  }, 0);
+}
+
+function renderNav() {
+  const roles = bootstrapData.roles;
+  $('main-nav').innerHTML = NAV_PAGES.filter(function (p) { return p.show(roles); })
+    .map(function (p) {
+      let label = p.label;
+      // 後台管理頁籤旁顯示待確認導師建議數 badge（admin 才看得到此頁籤）
+      if (p.id === 'admin') {
+        const n = pendingSuggestionCount();
+        if (n > 0) label += '<span class="nav-badge">' + n + '</span>';
+      }
+      return '<button class="nav-btn' + (p.id === currentPage ? ' active' : '') + '" data-page="' + p.id + '">' + label + '</button>';
+    })
+    .join('');
+}
+$('main-nav').addEventListener('click', function (e) {
+  const btn = e.target.closest('.nav-btn');
+  if (btn) showPage(btn.dataset.page);
+});
+
+function showPage(id) {
+  currentPage = id;
+  document.querySelectorAll('.nav-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.page === id); });
+  const renderer = PAGE_RENDERERS[id];
+  if (renderer) renderer(); else $('page-root').innerHTML = '<div class="empty-hint">找不到頁面</div>';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 資料查找小工具 ───────────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+function deptById(id) { return (bootstrapData.departments || []).find(function (d) { return d.id === id; }); }
+function classById(id) { return (bootstrapData.classes || []).find(function (c) { return c.id === id; }); }
+function semesterById(id) { return (bootstrapData.semesters || []).find(function (s) { return s.id === id; }); }
+function deptName(id) { const d = deptById(id); return d ? d.name : id; }
+function collegeById(id) { return (bootstrapData.colleges || []).find(function (c) { return c.id === id; }); }
+function tutorSystemById(id) { return (bootstrapData.tutorSystems || []).find(function (s) { return s.id === id; }); }
+// 班級呈現一律用 displayName（無則 fallback name），比照既有慣例（fuseClassDisplayName_ 的
+// 建議值由 classResolve/adminImportRoster 自動填，admin 可事後改）。
+function className(id) { const c = classById(id); return c ? (c.displayName || c.name) : id; }
+// 軟刪除（deleted:true）過濾（見 Ticket B）：deptById/classById/collegeById/tutorSystemById 等
+// 「以 id 找名稱」的查找函式故意不過濾——已刪除項目的名稱仍要能在歷史紀錄/統計頁正確顯示；
+// 只有「選單/chips/下拉」這類會讓使用者選取新項目的地方才套用 notDeleted 過濾。
+function notDeleted(x) { return !x || x.deleted !== true; }
+function activeDepartments() { return (bootstrapData.departments || []).filter(function (d) { return d.active !== false && notDeleted(d); }); }
+function activeClasses() { return (bootstrapData.classes || []).filter(function (c) { return c.active !== false && notDeleted(c); }); }
+function classesInDept(deptId) { return activeClasses().filter(function (c) { return c.deptId === deptId; }); }
+
+async function uploadFilesForClass(semester, classId, files, onProgress) {
+  const uploaded = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    if (onProgress) onProgress(i + 1, files.length, f.name);
+    const base64Data = await fileToBase64(f);
+    const res = await proxyCall('uploadAttachment', {
+      semester: semester, classId: classId, fileName: f.name,
+      mimeType: f.type || 'application/octet-stream', base64Data: base64Data,
+    });
+    uploaded.push({ fileId: res.fileId, fileName: res.fileName });
+  }
+  return uploaded;
+}
+
+async function triggerDownload(semester, recordId, fileId, fallbackName) {
+  try {
+    showLoading('下載附件中…');
+    const res = await proxyCall('downloadAttachment', { semester: semester, recordId: recordId, fileId: fileId });
+    const blob = base64ToBlob(res.base64, res.mimeType);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = res.fileName || fallbackName || 'attachment';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+  } catch (e) {
+    showToast('下載失敗：' + e.message, 'error');
+  } finally {
+    hideLoading();
+  }
+}
+
+function attachmentListHtml(attachments, semester, recordId) {
+  const list = attachments || [];
+  if (!list.length) return '<p class="field-hint">（無附件）</p>';
+  return '<ul class="attachment-list">' + list.map(function (a) {
+    return '<li>📎 ' + escapeHtml(a.fileName || a.fileId) +
+      ' <button type="button" class="btn btn-sm" data-action="download-attachment" data-semester="' + escapeHtml(semester) +
+      '" data-record="' + escapeHtml(recordId) + '" data-file="' + escapeHtml(a.fileId) +
+      '" data-name="' + escapeHtml(a.fileName || '') + '">下載</button></li>';
+  }).join('') + '</ul>';
+}
+
+document.body.addEventListener('click', function (e) {
+  const btn = e.target.closest('[data-action="download-attachment"]');
+  if (!btn) return;
+  triggerDownload(btn.dataset.semester, btn.dataset.record, btn.dataset.file, btn.dataset.name);
+});
+
+// 班會紀錄（meeting）的六個選填段落：鍵名 → [標題, placeholder]。
+const MEETING_SECTIONS = [
+  ['chairReport', '主席報告', '票選或推舉班會主席'],
+  ['discussion',  '討論事項', ''],
+  ['resolutions', '決議事項', ''],
+  ['tutorRemarks', '導師的話', ''],
+  ['extempore',   '臨時動議', ''],
+  ['others',      '其他', '含教官至班級交通安全宣導等'],
+];
+
+// meeting 欄位：date/topic/chair/recorder/attendance 必填 + 六段選填；
+// activity 欄位：date/topic/summary/attendance 必填（維持原版）。
+function recordFormFieldsHtml(type, form, idPrefix) {
+  form = form || {};
+  const dateTopic = '<div class="row">' +
+      '<div class="field"><label>日期</label><input type="date" id="' + idPrefix + 'date" value="' + escapeHtml(form.date || '') + '" required></div>' +
+      '<div class="field"><label>主題</label><input type="text" id="' + idPrefix + 'topic" value="' + escapeHtml(form.topic || '') + '" required></div>' +
+    '</div>';
+  if (type === 'activity') {
+    return dateTopic +
+      '<div class="field"><label>內容摘要</label><textarea id="' + idPrefix + 'summary" required>' + escapeHtml(form.summary || '') + '</textarea></div>' +
+      '<div class="field"><label>出席狀況</label><textarea id="' + idPrefix + 'attendance" required>' + escapeHtml(form.attendance || '') + '</textarea></div>';
+  }
+  return dateTopic +
+    '<div class="row">' +
+      '<div class="field"><label>主席</label><input type="text" id="' + idPrefix + 'chair" value="' + escapeHtml(form.chair || '') + '" required></div>' +
+      '<div class="field"><label>紀錄</label><input type="text" id="' + idPrefix + 'recorder" value="' + escapeHtml(form.recorder || '') + '" required></div>' +
+    '</div>' +
+    '<div class="field"><label>出席狀況</label><textarea id="' + idPrefix + 'attendance" required>' + escapeHtml(form.attendance || '') + '</textarea></div>' +
+    MEETING_SECTIONS.map(function (s) {
+      return '<div class="field"><label>' + s[1] + '（選填）</label>' +
+        '<textarea id="' + idPrefix + s[0] + '"' + (s[2] ? ' placeholder="' + escapeHtml(s[2]) + '"' : '') + '>' + escapeHtml(form[s[0]] || '') + '</textarea></div>';
+    }).join('');
+}
+
+function readRecordFormFields(type, idPrefix) {
+  const form = {
+    date: $(idPrefix + 'date').value.trim(),
+    topic: $(idPrefix + 'topic').value.trim(),
+    attendance: $(idPrefix + 'attendance').value.trim(),
+  };
+  if (type === 'activity') {
+    form.summary = $(idPrefix + 'summary').value.trim();
+  } else {
+    form.chair = $(idPrefix + 'chair').value.trim();
+    form.recorder = $(idPrefix + 'recorder').value.trim();
+    MEETING_SECTIONS.forEach(function (s) { form[s[0]] = $(idPrefix + s[0]).value.trim(); });
+  }
+  return form;
+}
+
+function validateRecordForm(type, form) {
+  if (type === 'activity') {
+    if (!form.date || !form.topic || !form.summary || !form.attendance) return '請完整填寫日期、主題、內容摘要、出席狀況。';
+    return null;
+  }
+  if (!form.date || !form.topic || !form.chair || !form.recorder || !form.attendance) return '請完整填寫日期、主題、主席、紀錄、出席狀況。';
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 1：上傳頁 ────────────────────────────────────────────────────────────
+// 班級 = (系所, 班級名稱) 組合，名稱自由文字（如「資管三A」「碩一」），第一次使用時
+// 由後端 classResolve 自動建立；學生自填導師只作為「建議」（suggestedTutors），
+// 待管理員後台確認才轉正式導師。
+// action 呼叫點：classResolve → classStats（選定班級後顯示統計）→（逐檔）uploadAttachment → recordSubmit
+// ══════════════════════════════════════════════════════════════════════════════
+let upDeptSel = null;    // { deptId, name } 選既有；{ deptName } 自填新系所
+let upClassSel = null;   // { classId, name } 選既有；{ className } 自填新班級
+let upSuggested = [];    // 自填導師暫存 [{name,email}]，送出時隨 classResolve 的 suggestedTutors 送出
+let upStatsToken = 0;    // classStats 非同步查詢競態守門（快速切換班級時只認最後一次）
+let upDeptPicker = null, upClassPicker = null;
+
+// 可重用的「搜尋框 + chips + 無命中建立」選取器（系所/班級共用）。
+// cfg: { searchId, chipsId, getItems():[{id,name}], isSelected(item), getCustomName(),
+//        createText(kw), validateNew(kw)→errMsg|null, onPick(item), onCreate(kw) }
+function setupChipPicker(cfg) {
+  function render() {
+    const searchEl = $(cfg.searchId);
+    if (!searchEl || !$(cfg.chipsId)) return;
+    const kw = searchEl.value.trim();
+    const items = cfg.getItems().filter(function (it) { return !kw || String(it.name || '').indexOf(kw) !== -1; });
+    let html = items.map(function (it) {
+      return '<button type="button" class="chip' + (cfg.isSelected(it) ? ' active' : '') + '" data-pick="' + escapeHtml(it.id) + '">' + escapeHtml(it.name) + '</button>';
+    }).join('');
+    // 已選的「自填新項目」以 active 虛線 chip 顯示
+    const customName = cfg.getCustomName();
+    if (customName) html += '<button type="button" class="chip chip-new active" data-pick="__custom">' + escapeHtml(customName) + '（新）</button>';
+    // 關鍵字無命中 → 顯示「建立新XX『kw』」按鈕（即自填）
+    if (kw && !items.length && kw !== customName) {
+      html += '<button type="button" class="chip chip-new" data-create="' + escapeHtml(kw) + '">' + escapeHtml(cfg.createText(kw)) + '</button>';
+    }
+    if (!html) html = '<span class="field-hint">輸入關鍵字搜尋，找不到時可直接建立。</span>';
+    $(cfg.chipsId).innerHTML = html;
+  }
+  $(cfg.searchId).addEventListener('input', render);
+  $(cfg.chipsId).addEventListener('click', function (e) {
+    const pickBtn = e.target.closest('[data-pick]');
+    if (pickBtn) {
+      if (pickBtn.dataset.pick === '__custom') return; // 已選中的自填項目，點擊無動作
+      const item = cfg.getItems().filter(function (it) { return it.id === pickBtn.dataset.pick; })[0];
+      if (item) cfg.onPick(item);
+      return;
+    }
+    const createBtn = e.target.closest('[data-create]');
+    if (createBtn) {
+      const name = createBtn.dataset.create;
+      const err = cfg.validateNew(name);
+      if (err) { showToast(err, 'error'); return; }
+      cfg.onCreate(name);
+    }
+  });
+  render();
+  return { render: render };
+}
+
+PAGE_RENDERERS.upload = function renderUploadPage() {
+  upDeptSel = null; upClassSel = null; upSuggested = [];
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>上傳紀錄</h2>' +
+      '<form id="upload-form">' +
+        '<div class="field"><label>類型</label><select id="up-type" style="max-width:220px;">' +
+          '<option value="meeting">班會紀錄</option><option value="activity">導生活動紀錄</option>' +
+        '</select></div>' +
+        '<div class="field"><label>系所</label>' +
+          '<input type="text" id="up-dept-search" placeholder="輸入關鍵字搜尋系所；找不到可直接建立" maxlength="30" style="max-width:300px; margin-bottom:8px;">' +
+          '<div id="up-dept-chips" class="chips"></div>' +
+        '</div>' +
+        '<div class="field" id="up-class-block" style="display:none;"><label>班級</label>' +
+          '<input type="text" id="up-class-search" placeholder="輸入關鍵字搜尋班級（如：資管三A）；找不到可直接建立" maxlength="20" style="max-width:300px; margin-bottom:8px;">' +
+          '<div id="up-class-chips" class="chips"></div>' +
+        '</div>' +
+        '<div id="up-class-info"></div>' +
+        '<div id="up-form-fields"></div>' +
+        '<div class="row">' +
+          '<div class="field"><label>上傳者姓名</label><input type="text" id="up-name" required></div>' +
+          '<div class="field"><label>學號</label><input type="text" id="up-sid" required></div>' +
+        '</div>' +
+        '<div class="field"><label>附件（照片／PDF／Word，可複選）</label>' +
+          '<input type="file" id="up-files" multiple accept="image/*,.pdf,.doc,.docx" /></div>' +
+        '<div id="up-progress" class="field-hint"></div>' +
+        '<button type="submit" class="btn btn-primary">送出</button>' +
+      '</form>' +
+    '</div>';
+
+  renderUpFormFields();
+  $('up-type').addEventListener('change', renderUpFormFields);
+
+  // 系所選取器
+  upDeptPicker = setupChipPicker({
+    searchId: 'up-dept-search', chipsId: 'up-dept-chips',
+    getItems: function () { return activeDepartments(); },
+    isSelected: function (it) { return !!(upDeptSel && upDeptSel.deptId === it.id); },
+    getCustomName: function () { return (upDeptSel && upDeptSel.deptName) || ''; },
+    createText: function (kw) { return '＋ 建立新系所「' + kw + '」'; },
+    validateNew: function (kw) { return DEPT_NAME_RE.test(kw) ? null : '系所名稱限 1–30 字（中英數字/括號/空白）'; },
+    onPick: function (it) { upDeptSel = { deptId: it.id, name: it.name }; onUpDeptChanged(); },
+    onCreate: function (kw) { upDeptSel = { deptName: kw }; onUpDeptChanged(); },
+  });
+
+  // 班級選取器（選定系所後才顯示）
+  upClassPicker = setupChipPicker({
+    searchId: 'up-class-search', chipsId: 'up-class-chips',
+    getItems: function () { return (upDeptSel && upDeptSel.deptId) ? classesInDept(upDeptSel.deptId) : []; },
+    isSelected: function (it) { return !!(upClassSel && upClassSel.classId === it.id); },
+    getCustomName: function () { return (upClassSel && upClassSel.className) || ''; },
+    createText: function (kw) { return '＋ 建立新班級「' + kw + '」'; },
+    validateNew: function (kw) { return CLASS_NAME_RE.test(kw) ? null : '班級名稱限 1–20 字（中英數字，不可含空白/符號）'; },
+    onPick: function (it) { upClassSel = { classId: it.id, name: it.name }; onUpClassChanged(); },
+    onCreate: function (kw) { upClassSel = { className: kw }; onUpClassChanged(); },
+  });
+
+  $('upload-form').addEventListener('submit', onUploadSubmit);
+};
+
+function renderUpFormFields() {
+  $('up-form-fields').innerHTML = recordFormFieldsHtml($('up-type').value, {}, 'up-');
+  applyChairDefault();
+}
+
+// 主席欄預設帶入所選班級第一位正式導師姓名（可改）：只在欄位為空或仍是上次自動值時覆寫，
+// 避免蓋掉使用者手動輸入。
+function applyChairDefault() {
+  const el = $('up-chair');
+  if (!el) return;
+  const cls = (upClassSel && upClassSel.classId) ? classById(upClassSel.classId) : null;
+  const first = (cls && cls.tutors && cls.tutors[0] && cls.tutors[0].name) || '';
+  if (first && (!el.value || el.value === el.dataset.autoDefault)) {
+    el.value = first;
+    el.dataset.autoDefault = first;
+  }
+}
+
+function onUpDeptChanged() {
+  upClassSel = null;
+  upSuggested = [];
+  $('up-class-block').style.display = '';
+  $('up-class-search').value = '';
+  upDeptPicker.render();
+  upClassPicker.render();
+  renderUpClassInfo();
+  applyChairDefault();
+}
+
+function onUpClassChanged() {
+  upSuggested = [];
+  upClassPicker.render();
+  renderUpClassInfo();
+  applyChairDefault();
+}
+
+// 選定班級後的資訊區：繳交統計提示（classStats）+ 導師 chips（正式/待確認/自填）。
+async function renderUpClassInfo() {
+  const el = $('up-class-info');
+  if (!el) return;
+  if (!upClassSel) { el.innerHTML = ''; return; }
+
+  const cls = upClassSel.classId ? classById(upClassSel.classId) : null;
+  const official = (cls && cls.tutors) || [];
+  const serverSug = (cls && cls.suggestedTutors) || [];
+
+  const tutorChips =
+    official.map(function (t) {
+      return '<span class="chip chip-official chip-static">' + escapeHtml(t.name) + '</span>';
+    }).join('') +
+    serverSug.map(function (s) {
+      return '<span class="chip chip-suggested chip-static">' + escapeHtml(s.name) + '（待確認）</span>';
+    }).join('') +
+    upSuggested.map(function (t, i) {
+      return '<span class="chip chip-suggested chip-static">' + escapeHtml(t.name) + '（待確認）' +
+        '<button type="button" class="chip-x" data-sug-del="' + i + '" title="移除">×</button></span>';
+    }).join('');
+
+  el.innerHTML =
+    '<div class="card" style="background:var(--color-bg);">' +
+      '<div id="up-class-stats" class="field-hint" style="margin-bottom:10px;">' +
+        (upClassSel.classId ? '查詢本班繳交統計中…' : '新班級：本學期尚無任何紀錄。') + '</div>' +
+      '<div class="field" style="margin-bottom:8px;"><label>導師</label>' +
+        '<div class="chips" id="up-tutor-chips">' + (tutorChips || '<span class="field-hint">尚無導師資料，可於下方自填。</span>') + '</div>' +
+      '</div>' +
+      '<div class="row">' +
+        '<div class="field"><label>＋自填導師姓名</label><input type="text" id="up-tutor-name" maxlength="20"></div>' +
+        '<div class="field"><label>導師 Email（選填）</label><input type="text" id="up-tutor-email"></div>' +
+        '<div class="field" style="flex:0 0 auto;"><label>&nbsp;</label><button type="button" class="btn" id="up-tutor-add">加入</button></div>' +
+      '</div>' +
+      '<p class="field-hint">自填導師需管理員確認後才具核章身分。</p>' +
+    '</div>';
+
+  $('up-tutor-add').addEventListener('click', addSuggestedTutor);
+  $('up-tutor-chips').addEventListener('click', function (e) {
+    const del = e.target.closest('[data-sug-del]');
+    if (del) { upSuggested.splice(Number(del.dataset.sugDel), 1); renderUpClassInfo(); }
+  });
+
+  // 統計提示（既有班級才查；新班顯示 0）。競態守門：只認最後一次查詢的結果。
+  if (upClassSel.classId) {
+    const token = ++upStatsToken;
+    try {
+      const s = await proxyCall('classStats', { semester: bootstrapData.semester, classId: upClassSel.classId });
+      if (token !== upStatsToken || !$('up-class-stats')) return;
+      $('up-class-stats').textContent =
+        '本班本學期已有 ' + s.meeting.total + ' 份班會紀錄（' + s.meeting.approved + ' 份通過、' + s.meeting.pending + ' 份審核中）；' +
+        '導生活動 ' + s.activity.total + ' 份（' + s.activity.approved + ' 份通過、' + s.activity.pending + ' 份審核中）。';
+    } catch (e2) {
+      if (token === upStatsToken && $('up-class-stats')) $('up-class-stats').textContent = '（繳交統計查詢失敗：' + e2.message + '）';
+    }
+  }
+}
+
+function addSuggestedTutor() {
+  const name = $('up-tutor-name').value.trim();
+  const email = $('up-tutor-email').value.trim().toLowerCase();
+  if (!TUTOR_NAME_RE.test(name)) { showToast('導師姓名限 1–20 字（中英數字/間隔號/空白）', 'error'); return; }
+  if (email && !EMAIL_RE.test(email)) { showToast('導師 Email 格式不正確', 'error'); return; }
+  if (upSuggested.length >= 2) { showToast('一次最多自填 2 位導師', 'error'); return; }
+  if (upSuggested.some(function (t) { return t.name === name; })) { showToast('已加入同名導師', 'error'); return; }
+  upSuggested.push({ name: name, email: email });
+  renderUpClassInfo();
+}
+
+async function onUploadSubmit(e) {
+  e.preventDefault();
+  const type = $('up-type').value;
+
+  if (!upDeptSel) { showToast('請選擇系所', 'error'); return; }
+  if (!upClassSel) { showToast('請選擇班級', 'error'); return; }
+
+  // classResolve 參數：deptId（既有）或 deptName（自填）二擇一 + className。
+  const resolveParams = {};
+  if (upDeptSel.deptId) resolveParams.deptId = upDeptSel.deptId;
+  else resolveParams.deptName = upDeptSel.deptName;
+  const className = upClassSel.classId ? upClassSel.name : upClassSel.className;
+  if (!CLASS_NAME_RE.test(String(className || '').trim())) { showToast('班級名稱限 1–20 字（中英數字，不可含空白/符號）', 'error'); return; }
+  resolveParams.className = className;
+  if (upSuggested.length) resolveParams.suggestedTutors = upSuggested;
+
+  const form = readRecordFormFields(type, 'up-');
+  const invalid = validateRecordForm(type, form);
+  if (invalid) { showToast(invalid, 'error'); return; }
+  const name = $('up-name').value.trim();
+  const sid = $('up-sid').value.trim();
+  if (!name || !sid) { showToast('請填寫上傳者姓名與學號', 'error'); return; }
+  const files = Array.from($('up-files').files || []);
+  const semester = bootstrapData.semester;
+  const submitBtn = e.target.querySelector('button[type=submit]');
+  try {
+    await withBtnPending(submitBtn, async function () {
+      // 1) classResolve：find-or-create 系所/班級（含導師建議），拿 classId；用回傳同步本地清單。
+      $('up-progress').textContent = '確認班級中…';
+      const resolved = await proxyCall('classResolve', resolveParams);
+      bootstrapData.departments = resolved.departments;
+      bootstrapData.classes = resolved.classes;
+      if (resolved.suggestionsDropped > 0) showToast('部分導師建議未收錄（該班建議數已達上限）', 'info');
+      const classId = resolved.classId;
+
+      // 2) 逐檔上傳附件（須在 recordSubmit 之前，後端 submit 時驗證附件歸屬資料夾）。
+      let attachments = [];
+      if (files.length) {
+        attachments = await uploadFilesForClass(semester, classId, files, function (i, total, fname) {
+          $('up-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+        });
+      }
+      $('up-progress').textContent = '';
+
+      // 3) 建立紀錄。
+      await proxyCall('recordSubmit', {
+        semester: semester, classId: classId, type: type,
+        form: form, attachments: attachments,
+        uploader: { name: name, studentId: sid },
+      });
+      showToast('已送出，等待核章', 'success');
+      await refreshBootstrap();
+      showPage('mine');
+    });
+  } catch (err) {
+    $('up-progress').textContent = '';
+    showToast('送出失敗：' + err.message, 'error');
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 2：我的上傳 ──────────────────────────────────────────────────────────
+// action 呼叫點：recordGetMine（依選定學期查詢）、recordResubmit（退件重送）
+// ══════════════════════════════════════════════════════════════════════════════
+let mineSemester = null;
+let mineRecords = [];
+
+PAGE_RENDERERS.mine = async function renderMinePage() {
+  if (!mineSemester) mineSemester = bootstrapData.semester;
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>我的上傳</h2>' +
+      '<div class="field" style="max-width:220px;"><label>學期</label><select id="mine-semester">' +
+        (bootstrapData.semesters || []).map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === mineSemester ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div id="mine-list" class="table-wrap"><div class="empty-hint">載入中…</div></div>' +
+    '</div>';
+
+  $('mine-semester').addEventListener('change', function () {
+    mineSemester = $('mine-semester').value;
+    loadMineList();
+  });
+
+  await loadMineList();
+};
+
+let mineTutorClassRecords = [];
+
+async function loadMineList() {
+  $('mine-list').innerHTML = '<div class="empty-hint">載入中…</div>';
+  try {
+    const res = await proxyCall('recordGetMine', { semester: mineSemester });
+    mineRecords = res.records || [];
+    mineTutorClassRecords = res.tutorClassRecords || [];
+    renderMineList();
+  } catch (e) {
+    $('mine-list').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderMineList() {
+  if (!mineRecords.length) { $('mine-list').innerHTML = '<div class="empty-hint">這個學期還沒有上傳紀錄。</div>'; return; }
+  $('mine-list').innerHTML =
+    '<table><thead><tr><th>類型</th><th>系所／班級</th><th>日期</th><th>主題</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    mineRecords.map(function (r) {
+      const badge = '<span class="badge badge-' + r.status + '">' + STATUS_LABELS[r.status] + '</span>';
+      const rejectNote = r.status === 'rejected' && r.rejection ? '<div class="field-hint">退件理由：' + escapeHtml(r.rejection.reason) + '</div>' : '';
+      return '<tr>' +
+        '<td data-label="類型"><span class="badge badge-type">' + TYPE_LABELS[r.type] + '</span></td>' +
+        '<td data-label="系所／班級">' + escapeHtml(deptName(r.deptId)) + ' / ' + escapeHtml(className(r.classId)) + '</td>' +
+        '<td data-label="日期">' + escapeHtml(r.form && r.form.date || '') + '</td>' +
+        '<td data-label="主題">' + escapeHtml(r.form && r.form.topic || '') + '</td>' +
+        '<td data-label="狀態">' + badge + rejectNote + '</td>' +
+        '<td data-label="操作">' +
+          '<button class="btn btn-sm" data-action="mine-view" data-id="' + escapeHtml(r.id) + '">檢視</button> ' +
+          // 退件重送一律限本班導師（見 dev/Code.gs canResubmit_ 註解），非導師的原上傳者看不到此按鈕，
+          // 只能請導師到「導師個人後台」重送。
+          (r.status === 'rejected' && bootstrapData.roles.tutorOf.indexOf(r.classId) !== -1
+            ? '<button class="btn btn-sm btn-primary" data-action="mine-resubmit" data-id="' + escapeHtml(r.id) + '">重新送出</button>'
+            : (r.status === 'rejected' ? '<span class="field-hint">請導師修正重送</span>' : '')) +
+        '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table>';
+}
+
+function findMineRecord(id) { return mineRecords.find(function (r) { return r.id === id; }); }
+
+document.body.addEventListener('click', function (e) {
+  const viewBtn = e.target.closest('[data-action="mine-view"]');
+  if (viewBtn) { openRecordViewModal(findMineRecord(viewBtn.dataset.id)); return; }
+  const resubmitBtn = e.target.closest('[data-action="mine-resubmit"]');
+  if (resubmitBtn) { openResubmitModal(findMineRecord(resubmitBtn.dataset.id)); return; }
+});
+
+function recordDetailHtml(r) {
+  const f = r.form || {};
+  function multiline(v) { return v ? escapeHtml(v).replace(/\n/g, '<br>') : '（無）'; }
+  let body;
+  if (r.type === 'meeting') {
+    body = '<p><b>主席：</b>' + escapeHtml(f.chair || '') + '　<b>紀錄：</b>' + escapeHtml(f.recorder || '') + '</p>' +
+      '<p><b>出席狀況：</b><br>' + multiline(f.attendance) + '</p>' +
+      MEETING_SECTIONS.map(function (s) { return '<p><b>' + s[1] + '：</b><br>' + multiline(f[s[0]]) + '</p>'; }).join('');
+  } else {
+    body = '<p><b>內容摘要：</b><br>' + multiline(f.summary) + '</p>' +
+      '<p><b>出席狀況：</b><br>' + multiline(f.attendance) + '</p>';
+  }
+  return '<p><b>類型：</b>' + TYPE_LABELS[r.type] + '　<b>班級：</b>' + escapeHtml(deptName(r.deptId)) + ' / ' + escapeHtml(className(r.classId)) + '</p>' +
+    '<p><b>日期：</b>' + escapeHtml(f.date) + '　<b>主題：</b>' + escapeHtml(f.topic) + '</p>' +
+    body +
+    '<p><b>上傳者：</b>' + escapeHtml(r.uploader.name) + '（' + escapeHtml(r.uploader.studentId) + '，' + escapeHtml(r.uploader.email) + '）</p>' +
+    approvalProgressHtml(r) +
+    (r.topics ? topicsSummaryHtml(r.topics) : '') +
+    '<p><b>附件：</b></p>' + attachmentListHtml(r.attachments, r.semester, r.id) +
+    (r.status === 'rejected' && r.rejection ? '<p style="color:var(--color-danger);"><b>退件理由（' + (STAGE_LABELS[r.rejection.role] || r.rejection.role) + '）：</b>' + escapeHtml(r.rejection.reason) + '</p>' : '');
+}
+
+// 核章進度條：依該紀錄類型的核章鏈（meeting 4 關／activity 2 關）逐關顯示狀態
+// （已核章／目前待核／尚未輪到），核章者姓名（actualBy 已由後端 sanitize，非授權角色看不到）。
+function approvalProgressHtml(r) {
+  const chain = APPROVAL_CHAIN[r.type] || APPROVAL_CHAIN.meeting;
+  const curStage = (r.status || '').indexOf('pending_') === 0 ? r.status.slice('pending_'.length) : null;
+  const curIdx = curStage ? chain.indexOf(curStage) : (r.status === 'approved' ? chain.length : -1);
+  const items = chain.map(function (stage, i) {
+    let who = '';
+    if (stage === 'tutor') {
+      who = (r.approvals && r.approvals.tutor || []).map(function (t) { return t.name; }).filter(Boolean).join('、');
+    } else if (r.approvals && r.approvals[stage]) {
+      who = r.approvals[stage].name || '';
+    }
+    const done = r.status === 'approved' || (curIdx !== -1 && i < curIdx);
+    const active = i === curIdx && r.status !== 'approved' && r.status !== 'rejected';
+    const cls = done ? 'badge-approved' : (active ? 'badge-pending_tutor' : '');
+    return '<span class="badge ' + cls + '" style="' + (cls ? '' : 'background:var(--color-bg); color:var(--color-muted);') + ' margin-right:6px;">' +
+      escapeHtml(STAGE_LABELS[stage]) + (who ? '：' + escapeHtml(who) : '') + '</span>';
+  }).join('');
+  return '<p><b>核章進度：</b><br>' + items + '</p>';
+}
+
+function topicsSummaryHtml(topics) {
+  const rules = bootstrapData.keywordRules || {};
+  const checked = KEYWORD_TOPIC_KEYS.filter(function (k) { return topics[k] && topics[k].checked; });
+  if (!checked.length) return '<p><b>四類宣導：</b>（無）</p>';
+  return '<p><b>四類宣導：</b>' + checked.map(function (k) {
+    return escapeHtml((rules[k] && rules[k].label) || k);
+  }).join('、') + '</p>';
+}
+
+function openRecordViewModal(r) {
+  if (!r) return;
+  openModal(STATUS_LABELS[r.status] || '紀錄詳情', recordDetailHtml(r) + '<div class="modal-actions"><button class="btn" data-action="close-modal">關閉</button></div>', { wide: true });
+}
+
+function openResubmitModal(r, onDone) {
+  if (!r) return;
+  const bodyHtml =
+    '<form id="resubmit-form">' +
+      recordFormFieldsHtml(r.type, r.form, 're-') +
+      '<div class="field"><label>既有附件</label>' + attachmentListHtml(r.attachments, r.semester, r.id) + '</div>' +
+      '<div class="field"><label>新增附件（可複選，會加到既有附件之後）</label><input type="file" id="re-files" multiple accept="image/*,.pdf,.doc,.docx" /></div>' +
+      '<div id="re-progress" class="field-hint"></div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">重新送出</button></div>' +
+    '</form>';
+  openModal('退件重送', bodyHtml, { wide: true });
+  $('resubmit-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const form = readRecordFormFields(r.type, 're-');
+    const invalid = validateRecordForm(r.type, form);
+    if (invalid) { showToast(invalid, 'error'); return; }
+    const files = Array.from($('re-files').files || []);
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        let attachments = r.attachments || [];
+        if (files.length) {
+          const newOnes = await uploadFilesForClass(r.semester, r.classId, files, function (i, total, fname) {
+            $('re-progress').textContent = '上傳附件中… (' + i + '/' + total + ') ' + fname;
+          });
+          attachments = attachments.concat(newOnes);
+        }
+        await proxyCall('recordResubmit', {
+          semester: r.semester, recordId: r.id, form: form, attachments: attachments,
+          uploaderName: r.uploader.name,
+        });
+        showToast('已重新送出，等待核章', 'success');
+        closeModal();
+        if (onDone) await onDone(); else await loadMineList();
+        await refreshBootstrap();
+      });
+    } catch (err) {
+      showToast('重新送出失敗：' + err.message, 'error');
+    }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="close-modal"]')) closeModal();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 2.5：導師個人後台 ────────────────────────────────────────────────────
+// 導師看自己每班的紀錄清單：繳交日期、繳交人、目前走到哪一關（含退件狀態）。
+// action 呼叫點：recordGetMine（回傳 tutorClassRecords，見 dev/Code.gs 擴充）。
+// ══════════════════════════════════════════════════════════════════════════════
+let myClassesSemester = null;
+
+PAGE_RENDERERS.myclasses = async function renderMyClassesPage() {
+  if (!myClassesSemester) myClassesSemester = bootstrapData.semester;
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>導師個人後台</h2>' +
+      '<p class="field-hint">顯示您帶班的全部紀錄（含他人代為上傳），可查看繳交日期、繳交人、目前核章關卡與退件狀態。</p>' +
+      '<div class="field" style="max-width:220px;"><label>學期</label><select id="myclasses-semester">' +
+        (bootstrapData.semesters || []).map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === myClassesSemester ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div id="myclasses-list" class="table-wrap"><div class="empty-hint">載入中…</div></div>' +
+    '</div>';
+  $('myclasses-semester').addEventListener('change', function () {
+    myClassesSemester = $('myclasses-semester').value;
+    loadMyClassesList();
+  });
+  await loadMyClassesList();
+};
+
+async function loadMyClassesList() {
+  $('myclasses-list').innerHTML = '<div class="empty-hint">載入中…</div>';
+  try {
+    const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+    const records = res.tutorClassRecords || [];
+    if (!records.length) { $('myclasses-list').innerHTML = '<div class="empty-hint">您帶的班級本學期還沒有任何紀錄。</div>'; return; }
+    $('myclasses-list').innerHTML =
+      '<table><thead><tr><th>類型</th><th>班級</th><th>繳交日期</th><th>繳交人</th><th>目前關卡</th><th>操作</th></tr></thead><tbody>' +
+      records.slice().sort(function (a, b) { return (b.createdAt || '').localeCompare(a.createdAt || ''); }).map(function (r) {
+        const rejectNote = r.status === 'rejected' && r.rejection ? '<div class="field-hint">退件（' + escapeHtml(STAGE_LABELS[r.rejection.role] || r.rejection.role) + '）：' + escapeHtml(r.rejection.reason) + '</div>' : '';
+        return '<tr>' +
+          '<td data-label="類型"><span class="badge badge-type">' + TYPE_LABELS[r.type] + '</span></td>' +
+          '<td data-label="班級">' + escapeHtml(className(r.classId)) + '</td>' +
+          '<td data-label="繳交日期">' + escapeHtml(formatDateTime(r.createdAt)) + '</td>' +
+          '<td data-label="繳交人">' + escapeHtml(r.uploader && r.uploader.name || '') + '（' + escapeHtml(r.uploader && r.uploader.email || '') + '）</td>' +
+          '<td data-label="目前關卡"><span class="badge badge-' + r.status + '">' + STATUS_LABELS[r.status] + '</span>' + rejectNote + '</td>' +
+          '<td data-label="操作">' +
+            '<button class="btn btn-sm" data-action="myclasses-view" data-id="' + escapeHtml(r.id) + '">檢視</button> ' +
+            (r.status === 'rejected' ? '<button class="btn btn-sm btn-primary" data-action="myclasses-resubmit" data-id="' + escapeHtml(r.id) + '">修正重送</button>' : '') +
+          '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table>';
+  } catch (e) {
+    $('myclasses-list').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+document.body.addEventListener('click', async function (e) {
+  const viewBtn = e.target.closest('[data-action="myclasses-view"]');
+  if (viewBtn) {
+    // myclasses 頁自己的資料未存全域變數（避免與 mine 頁互相覆蓋），直接重查一次找出該筆。
+    try {
+      await withBtnPending(viewBtn, async function () {
+        const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+        const r = (res.tutorClassRecords || []).find(function (x) { return x.id === viewBtn.dataset.id; });
+        openRecordViewModal(r);
+      });
+    } catch (err) { showToast('讀取失敗：' + err.message, 'error'); }
+    return;
+  }
+  const resubmitBtn = e.target.closest('[data-action="myclasses-resubmit"]');
+  if (resubmitBtn) {
+    try {
+      await withBtnPending(resubmitBtn, async function () {
+        const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+        const r = (res.tutorClassRecords || []).find(function (x) { return x.id === resubmitBtn.dataset.id; });
+        if (r) openResubmitModal(r, function () { loadMyClassesList(); });
+      });
+    } catch (err) { showToast('讀取失敗：' + err.message, 'error'); }
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 3：核章匣 ────────────────────────────────────────────────────────────
+// action 呼叫點：recordApprove、recordReject（皆用 bootstrap 已載入的 records 過濾出待我這關的項目）
+// ══════════════════════════════════════════════════════════════════════════════
+function myActionableRecords() {
+  const roles = bootstrapData.roles;
+  return (bootstrapData.records || []).filter(function (r) {
+    if (r.status === 'pending_tutor') {
+      if (roles.isAdmin) return true;
+      const cls = classById(r.classId);
+      if (!cls || roles.tutorOf.indexOf(cls.id) === -1) return false;
+      const already = (r.approvals.tutor || []).some(function (t) { return t.email === currentUser.email; });
+      return !already;
+    }
+    if (r.status === 'pending_dept') {
+      if (roles.isAdmin) return true;
+      const dept = deptById(r.deptId);
+      return !!dept && roles.deptHeadOf.indexOf(dept.id) !== -1;
+    }
+    if (r.status === 'pending_staffLead') {
+      return roles.isAdmin || roles.isStaffLead || (roles.isStaffAssistant && !!roles.assistantLead);
+    }
+    if (r.status === 'pending_director') return roles.isAdmin || roles.isDirector;
+    return false;
+  });
+}
+
+PAGE_RENDERERS.queue = function renderQueuePage() {
+  const list = myActionableRecords();
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>核章匣</h2>' +
+      '<div class="field" style="max-width:220px;"><label>檢視學期</label><select id="queue-semester">' +
+        (bootstrapData.semesters || []).map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === bootstrapData.semester ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="table-wrap">' +
+      (list.length
+        ? '<table><thead><tr><th>類型</th><th>系所／班級</th><th>主題</th><th>上傳者</th><th>目前關卡</th><th>操作</th></tr></thead><tbody>' +
+          list.map(function (r) {
+            return '<tr>' +
+              '<td data-label="類型"><span class="badge badge-type">' + TYPE_LABELS[r.type] + '</span></td>' +
+              '<td data-label="系所／班級">' + escapeHtml(deptName(r.deptId)) + ' / ' + escapeHtml(className(r.classId)) + '</td>' +
+              '<td data-label="主題">' + escapeHtml(r.form.topic || '') + '</td>' +
+              '<td data-label="上傳者">' + escapeHtml(r.uploader.name) + '</td>' +
+              '<td data-label="目前關卡"><span class="badge badge-' + r.status + '">' + STATUS_LABELS[r.status] + '</span></td>' +
+              '<td data-label="操作">' +
+                '<button class="btn btn-sm" data-action="queue-view" data-id="' + escapeHtml(r.id) + '">檢視</button> ' +
+                '<button class="btn btn-sm btn-success" data-action="queue-approve" data-id="' + escapeHtml(r.id) + '">核准</button> ' +
+                '<button class="btn btn-sm btn-danger" data-action="queue-reject" data-id="' + escapeHtml(r.id) + '">退件</button>' +
+              '</td>' +
+            '</tr>';
+          }).join('') + '</tbody></table>'
+        : '<div class="empty-hint">目前沒有待您核章的紀錄。</div>') +
+      '</div>' +
+    '</div>';
+
+  $('queue-semester').addEventListener('change', function () { refreshBootstrap($('queue-semester').value); });
+};
+
+function findQueueRecord(id) { return (bootstrapData.records || []).find(function (r) { return r.id === id; }); }
+
+// 只有 staffLead 關的驗證者（主責/已綁定助理）與 director/admin 能手動調整四類宣導勾選
+// （比照後端 canSetTopics_）；純前端 UI 閘門，後端 recordSetTopicsAction_ 才是安全邊界。
+function canSetTopicsClient() {
+  const roles = bootstrapData.roles;
+  return !!(roles && (roles.isAdmin || roles.isDirector || roles.isStaffLead || roles.isStaffAssistant));
+}
+
+function topicsCheckboxesHtml(topics, idPrefix) {
+  const rules = bootstrapData.keywordRules || {};
+  return '<div class="field"><label>四類宣導勾選（已依關鍵字自動偵測；手動調整後不再被自動掃描覆蓋）</label><div>' +
+    KEYWORD_TOPIC_KEYS.map(function (key) {
+      const t = (topics && topics[key]) || { checked: false, auto: true };
+      const label = (rules[key] && rules[key].label) || key;
+      return '<label style="display:inline-flex; align-items:center; gap:6px; margin:4px 14px 4px 0;">' +
+        '<input type="checkbox" id="' + idPrefix + key + '" ' + (t.checked ? 'checked' : '') + '>' +
+        escapeHtml(label) + (t.auto === false ? ' <span class="field-hint">（已鎖定）</span>' : '') +
+      '</label>';
+    }).join('') + '</div></div>';
+}
+
+// 只回傳真的被手動改動的項目（與原始 topics.checked 不同才算），沒有變動回 null（不呼叫 recordSetTopics）。
+function collectTopicsPatch(topics, idPrefix) {
+  const patch = {};
+  let changed = false;
+  KEYWORD_TOPIC_KEYS.forEach(function (key) {
+    const el = $(idPrefix + key);
+    if (!el) return;
+    const checked = el.checked;
+    const orig = !!(topics && topics[key] && topics[key].checked);
+    if (checked !== orig) { patch[key] = { checked: checked }; changed = true; }
+  });
+  return changed ? patch : null;
+}
+
+// 核章關「編輯內容」：核准/退件時可選填修改表單內容（後端白名單過濾 + editLog，見 dev/Code.gs
+// applyFormEdit_）。核准照常推進，不重跑已過關卡；退件維持原本「一律退回導師」語意。
+function editableContentHtml(r, idPrefix) {
+  return '<details style="margin:6px 0 14px;"><summary style="cursor:pointer; font-weight:600; font-size:.88rem;">編輯內容（選填）</summary>' +
+    '<div style="margin-top:10px;">' + recordFormFieldsHtml(r.type, r.form, idPrefix) + '</div>' +
+  '</details>';
+}
+
+document.body.addEventListener('click', async function (e) {
+  const viewBtn = e.target.closest('[data-action="queue-view"]');
+  if (viewBtn) { openRecordViewModal(findQueueRecord(viewBtn.dataset.id)); return; }
+
+  const approveBtn = e.target.closest('[data-action="queue-approve"]');
+  if (approveBtn) { openApproveModal(findQueueRecord(approveBtn.dataset.id)); return; }
+
+  const rejectBtn = e.target.closest('[data-action="queue-reject"]');
+  if (rejectBtn) { openRejectModal(findQueueRecord(rejectBtn.dataset.id)); return; }
+});
+
+function openApproveModal(r) {
+  if (!r) return;
+  const showTopics = r.type === 'meeting' && r.topics && canSetTopicsClient();
+  const bodyHtml =
+    '<p class="field-hint">目前關卡：' + escapeHtml(STATUS_LABELS[r.status] || r.status) + '</p>' +
+    editableContentHtml(r, 'apv-') +
+    (showTopics ? topicsCheckboxesHtml(r.topics, 'apv-topic-') : '') +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="button" class="btn btn-success" id="approve-confirm-btn">確認核准</button></div>';
+  openModal('核准紀錄', bodyHtml, { wide: true });
+
+  $('approve-confirm-btn').addEventListener('click', async function () {
+    const updatedForm = readRecordFormFields(r.type, 'apv-');
+    const invalid = validateRecordForm(r.type, updatedForm);
+    if (invalid) { showToast(invalid, 'error'); return; }
+    const topicsPatch = showTopics ? collectTopicsPatch(r.topics, 'apv-topic-') : null;
+    const btn = $('approve-confirm-btn');
+    try {
+      await withBtnPending(btn, async function () {
+        await proxyCall('recordApprove', { semester: r.semester, recordId: r.id, updatedForm: updatedForm });
+        if (topicsPatch) await proxyCall('recordSetTopics', { semester: r.semester, recordId: r.id, topics: topicsPatch });
+        showToast('已核准', 'success');
+        closeModal();
+        await refreshBootstrap();
+      });
+    } catch (err) {
+      showToast('核准失敗：' + err.message, 'error');
+    }
+  });
+}
+
+function openRejectModal(r) {
+  if (!r) return;
+  const bodyHtml =
+    '<form id="reject-form">' +
+      editableContentHtml(r, 'rej-') +
+      '<div class="field"><label>退件理由（必填）</label><textarea id="reject-reason" required></textarea></div>' +
+      '<p class="field-hint">退件一律退回導師修正重送，不論是哪一關退的。</p>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-danger">確認退件</button></div>' +
+    '</form>';
+  openModal('退件', bodyHtml, { wide: true });
+  $('reject-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const reason = $('reject-reason').value.trim();
+    if (!reason) { showToast('請填寫退件理由', 'error'); return; }
+    const updatedForm = readRecordFormFields(r.type, 'rej-');
+    const submitBtn = ev.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        await proxyCall('recordReject', { semester: r.semester, recordId: r.id, reason: reason, updatedForm: updatedForm });
+        showToast('已退件', 'success');
+        closeModal();
+        await refreshBootstrap();
+      });
+    } catch (err) { showToast('退件失敗：' + err.message, 'error'); }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 4：統計 ──────────────────────────────────────────────────────────────
+// action 呼叫點：classSetWhitelist（導師設定本班上傳白名單）；統計數字直接彙整
+// bootstrapData.records（已由後端 canViewRecord_ 依角色過濾可見範圍）。
+// ══════════════════════════════════════════════════════════════════════════════
+function visibleClassesForStats() {
+  const roles = bootstrapData.roles;
+  const classes = activeClasses();
+  if (roles.isAdmin || roles.isDirector) return classes;
+  return classes.filter(function (c) { return roles.deptHeadOf.indexOf(c.deptId) !== -1 || roles.tutorOf.indexOf(c.id) !== -1; });
+}
+
+function countsForClass(classId, type) {
+  const recs = (bootstrapData.records || []).filter(function (r) { return r.classId === classId && r.type === type; });
+  const approved = recs.filter(function (r) { return r.status === 'approved'; }).length;
+  const pending = recs.filter(function (r) { return r.status && r.status.indexOf('pending') === 0; }).length;
+  return { approved: approved, pending: pending };
+}
+
+PAGE_RENDERERS.stats = function renderStatsPage() {
+  const roles = bootstrapData.roles;
+  const sem = semesterById(bootstrapData.semester) || {};
+  const quotaMeeting = sem.quotaMeeting || DEFAULT_QUOTA_MEETING;
+  const quotaActivity = sem.quotaActivity || DEFAULT_QUOTA_ACTIVITY;
+  const classes = visibleClassesForStats();
+
+  const byDept = {};
+  classes.forEach(function (c) { (byDept[c.deptId] = byDept[c.deptId] || []).push(c); });
+  const deptIds = Object.keys(byDept).sort(function (a, b) { return deptName(a).localeCompare(deptName(b), 'zh-Hant'); });
+
+  let rowsHtml = '';
+  deptIds.forEach(function (deptId) {
+    rowsHtml += '<tr class="dept-group-header"><td colspan="4">' + escapeHtml(deptName(deptId)) + '</td></tr>';
+    byDept[deptId].forEach(function (c) {
+      const m = countsForClass(c.id, 'meeting');
+      const a = countsForClass(c.id, 'activity');
+      const isTutor = roles.tutorOf.indexOf(c.id) !== -1;
+      rowsHtml += '<tr>' +
+        '<td data-label="班級">' + escapeHtml(c.name) + (isTutor ? ' <button class="btn btn-sm" data-action="edit-whitelist" data-id="' + escapeHtml(c.id) + '">設定上傳白名單</button>' : '') + '</td>' +
+        '<td data-label="班會紀錄" class="qty">' + m.approved + ' / ' + quotaMeeting + (m.pending ? ' <span class="pending-note">(' + m.pending + ' 審核中)</span>' : '') + '</td>' +
+        '<td data-label="導生活動紀錄" class="qty">' + a.approved + ' / ' + quotaActivity + (a.pending ? ' <span class="pending-note">(' + a.pending + ' 審核中)</span>' : '') + '</td>' +
+        '<td data-label="雙導師模式">' + ((c.tutors || []).length >= 2 ? (c.dualApprovalMode === 'all' ? '需全部核章' : '任一核章') : '單導師') + '</td>' +
+      '</tr>';
+    });
+  });
+
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>繳交進度統計</h2>' +
+      '<div class="field" style="max-width:220px;"><label>學期</label><select id="stats-semester">' +
+        (bootstrapData.semesters || []).map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === bootstrapData.semester ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div class="table-wrap"><table class="stats-matrix"><thead><tr><th>班級</th><th>班會紀錄</th><th>導生活動紀錄</th><th>導師模式</th></tr></thead><tbody>' +
+      (rowsHtml || '<tr><td colspan="4" class="empty-hint">目前沒有可檢視的班級。</td></tr>') +
+      '</tbody></table></div>' +
+    '</div>';
+
+  $('stats-semester').addEventListener('change', function () { refreshBootstrap($('stats-semester').value); });
+};
+
+document.body.addEventListener('click', function (e) {
+  const btn = e.target.closest('[data-action="edit-whitelist"]');
+  if (!btn) return;
+  const c = classById(btn.dataset.id);
+  if (!c) return;
+  openModal('設定「' + c.name + '」上傳白名單', '<form id="whitelist-form">' +
+    '<p class="field-hint">每行一個 Gmail 帳號；留空表示不限（任何登入帳號皆可為本班上傳）。導師本人永遠可以上傳。</p>' +
+    '<div class="field"><textarea id="wl-emails" rows="6">' + escapeHtml((c.uploadWhitelist || []).join('\n')) + '</textarea></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>');
+  $('whitelist-form').addEventListener('submit', async function (ev) {
+    ev.preventDefault();
+    const emails = $('wl-emails').value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+    const submitBtn = ev.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('classSetWhitelist', { classId: c.id, uploadWhitelist: emails });
+        bootstrapData.classes = res.classes;
+        showToast('白名單已更新', 'success');
+        closeModal();
+        showPage('stats');
+      });
+    } catch (err) { showToast('更新失敗：' + err.message, 'error'); }
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 4.5：全校總表 ────────────────────────────────────────────────────────
+// staffLead/staffAssistant/director/admin 看全校；deptHead 限本系（後端 overviewStatsAction_
+// 已依角色過濾，前端只負責呈現）。仿 Excel 總表，依學院分組。
+// ══════════════════════════════════════════════════════════════════════════════
+let overviewSemester = null;
+
+PAGE_RENDERERS.overview = async function renderOverviewPage() {
+  if (!overviewSemester) overviewSemester = bootstrapData.semester;
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>全校總表</h2>' +
+      '<div class="field" style="max-width:220px;"><label>學期</label><select id="overview-semester">' +
+        (bootstrapData.semesters || []).map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === overviewSemester ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>'; }).join('') +
+      '</select></div>' +
+      '<div id="overview-content"><div class="empty-hint">載入中…</div></div>' +
+    '</div>';
+  $('overview-semester').addEventListener('change', function () {
+    overviewSemester = $('overview-semester').value;
+    loadOverview();
+  });
+  await loadOverview();
+};
+
+async function loadOverview() {
+  $('overview-content').innerHTML = '<div class="empty-hint">載入中…</div>';
+  try {
+    const res = await proxyCall('overviewStats', { semester: overviewSemester });
+    renderOverviewTable(res.rows || []);
+  } catch (e) {
+    $('overview-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderOverviewTable(rows) {
+  if (!rows.length) { $('overview-content').innerHTML = '<div class="empty-hint">目前沒有可檢視的班級。</div>'; return; }
+  const rules = bootstrapData.keywordRules || {};
+  const byCollege = {};
+  rows.forEach(function (r) { const key = r.college || '（未分類）'; (byCollege[key] = byCollege[key] || []).push(r); });
+  const collegeNames = Object.keys(byCollege).sort(function (a, b) { return a.localeCompare(b, 'zh-Hant'); });
+
+  let html = '<div class="tab-bar">' + collegeNames.map(function (name, i) {
+    return '<button class="tab-btn' + (i === 0 ? ' active' : '') + '" data-overview-college="' + escapeHtml(name) + '">' + escapeHtml(name) + '（' + byCollege[name].length + '）</button>';
+  }).join('') + '</div>';
+
+  collegeNames.forEach(function (name, i) {
+    html += '<div class="table-wrap overview-college-panel" data-overview-panel="' + escapeHtml(name) + '" style="' + (i === 0 ? '' : 'display:none;') + '">' +
+      '<table class="stats-matrix"><thead><tr><th>系所</th><th>班級</th><th>導師</th><th>應繳</th><th>已繳</th><th>已核准</th>' +
+      KEYWORD_TOPIC_KEYS.map(function (k) { return '<th>' + escapeHtml((rules[k] && rules[k].label) || k) + '</th>'; }).join('') +
+      '<th>導生活動</th></tr></thead><tbody>' +
+      byCollege[name].slice().sort(function (a, b) { return (a.dept || '').localeCompare(b.dept || '', 'zh-Hant') || (a.displayName || '').localeCompare(b.displayName || '', 'zh-Hant'); }).map(function (r) {
+        const notVerified = r.pendingCount > 0;
+        return '<tr>' +
+          '<td data-label="系所">' + escapeHtml(r.dept || '') + '</td>' +
+          '<td data-label="班級">' + escapeHtml(r.displayName) + '</td>' +
+          '<td data-label="導師">' + escapeHtml((r.tutors || []).join('、')) + '</td>' +
+          '<td data-label="應繳" class="qty">' + (r.required === 0 ? '免繳' : r.required) + '</td>' +
+          '<td data-label="已繳" class="qty">' + r.submittedCount + (notVerified ? ' <span class="pending-note">(尚未驗證)</span>' : '') + '</td>' +
+          '<td data-label="已核准" class="qty">' + r.approvedCount + '</td>' +
+          KEYWORD_TOPIC_KEYS.map(function (k) {
+            const t = r.topics && r.topics[k];
+            // 需求：除了打勾，還要顯示「是幾月幾號的班會紀錄」——dates 為命中該宣導的班會日期。
+            const dates = (t && t.checked && t.dates && t.dates.length)
+              ? '<div class="topic-dates">' + t.dates.map(function (d) { return escapeHtml(d); }).join('、') + '</div>' : '';
+            return '<td data-label="' + escapeHtml((rules[k] && rules[k].label) || k) + '">' + (t && t.checked ? '✓' : '') + dates + '</td>';
+          }).join('') +
+          '<td data-label="導生活動">' + (r.activity && r.activity.submitted ? (r.activity.approved ? '已核准' : '已繳未驗證') : '未繳') + '</td>' +
+        '</tr>';
+      }).join('') + '</tbody></table></div>';
+  });
+
+  $('overview-content').innerHTML = html;
+}
+
+document.body.addEventListener('click', function (e) {
+  const tabBtn = e.target.closest('[data-overview-college]');
+  if (!tabBtn) return;
+  const name = tabBtn.dataset.overviewCollege;
+  document.querySelectorAll('[data-overview-college]').forEach(function (b) { b.classList.toggle('active', b.dataset.overviewCollege === name); });
+  document.querySelectorAll('[data-overview-panel]').forEach(function (p) { p.style.display = p.dataset.overviewPanel === name ? '' : 'none'; });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 頁面 5：後台管理（admin only）─────────────────────────────────────────────
+// action 呼叫點：adminUpsertDepartment、adminUpsertClass、adminUpsertSemester、
+// adminUpsertUser、adminImportRoster
+// ══════════════════════════════════════════════════════════════════════════════
+// 通用「軟刪除」呼叫（Ticket B）：confirm → proxyCall(action, payload) → onDone 更新 bootstrapData
+// 並重繪。payload 只需帶 id/email + deleted:true（後端 applyUpsertDeleteFields_ 會保留其餘既有
+// 欄位，見 dev/Code.gs）。cancel（confirm 取消）不呼叫後端、不顯示任何 toast。
+async function deleteEntity(opts) {
+  if (!confirm('確定刪除「' + opts.name + '」？刪除後將從所有選單消失，但不影響既有班級與歷史紀錄。')) return;
+  try {
+    await withBtnPending(opts.btn, async function () {
+      const res = await proxyCall(opts.action, opts.payload);
+      if (opts.onDone) opts.onDone(res);
+      showToast('已刪除', 'success');
+    });
+  } catch (err) { showToast('刪除失敗：' + err.message, 'error'); }
+}
+
+let adminTab = 'departments';
+const ADMIN_TABS = [
+  { id: 'colleges', label: '學院' },
+  { id: 'departments', label: '系所' },
+  { id: 'tutorSystems', label: '導師制度' },
+  { id: 'classes', label: '班級' },
+  { id: 'semesters', label: '學期' },
+  { id: 'users', label: '職員帳號' },
+  { id: 'staffTeam', label: '學諮主責／助理' },
+  { id: 'keywords', label: '宣導關鍵字' },
+  { id: 'roster', label: 'Excel 匯入導師名單' },
+];
+
+PAGE_RENDERERS.admin = function renderAdminPage() {
+  $('page-root').innerHTML =
+    '<div class="tab-bar">' + ADMIN_TABS.map(function (t) { return '<button class="tab-btn' + (t.id === adminTab ? ' active' : '') + '" data-admin-tab="' + t.id + '">' + t.label + '</button>'; }).join('') + '</div>' +
+    '<div id="admin-tab-content"></div>';
+  renderAdminTab();
+};
+$('page-root') && document.body.addEventListener('click', function (e) {
+  const btn = e.target.closest('[data-admin-tab]');
+  if (!btn) return;
+  adminTab = btn.dataset.adminTab;
+  document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.adminTab === adminTab); });
+  renderAdminTab();
+});
+
+function renderAdminTab() {
+  const fns = {
+    colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
+    classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
+    staffTeam: renderAdminStaffTeam, keywords: renderAdminKeywords, roster: renderAdminRoster,
+  };
+  (fns[adminTab] || function () {})();
+}
+
+// ── 學院 ──
+function renderAdminColleges() {
+  const colleges = (bootstrapData.colleges || []).filter(notDeleted).slice().sort(function (a, b) { return (a.order || 0) - (b.order || 0); });
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>學院清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>排序</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    colleges.map(function (c) {
+      return '<tr><td data-label="ID">' + escapeHtml(c.id) + '</td><td data-label="名稱">' + escapeHtml(c.name) + '</td>' +
+        '<td data-label="排序">' + (c.order || 0) + '</td>' +
+        '<td data-label="狀態">' + (c.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="college-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="college-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="college-new" style="margin-top:12px;">新增學院</button></div>';
+}
+
+function openCollegeForm(college) {
+  college = college || {};
+  const bodyHtml = '<form id="college-form">' +
+    '<div class="field"><label>學院 ID</label><input type="text" id="college-id" value="' + escapeHtml(college.id || '') + '" ' + (college.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>學院名稱</label><input type="text" id="college-name" value="' + escapeHtml(college.name || '') + '" required></div>' +
+    '<div class="field"><label>排序（數字越小越前面）</label><input type="number" id="college-order" value="' + (college.order != null ? college.order : (bootstrapData.colleges || []).length) + '"></div>' +
+    '<div class="field"><label><input type="checkbox" id="college-disabled" ' + (college.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(college.id ? '編輯學院' : '新增學院', bodyHtml);
+  $('college-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    let id = $('college-id').value.trim();
+    if (!id) id = slugifyIdFront($('college-name').value.trim());
+    if (!id) { showToast('請輸入學院名稱', 'error'); return; }
+    const entry = { id: id, name: $('college-name').value.trim(), order: Number($('college-order').value) || 0, disabled: $('college-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertCollege', { college: entry });
+        bootstrapData.colleges = res.colleges;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminColleges();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="college-new"]')) { openCollegeForm(); return; }
+  const editBtn = e.target.closest('[data-action="college-edit"]');
+  if (editBtn) { openCollegeForm(collegeById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="college-delete"]');
+  if (delBtn) {
+    const c = collegeById(delBtn.dataset.id);
+    if (!c) return;
+    deleteEntity({
+      btn: delBtn, name: c.name, action: 'adminUpsertCollege', payload: { college: { id: c.id, deleted: true } },
+      onDone: function (res) { bootstrapData.colleges = res.colleges; renderAdminColleges(); },
+    });
+  }
+});
+
+// ── 導師制度 ──
+function renderAdminTutorSystems() {
+  const systems = (bootstrapData.tutorSystems || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>導師制度清單</h3><p class="field-hint">應繳班會份數為該制度的預設值；個別班級可在「班級」頁籤覆寫（0＝本學期免繳）。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>應繳班會份數</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    systems.map(function (s) {
+      return '<tr><td data-label="ID">' + escapeHtml(s.id) + '</td><td data-label="名稱">' + escapeHtml(s.name) + '</td>' +
+        '<td data-label="應繳班會份數">' + (s.requiredMeetingCount == null ? '（未設定）' : s.requiredMeetingCount) + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="system-edit" data-id="' + escapeHtml(s.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="system-delete" data-id="' + escapeHtml(s.id) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="system-new" style="margin-top:12px;">新增導師制度</button></div>';
+}
+
+function openTutorSystemForm(sys) {
+  sys = sys || {};
+  const bodyHtml = '<form id="system-form">' +
+    '<div class="field"><label>制度 ID</label><input type="text" id="system-id" value="' + escapeHtml(sys.id || '') + '" ' + (sys.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>制度名稱</label><input type="text" id="system-name" value="' + escapeHtml(sys.name || '') + '" required></div>' +
+    '<div class="field"><label>應繳班會份數</label><input type="number" id="system-count" value="' + (sys.requiredMeetingCount != null ? sys.requiredMeetingCount : '') + '" min="0"></div>' +
+    '<div class="field"><label>修業年限（年，1–7；留空＝未設定）</label><input type="number" id="system-duration" value="' + (sys.durationYears != null ? sys.durationYears : '') + '" min="1" max="7">' +
+      '<p class="field-hint">供「換學期升級」判斷畢業；個別班級可在班級表單以「畢業年級」覆寫（如獸醫系四技五年制）。</p></div>' +
+    '<div class="field"><label><input type="checkbox" id="system-disabled" ' + (sys.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(sys.id ? '編輯導師制度' : '新增導師制度', bodyHtml);
+  $('system-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    let id = $('system-id').value.trim();
+    if (!id) id = slugifyIdFront($('system-name').value.trim());
+    if (!id) { showToast('請輸入制度名稱', 'error'); return; }
+    const countVal = $('system-count').value.trim();
+    const durationVal = $('system-duration').value.trim();
+    const entry = {
+      id: id, name: $('system-name').value.trim(),
+      requiredMeetingCount: countVal === '' ? null : Number(countVal),
+      durationYears: durationVal === '' ? null : Number(durationVal),
+      disabled: $('system-disabled').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertTutorSystem', { tutorSystem: entry });
+        bootstrapData.tutorSystems = res.tutorSystems;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminTutorSystems();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="system-new"]')) { openTutorSystemForm(); return; }
+  const editBtn = e.target.closest('[data-action="system-edit"]');
+  if (editBtn) { openTutorSystemForm(tutorSystemById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="system-delete"]');
+  if (delBtn) {
+    const s = tutorSystemById(delBtn.dataset.id);
+    if (!s) return;
+    deleteEntity({
+      btn: delBtn, name: s.name, action: 'adminUpsertTutorSystem', payload: { tutorSystem: { id: s.id, deleted: true } },
+      onDone: function (res) { bootstrapData.tutorSystems = res.tutorSystems; renderAdminTutorSystems(); },
+    });
+  }
+});
+
+// ── 學諮主責／助理 ──
+function renderAdminStaffTeam() {
+  const leads = (bootstrapData.staffLeads || []).filter(notDeleted);
+  const assistants = (bootstrapData.staffAssistants || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>學諮中心主責</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    leads.map(function (s) {
+      return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="lead-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="lead-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="lead-new" style="margin-top:12px;">新增主責</button></div>' +
+    '<div class="card"><h3>學諮中心助理</h3><p class="field-hint">助理在主責的核章關代為動作時，核章顯示掛主責姓名，真實身分只有 admin／學諮端角色看得到。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>綁定主責</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    assistants.map(function (s) {
+      const lead = leads.find(function (l) { return l.email === s.leadEmail; });
+      return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="綁定主責">' + (lead ? escapeHtml(lead.name) + '（' + escapeHtml(lead.email) + '）' : '<span class="field-hint">（找不到，請重新綁定）</span>') + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="assistant-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="assistant-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="assistant-new" style="margin-top:12px;">新增助理</button></div>';
+}
+
+function openStaffLeadForm(email) {
+  const leads = bootstrapData.staffLeads || [];
+  const s = leads.find(function (x) { return x.email === email; }) || {};
+  const bodyHtml = '<form id="lead-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="lead-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="lead-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label><input type="checkbox" id="lead-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(email ? '編輯主責' : '新增主責', bodyHtml);
+  $('lead-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const targetEmail = $('lead-email').value.trim();
+    if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const entry = { email: targetEmail, name: $('lead-name').value.trim(), disabled: $('lead-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertStaffLead', { staffLead: entry });
+        bootstrapData.staffLeads = res.staffLeads;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminStaffTeam();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+function openStaffAssistantForm(email) {
+  const assistants = bootstrapData.staffAssistants || [];
+  const leads = (bootstrapData.staffLeads || []).filter(notDeleted);
+  const s = assistants.find(function (x) { return x.email === email; }) || {};
+  const bodyHtml = '<form id="assistant-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="assistant-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="assistant-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>綁定主責</label><select id="assistant-lead">' +
+      '<option value="">（未綁定）</option>' +
+      leads.map(function (l) { return '<option value="' + escapeHtml(l.email) + '"' + (l.email === s.leadEmail ? ' selected' : '') + '>' + escapeHtml(l.name) + '（' + escapeHtml(l.email) + '）</option>'; }).join('') +
+    '</select></div>' +
+    '<div class="field"><label><input type="checkbox" id="assistant-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(email ? '編輯助理' : '新增助理', bodyHtml);
+  $('assistant-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const targetEmail = $('assistant-email').value.trim();
+    if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const entry = {
+      email: targetEmail, name: $('assistant-name').value.trim(),
+      leadEmail: $('assistant-lead').value, disabled: $('assistant-disabled').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertStaffAssistant', { staffAssistant: entry });
+        bootstrapData.staffAssistants = res.staffAssistants;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminStaffTeam();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="lead-new"]')) { openStaffLeadForm(null); return; }
+  const leadEdit = e.target.closest('[data-action="lead-edit"]');
+  if (leadEdit) { openStaffLeadForm(leadEdit.dataset.email); return; }
+  const leadDelete = e.target.closest('[data-action="lead-delete"]');
+  if (leadDelete) {
+    const email = leadDelete.dataset.email;
+    const s = (bootstrapData.staffLeads || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: leadDelete, name: s.name || s.email, action: 'adminUpsertStaffLead', payload: { staffLead: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.staffLeads = res.staffLeads; renderAdminStaffTeam(); },
+    });
+    return;
+  }
+  if (e.target.closest('[data-action="assistant-new"]')) { openStaffAssistantForm(null); return; }
+  const assistantEdit = e.target.closest('[data-action="assistant-edit"]');
+  if (assistantEdit) { openStaffAssistantForm(assistantEdit.dataset.email); return; }
+  const assistantDelete = e.target.closest('[data-action="assistant-delete"]');
+  if (assistantDelete) {
+    const email = assistantDelete.dataset.email;
+    const s = (bootstrapData.staffAssistants || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: assistantDelete, name: s.name || s.email, action: 'adminUpsertStaffAssistant', payload: { staffAssistant: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.staffAssistants = res.staffAssistants; renderAdminStaffTeam(); },
+    });
+  }
+});
+
+// ── 宣導關鍵字 ──
+function renderAdminKeywords() {
+  const rules = bootstrapData.keywordRules || {};
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>四類宣導關鍵字庫</h3>' +
+    '<p class="field-hint">提交／重送／編輯內容時，後端會掃描表單所有文字欄位比對這些關鍵字自動預勾；每行一個關鍵字。</p>' +
+    KEYWORD_TOPIC_KEYS.map(function (key) {
+      const r = rules[key] || { label: key, keywords: [] };
+      return '<div class="field"><label>' + escapeHtml(r.label || key) + '</label>' +
+        '<textarea data-keyword-key="' + key + '" rows="3">' + escapeHtml((r.keywords || []).join('\n')) + '</textarea></div>';
+    }).join('') +
+    '<button class="btn btn-primary" data-action="keywords-save">儲存</button></div>';
+}
+
+document.body.addEventListener('click', async function (e) {
+  const btn = e.target.closest('[data-action="keywords-save"]');
+  if (!btn) return;
+  const rules = bootstrapData.keywordRules || {};
+  const patch = {};
+  KEYWORD_TOPIC_KEYS.forEach(function (key) {
+    const el = document.querySelector('[data-keyword-key="' + key + '"]');
+    const keywords = el ? el.value.split('\n').map(function (s) { return s.trim(); }).filter(Boolean) : [];
+    patch[key] = { label: (rules[key] && rules[key].label) || key, keywords: keywords };
+  });
+  try {
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminSetKeywordRules', { keywordRules: patch });
+      bootstrapData.keywordRules = res.keywordRules;
+      showToast('已儲存', 'success');
+    });
+  } catch (err) {
+    showToast('儲存失敗：' + err.message, 'error');
+  }
+});
+
+// ── 系所 ──
+function renderAdminDepartments() {
+  const depts = (bootstrapData.departments || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>系所清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱</th><th>系主任</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    depts.map(function (d) {
+      return '<tr><td data-label="ID">' + escapeHtml(d.id) + '</td><td data-label="名稱">' + escapeHtml(d.name) + '</td>' +
+        '<td data-label="系主任">' + escapeHtml(d.headName || '') + (d.headEmail ? '（' + escapeHtml(d.headEmail) + '）' : '') + '</td>' +
+        '<td data-label="狀態">' + (d.active === false ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="dept-edit" data-id="' + escapeHtml(d.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="dept-delete" data-id="' + escapeHtml(d.id) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="dept-new" style="margin-top:12px;">新增系所</button></div>';
+}
+
+function openDeptForm(dept) {
+  dept = dept || {};
+  const bodyHtml = '<form id="dept-form">' +
+    '<p class="field-hint">學生自填的系所會出現在此，可在此改名、補系主任資訊或停用。</p>' +
+    '<div class="field"><label>系所 ID</label><input type="text" id="dept-id" value="' + escapeHtml(dept.id || '') + '" ' + (dept.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>系所名稱</label><input type="text" id="dept-name" value="' + escapeHtml(dept.name || '') + '" required></div>' +
+    '<div class="row"><div class="field"><label>系主任姓名</label><input type="text" id="dept-head-name" value="' + escapeHtml(dept.headName || '') + '"></div>' +
+    '<div class="field"><label>系主任 Email</label><input type="email" id="dept-head-email" value="' + escapeHtml(dept.headEmail || '') + '"></div></div>' +
+    '<div class="field"><label><input type="checkbox" id="dept-active" ' + (dept.active === false ? '' : 'checked') + '> 啟用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(dept.id ? '編輯系所' : '新增系所', bodyHtml);
+  $('dept-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const id = $('dept-id').value.trim();
+    if (!id) { showToast('請輸入系所 ID', 'error'); return; }
+    const entry = { id: id, name: $('dept-name').value.trim(), headName: $('dept-head-name').value.trim(), headEmail: $('dept-head-email').value.trim(), active: $('dept-active').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertDepartment', { department: entry });
+        bootstrapData.departments = res.departments;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminDepartments();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="dept-new"]')) { openDeptForm(); return; }
+  const editBtn = e.target.closest('[data-action="dept-edit"]');
+  if (editBtn) { openDeptForm(deptById(editBtn.dataset.id)); return; }
+  const delBtn = e.target.closest('[data-action="dept-delete"]');
+  if (delBtn) {
+    const d = deptById(delBtn.dataset.id);
+    if (!d) return;
+    deleteEntity({
+      btn: delBtn, name: d.name, action: 'adminUpsertDepartment', payload: { department: { id: d.id, deleted: true } },
+      onDone: function (res) { bootstrapData.departments = res.departments; renderAdminDepartments(); },
+    });
+  }
+});
+
+// ── 班級 ──
+
+// 收集所有班級的待確認導師建議（admin 專用；admin 的 bootstrap classes 未過濾，含 by/email/at）。
+function pendingSuggestionList() {
+  const out = [];
+  (bootstrapData.classes || []).filter(notDeleted).forEach(function (c) {
+    ((c && c.suggestedTutors) || []).forEach(function (s, i) {
+      out.push({ classId: c.id, idx: i, className: c.name, deptId: c.deptId, name: s.name, email: s.email || '', by: s.by || '', at: s.at || '' });
+    });
+  });
+  return out;
+}
+
+function requiredMeetingCountDisplay(c) {
+  if (c.requiredMeetingOverride === 0) return '0（免繳）';
+  if (c.requiredMeetingOverride != null) return c.requiredMeetingOverride + '（覆寫）';
+  const sys = tutorSystemById(c.systemId);
+  if (sys && sys.requiredMeetingCount != null) return sys.requiredMeetingCount + '（制度預設）';
+  return '（未設定）';
+}
+
+function renderAdminClasses() {
+  const classes = (bootstrapData.classes || []).filter(notDeleted);
+  const pending = pendingSuggestionList();
+
+  const pendingHtml = pending.length
+    ? '<div class="card"><h3>待確認導師建議（' + pending.length + '）</h3>' +
+      '<p class="field-hint">學生上傳時自填的導師。「轉正式導師」後才具核章身分；無 email 者須先補 email。</p>' +
+      '<div class="table-wrap"><table><thead><tr><th>系所</th><th>班級</th><th>姓名</th><th>Email</th><th>建議時間</th><th>操作</th></tr></thead><tbody>' +
+      pending.map(function (p) {
+        return '<tr><td data-label="系所">' + escapeHtml(deptName(p.deptId)) + '</td>' +
+          '<td data-label="班級">' + escapeHtml(p.className) + '</td>' +
+          '<td data-label="姓名">' + escapeHtml(p.name) + '</td>' +
+          '<td data-label="Email">' + (p.email ? escapeHtml(p.email) : '<span class="field-hint">（未填）</span>') + '</td>' +
+          '<td data-label="建議時間">' + escapeHtml(formatDateTime(p.at)) + '</td>' +
+          '<td data-label="操作">' +
+            '<button class="btn btn-sm btn-primary" data-action="sug-promote" data-class="' + escapeHtml(p.classId) + '" data-idx="' + p.idx + '">' +
+              (p.email ? '轉正式導師' : '補 email 後轉正') + '</button> ' +
+            '<button class="btn btn-sm" data-action="sug-remove" data-class="' + escapeHtml(p.classId) + '" data-idx="' + p.idx + '">移除</button>' +
+          '</td></tr>';
+      }).join('') + '</tbody></table></div></div>'
+    : '';
+
+  $('admin-tab-content').innerHTML =
+    pendingHtml +
+    '<div class="card"><h3>班級清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>顯示名稱</th><th>原始名稱</th><th>系所</th><th>制度</th><th>應繳份數</th><th>導師</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    classes.map(function (c) {
+      return '<tr><td data-label="ID">' + escapeHtml(c.id) + '</td>' +
+        '<td data-label="顯示名稱">' + escapeHtml(c.displayName || c.name) + '</td>' +
+        '<td data-label="原始名稱">' + escapeHtml(c.name) + '</td>' +
+        '<td data-label="系所">' + escapeHtml(deptName(c.deptId)) + '</td>' +
+        '<td data-label="制度">' + escapeHtml((tutorSystemById(c.systemId) || {}).name || '（未設定）') + '</td>' +
+        '<td data-label="應繳份數">' + requiredMeetingCountDisplay(c) + '</td>' +
+        '<td data-label="導師">' + (c.tutors || []).map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
+        '<td data-label="狀態">' + (c.active === false ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm" data-action="class-history" data-id="' + escapeHtml(c.id) + '">歷史</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="class-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="class-new" style="margin-top:12px;">新增班級</button></div>';
+}
+
+// ── 導師歷史＋期中更換（Ticket C）──
+// 歷史 modal：按需呼叫 tutorHistoryGet（bootstrap 不帶 tutorHistory，控制 payload）。
+const TUTOR_CHANGE_TYPE_LABELS = { manual: '手動編輯', midterm: '期中更換', import: '匯入', rollover: '升級帶入' };
+
+function tutorListLabel(list) {
+  const names = (list || []).map(function (t) { return (t && t.name) || ''; }).filter(Boolean);
+  return names.length ? names.join('、') : '（無）';
+}
+
+// midterm 的生效日以「X月X日更換」呈現；其他類型不顯示生效日。
+function effectiveDateLabel(entry) {
+  if (!entry || entry.changeType !== 'midterm' || !entry.effectiveDate) return '';
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(entry.effectiveDate);
+  return m ? (Number(m[2]) + '月' + Number(m[3]) + '日更換') : entry.effectiveDate;
+}
+
+async function openClassHistoryModal(classId) {
+  const c = classById(classId);
+  if (!c) return;
+  const title = '歷年導師──' + (c.displayName || c.name);
+  openModal(title, '<div class="empty-hint">載入中…</div>', { wide: true });
+  let entries;
+  try {
+    const res = await proxyCall('tutorHistoryGet', { classId: classId });
+    entries = (res && res.entries) || [];
+  } catch (err) {
+    openModal(title, '<div class="empty-hint">載入失敗：' + escapeHtml(err.message) + '</div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button></div>', { wide: true });
+    return;
+  }
+  const tableHtml = entries.length
+    ? '<div class="table-wrap"><table><thead><tr><th>學期</th><th>類型</th><th>生效日</th><th>異動前</th><th>異動後</th><th>備註</th><th>操作者</th><th>時間</th></tr></thead><tbody>' +
+      entries.map(function (h) {
+        return '<tr><td data-label="學期">' + escapeHtml(h.semester || '') + '</td>' +
+          '<td data-label="類型">' + escapeHtml(TUTOR_CHANGE_TYPE_LABELS[h.changeType] || h.changeType || '') + '</td>' +
+          '<td data-label="生效日">' + escapeHtml(effectiveDateLabel(h)) + '</td>' +
+          '<td data-label="異動前">' + escapeHtml(tutorListLabel(h.previousTutors)) + '</td>' +
+          '<td data-label="異動後">' + escapeHtml(tutorListLabel(h.tutors)) + '</td>' +
+          '<td data-label="備註">' + escapeHtml(h.note || '') + '</td>' +
+          '<td data-label="操作者">' + escapeHtml(h.by || '') + '</td>' +
+          '<td data-label="時間">' + escapeHtml(formatDateTime(h.at)) + '</td></tr>';
+      }).join('') + '</tbody></table></div>'
+    : '<div class="empty-hint">尚無異動紀錄</div>';
+  openModal(title, tableHtml +
+    '<p class="field-hint" style="margin-top:12px;">「期中更換導師」會留下正式異動紀錄；一般資料修正（改名、制度、停用等）請用班級列表的「編輯」。</p>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button>' +
+    '<button type="button" class="btn btn-primary" data-action="midterm-open" data-id="' + escapeHtml(classId) + '">期中更換導師</button></div>', { wide: true });
+}
+
+function openMidtermChangeModal(classId) {
+  const c = classById(classId);
+  if (!c) return;
+  const tutors = c.tutors || [];
+  const d = new Date();
+  const today = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  openModal('期中更換導師──' + (c.displayName || c.name), '<form id="midterm-form">' +
+    '<p class="field-hint">「期中更換」會寫入正式導師異動紀錄（含生效日）；一般資料修正請用「編輯」。' +
+    '送出後名單立即生效，Email 必填（核章身分以 email 比對）。</p>' +
+    '<div class="field"><label>生效日期</label><input type="date" id="mid-date" value="' + today + '" required style="max-width:220px;"></div>' +
+    '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="mid-t1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '" required></div>' +
+    '<div class="field"><label>導師 1 Email</label><input type="email" id="mid-t1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '" required></div></div>' +
+    '<div class="row"><div class="field"><label>導師 2 姓名（選填）</label><input type="text" id="mid-t2-name" value="' + escapeHtml(tutors[1] && tutors[1].name || '') + '"></div>' +
+    '<div class="field"><label>導師 2 Email（選填）</label><input type="email" id="mid-t2-email" value="' + escapeHtml(tutors[1] && tutors[1].email || '') + '"></div></div>' +
+    '<div class="field"><label>備註（選填，200 字內）</label><input type="text" id="mid-note" maxlength="200" placeholder="如：原導師退休、留職停薪"></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">確認更換</button></div>' +
+  '</form>');
+  $('midterm-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const newTutors = [];
+    if ($('mid-t1-name').value.trim() || $('mid-t1-email').value.trim()) {
+      newTutors.push({ name: $('mid-t1-name').value.trim(), email: $('mid-t1-email').value.trim() });
+    }
+    if ($('mid-t2-name').value.trim() || $('mid-t2-email').value.trim()) {
+      newTutors.push({ name: $('mid-t2-name').value.trim(), email: $('mid-t2-email').value.trim() });
+    }
+    if (!newTutors.length) { showToast('至少需填一位導師', 'error'); return; }
+    if (newTutors.some(function (t) { return !t.name || !t.email; })) { showToast('每位導師的姓名與 Email 皆為必填', 'error'); return; }
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminChangeTutorMidterm', {
+          classId: classId,
+          effectiveDate: $('mid-date').value,
+          newTutors: newTutors,
+          note: $('mid-note').value.trim() || undefined,
+        });
+        bootstrapData.classes = res.classes;
+        showToast('已更換導師並寫入異動紀錄', 'success');
+        closeModal();
+        renderNav();
+        renderAdminClasses();
+      });
+    } catch (err) { showToast('更換失敗：' + err.message, 'error'); }
+  });
+}
+
+// 建議轉正/移除：沿用 adminUpsertClass 送整包 class（tutors 只有 admin action 能動）。
+// btn（選填）：觸發此動作的按鈕，走 withBtnPending 統一回饋；未附 email 需先跳補填 modal 的
+// 早退路徑（尚未真正呼叫後端）不套用 pending 視覺。
+async function applySuggestionAction(classId, idx, promote, emailOverride, btn) {
+  const c = classById(classId);
+  if (!c || !c.suggestedTutors || !c.suggestedTutors[idx]) { showToast('找不到該筆建議，請重新整理', 'error'); return; }
+  const s = c.suggestedTutors[idx];
+  const remaining = c.suggestedTutors.filter(function (_, i) { return i !== idx; });
+  const entry = Object.assign({}, c, { suggestedTutors: remaining });
+  if (promote) {
+    const email = (emailOverride || s.email || '').trim().toLowerCase();
+    if (!email) { openSuggestionEmailModal(classId, idx); return; }
+    if (!EMAIL_RE.test(email)) { showToast('Email 格式不正確', 'error'); return; }
+    if ((c.tutors || []).length >= 2) { showToast('該班已有兩位導師，請先於班級編輯調整後再轉正', 'error'); return; }
+    entry.tutors = (c.tutors || []).concat([{ name: s.name, email: email }]);
+  }
+  try {
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminUpsertClass', { class: entry });
+      bootstrapData.classes = res.classes;
+      showToast(promote ? '已轉為正式導師' : '已移除建議', 'success');
+      closeModal();
+      renderNav();
+      renderAdminClasses();
+    });
+  } catch (err) { showToast('操作失敗：' + err.message, 'error'); }
+}
+
+// 無 email 的建議：跳出補 email 輸入框後再轉正。
+function openSuggestionEmailModal(classId, idx) {
+  const c = classById(classId);
+  const s = c && c.suggestedTutors && c.suggestedTutors[idx];
+  if (!s) return;
+  openModal('補導師 Email 後轉正', '<form id="sug-email-form">' +
+    '<p class="field-hint">導師「' + escapeHtml(s.name) + '」的建議未附 Email；核章身分以 email 比對，必須補上。</p>' +
+    '<div class="field"><label>導師 Email</label><input type="text" id="sug-email-input" required></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">轉正式導師</button></div>' +
+  '</form>');
+  $('sug-email-form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    applySuggestionAction(classId, idx, true, $('sug-email-input').value, submitBtn);
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  const promoteBtn = e.target.closest('[data-action="sug-promote"]');
+  if (promoteBtn) { applySuggestionAction(promoteBtn.dataset.class, Number(promoteBtn.dataset.idx), true, undefined, promoteBtn); return; }
+  const removeBtn = e.target.closest('[data-action="sug-remove"]');
+  if (removeBtn) { applySuggestionAction(removeBtn.dataset.class, Number(removeBtn.dataset.idx), false, undefined, removeBtn); return; }
+});
+
+function openClassForm(cls) {
+  cls = cls || {};
+  const tutors = cls.tutors || [];
+  const depts = activeDepartments();
+  const systems = (bootstrapData.tutorSystems || []).filter(notDeleted);
+  const isEdit = !!cls.id;
+  const bodyHtml = '<form id="class-form">' +
+    '<div class="field"><label>系所</label><select id="class-dept">' + depts.map(function (d) { return '<option value="' + escapeHtml(d.id) + '"' + (d.id === cls.deptId ? ' selected' : '') + '>' + escapeHtml(d.name) + '</option>'; }).join('') + '</select>' +
+      (isEdit ? '<p class="field-hint">既有班級可改系所（換系所），已存在的紀錄不受影響。</p>' : '') + '</div>' +
+    '<div class="field"><label>導師制度</label><select id="class-system"><option value="">（未設定，用保底預設）</option>' +
+      systems.map(function (s) { return '<option value="' + escapeHtml(s.id) + '"' + (s.id === cls.systemId ? ' selected' : '') + '>' + escapeHtml(s.name) + '</option>'; }).join('') + '</select></div>' +
+    '<div class="field"><label>班級名稱（原始，中英數字 1–20 字，如：四技一A、碩一）</label><input type="text" id="class-name" value="' + escapeHtml(cls.name || '') + '" maxlength="20" required></div>' +
+    '<div class="field"><label>顯示名稱（可自行修改，留空則用自動融合建議值）</label><input type="text" id="class-display-name" value="' + escapeHtml(cls.displayName || '') + '"></div>' +
+    '<div class="field"><label>班級 ID（自動衍生' + (isEdit ? '；既有班級不可變更' : '') + '）</label><input type="text" id="class-id" value="' + escapeHtml(cls.id || '') + '" readonly></div>' +
+    '<div class="field"><label>應繳班會份數覆寫（留空＝用制度預設；0＝本學期免繳，如實習）</label><input type="number" id="class-required-override" min="0" value="' + (cls.requiredMeetingOverride != null ? cls.requiredMeetingOverride : '') + '"></div>' +
+    '<div class="field"><label>畢業年級（覆寫，選填 1–7；留空＝用制度修業年限）</label><input type="number" id="class-grad-grade" min="1" max="7" value="' + (cls.graduationGrade != null ? cls.graduationGrade : '') + '">' +
+      '<p class="field-hint">供「換學期升級」判斷畢業；獸醫系四技等五年制填 5。</p></div>' +
+    '<div class="row"><div class="field"><label>導師 1 姓名</label><input type="text" id="tutor1-name" value="' + escapeHtml(tutors[0] && tutors[0].name || '') + '"></div>' +
+    '<div class="field"><label>導師 1 Email</label><input type="email" id="tutor1-email" value="' + escapeHtml(tutors[0] && tutors[0].email || '') + '"></div></div>' +
+    (tutors[0] ? '<button type="button" class="btn btn-sm btn-danger" id="tutor1-remove" style="margin:-10px 0 14px;">移除導師 1（' + escapeHtml(tutors[0].name) + '）</button>' : '') +
+    '<div class="row"><div class="field"><label>導師 2 姓名（選填）</label><input type="text" id="tutor2-name" value="' + escapeHtml(tutors[1] && tutors[1].name || '') + '"></div>' +
+    '<div class="field"><label>導師 2 Email（選填）</label><input type="email" id="tutor2-email" value="' + escapeHtml(tutors[1] && tutors[1].email || '') + '"></div></div>' +
+    (tutors[1] ? '<button type="button" class="btn btn-sm btn-danger" id="tutor2-remove" style="margin:-10px 0 14px;">移除導師 2（' + escapeHtml(tutors[1].name) + '）</button>' : '') +
+    '<div class="field"><label>雙導師核章模式</label><select id="class-dual"><option value="any"' + (cls.dualApprovalMode !== 'all' ? ' selected' : '') + '>任一位核章即可</option><option value="all"' + (cls.dualApprovalMode === 'all' ? ' selected' : '') + '>需兩位皆核章</option></select></div>' +
+    '<div class="field"><label><input type="checkbox" id="class-active" ' + (cls.active === false ? '' : 'checked') + '> 啟用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(isEdit ? '編輯班級' : '新增班級', bodyHtml);
+
+  // 導師「移除」鈕：只清空欄位，實際刪除隨表單「儲存」一併送出（此表單本來就是固定 2 槽
+  // 姓名/Email 輸入框，沒有獨立的逐筆刪除 API；confirm 後清空即等同準備移除該位導師）。
+  if (tutors[0] && $('tutor1-remove')) {
+    $('tutor1-remove').addEventListener('click', function () {
+      if (!confirm('確定移除導師「' + tutors[0].name + '」？（需按下方「儲存」才會生效）')) return;
+      $('tutor1-name').value = ''; $('tutor1-email').value = '';
+      this.remove();
+    });
+  }
+  if (tutors[1] && $('tutor2-remove')) {
+    $('tutor2-remove').addEventListener('click', function () {
+      if (!confirm('確定移除導師「' + tutors[1].name + '」？（需按下方「儲存」才會生效）')) return;
+      $('tutor2-name').value = ''; $('tutor2-email').value = '';
+      this.remove();
+    });
+  }
+
+  // 新增時 id 隨系所/名稱即時衍生（撞名加序號後綴，同後端規則）；
+  // 編輯時 id 固定（records 以 classId 關聯，不可改）。
+  function refreshDerivedId() {
+    if (isEdit) return;
+    const name = $('class-name').value.trim();
+    $('class-id').value = CLASS_NAME_RE.test(name) ? buildClassIdFront($('class-dept').value, name, bootstrapData.classes) : '';
+  }
+  refreshDerivedId();
+  ['class-dept', 'class-name'].forEach(function (fid) {
+    $(fid).addEventListener('input', refreshDerivedId);
+    $(fid).addEventListener('change', refreshDerivedId);
+  });
+
+  $('class-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const name = $('class-name').value.trim();
+    if (!CLASS_NAME_RE.test(name)) { showToast('班級名稱限 1–20 字（中英數字，不可含空白/符號）', 'error'); return; }
+    const id = isEdit ? cls.id : buildClassIdFront($('class-dept').value, name, bootstrapData.classes);
+    const newTutors = [];
+    if ($('tutor1-name').value.trim() || $('tutor1-email').value.trim()) newTutors.push({ name: $('tutor1-name').value.trim(), email: $('tutor1-email').value.trim() });
+    if ($('tutor2-name').value.trim() || $('tutor2-email').value.trim()) newTutors.push({ name: $('tutor2-name').value.trim(), email: $('tutor2-email').value.trim() });
+    const displayName = $('class-display-name').value.trim();
+    const overrideVal = $('class-required-override').value.trim();
+    const gradVal = $('class-grad-grade').value.trim();
+    const entry = {
+      id: id, name: name, deptId: $('class-dept').value,
+      systemId: $('class-system').value || null,
+      displayName: displayName || undefined, // 空字串不覆寫，交由後端保留既有值或前端 fallback 顯示 name
+      requiredMeetingOverride: overrideVal === '' ? null : Number(overrideVal),
+      graduationGrade: gradVal === '' ? null : Number(gradVal),
+      tutors: newTutors, dualApprovalMode: $('class-dual').value, active: $('class-active').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertClass', { class: entry });
+        bootstrapData.classes = res.classes;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderNav();
+        renderAdminClasses();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="class-new"]')) { openClassForm(); return; }
+  const editBtn = e.target.closest('[data-action="class-edit"]');
+  if (editBtn) { openClassForm(classById(editBtn.dataset.id)); return; }
+  const histBtn = e.target.closest('[data-action="class-history"]');
+  if (histBtn) { openClassHistoryModal(histBtn.dataset.id); return; }
+  const midtermBtn = e.target.closest('[data-action="midterm-open"]');
+  if (midtermBtn) { openMidtermChangeModal(midtermBtn.dataset.id); return; }
+  const delBtn = e.target.closest('[data-action="class-delete"]');
+  if (delBtn) {
+    const c = classById(delBtn.dataset.id);
+    if (!c) return;
+    deleteEntity({
+      btn: delBtn, name: c.displayName || c.name, action: 'adminUpsertClass', payload: { class: { id: c.id, deleted: true } },
+      onDone: function (res) { bootstrapData.classes = res.classes; renderNav(); renderAdminClasses(); },
+    });
+  }
+});
+
+// ── 學期 ──
+function renderAdminSemesters() {
+  const semesters = bootstrapData.semesters || [];
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>學期清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>顯示名稱</th><th>班會額度</th><th>活動額度</th><th>目前學期</th><th>操作</th></tr></thead><tbody>' +
+    semesters.map(function (s) {
+      return '<tr><td data-label="ID">' + escapeHtml(s.id) + '</td><td data-label="顯示名稱">' + escapeHtml(s.label || '') + '</td>' +
+        '<td data-label="班會額度">' + (s.quotaMeeting || DEFAULT_QUOTA_MEETING) + '</td><td data-label="活動額度">' + (s.quotaActivity || DEFAULT_QUOTA_ACTIVITY) + '</td>' +
+        '<td data-label="目前學期">' + (s.isCurrent ? '✓' : '') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="semester-edit" data-id="' + escapeHtml(s.id) + '">編輯</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="semester-new" style="margin-top:12px;">新增學期</button> ' +
+    '<button class="btn" data-action="rollover-open" style="margin-top:12px;">帶入上學期名單（升級預覽）</button></div>';
+}
+
+// ── 換學期帶入＋年級升級（Ticket D）──
+// 管理員按鈕觸發 → adminRolloverPreview 產生規劃 → 預覽表逐列可修（動作/新班名）→
+// 確認套用 adminRolloverApply（每列只送 classId/action/newName，其餘後端重算）。
+const ROLLOVER_ACTION_LABELS = { advance: '帶入升級', graduate: '畢業', keep: '原樣保留' };
+let rolloverRows = null; // 最近一次 preview 的 rows（套用時依 DOM 逐列讀回 admin 修改值）
+
+function openRolloverModal() {
+  rolloverRows = null;
+  const semesters = (bootstrapData.semesters || []).slice().sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+  if (semesters.length < 2) { showToast('至少需要兩個學期才能執行帶入', 'error'); return; }
+  const currentId = bootstrapData.semester || semesters[semesters.length - 1].id;
+  const curIdx = semesters.findIndex(function (s) { return s.id === currentId; });
+  const defaultTo = curIdx !== -1 ? semesters[curIdx].id : semesters[semesters.length - 1].id;
+  const defaultFrom = curIdx > 0 ? semesters[curIdx - 1].id : semesters[0].id;
+
+  function semOptions(selectedId) {
+    return semesters.map(function (s) {
+      return '<option value="' + escapeHtml(s.id) + '"' + (s.id === selectedId ? ' selected' : '') + '>' + escapeHtml(s.label || s.id) + '</option>';
+    }).join('');
+  }
+
+  openModal('帶入上學期名單（升級預覽）',
+    '<p class="field-hint">升級只處理既有班級的改名與畢業；新一年級班級請用 Excel 匯入或手動新增。' +
+    '同學年換學期（如 114-1→114-2）名單自動沿用，無需執行。</p>' +
+    '<div class="row">' +
+      '<div class="field"><label>來源學期</label><select id="roll-from">' + semOptions(defaultFrom) + '</select></div>' +
+      '<div class="field"><label>目標學期</label><select id="roll-to">' + semOptions(defaultTo) + '</select></div>' +
+    '</div>' +
+    '<button type="button" class="btn btn-primary" id="roll-preview-btn">產生預覽</button>' +
+    '<div id="roll-preview" style="margin-top:14px;"></div>',
+    { wide: true });
+
+  $('roll-preview-btn').addEventListener('click', async function () {
+    const btn = this;
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCall('adminRolloverPreview', { fromSemester: $('roll-from').value, toSemester: $('roll-to').value });
+        rolloverRows = (res && res.rows) || [];
+        renderRolloverPreview();
+      });
+    } catch (err) { showToast('預覽失敗：' + err.message, 'error'); }
+  });
+}
+
+function renderRolloverPreview() {
+  const el = $('roll-preview');
+  if (!el) return;
+  if (!rolloverRows || !rolloverRows.length) { el.innerHTML = '<div class="empty-hint">沒有可處理的班級（停用/已刪除班級不納入）。</div>'; return; }
+  el.innerHTML =
+    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>原班名</th><th>動作</th><th>新班名</th><th>導師</th><th>原因／提示</th></tr></thead><tbody>' +
+    rolloverRows.map(function (r, i) {
+      const actionSel = '<select data-roll-action="' + i + '">' +
+        ['advance', 'graduate', 'keep'].map(function (a) {
+          return '<option value="' + a + '"' + (a === r.action ? ' selected' : '') + '>' + ROLLOVER_ACTION_LABELS[a] + '</option>';
+        }).join('') + '</select>';
+      const nameInput = '<input type="text" data-roll-newname="' + i + '" maxlength="20" value="' + escapeHtml(r.newName || '') + '"' +
+        (r.action === 'advance' ? '' : ' disabled') + ' style="min-width:110px;">';
+      return '<tr' + (r.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+        '<td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
+        '<td data-label="原班名">' + escapeHtml(r.displayName || r.name) + '</td>' +
+        '<td data-label="動作">' + actionSel + '</td>' +
+        '<td data-label="新班名">' + nameInput + '</td>' +
+        '<td data-label="導師">' + escapeHtml((r.tutors || []).join('、')) + '</td>' +
+        '<td data-label="原因／提示">' + escapeHtml(r.reason || '') + '</td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<p class="field-hint">標黃列表示系統無法完全確定（如修業年限未設定），請逐列確認動作與新班名。</p>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="button" class="btn btn-primary" id="roll-apply-btn">確認套用</button></div>';
+
+  // 動作切換 → 新班名輸入框只在「帶入升級」時可編輯（listener 掛容器上，用 dataset 旗標
+  // 防重複「產生預覽」時重複掛載）
+  if (!el.dataset.rollBound) {
+    el.dataset.rollBound = '1';
+    el.addEventListener('change', function (e) {
+      const sel = e.target.closest('[data-roll-action]');
+      if (!sel) return;
+      const input = el.querySelector('[data-roll-newname="' + sel.dataset.rollAction + '"]');
+      if (input) input.disabled = sel.value !== 'advance';
+    });
+  }
+
+  $('roll-apply-btn').addEventListener('click', async function () {
+    const btn = this;
+    const rows = rolloverRows.map(function (r, i) {
+      const sel = el.querySelector('[data-roll-action="' + i + '"]');
+      const input = el.querySelector('[data-roll-newname="' + i + '"]');
+      const action = sel ? sel.value : r.action;
+      return { classId: r.classId, action: action, newName: action === 'advance' ? (input ? input.value.trim() : r.newName) : null };
+    });
+    const nAdv = rows.filter(function (r) { return r.action === 'advance'; }).length;
+    const nGrad = rows.filter(function (r) { return r.action === 'graduate'; }).length;
+    if (!confirm('將改名 ' + nAdv + ' 班、畢業 ' + nGrad + ' 班，確定套用？（原樣保留 ' + (rows.length - nAdv - nGrad) + ' 班不變動）')) return;
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCall('adminRolloverApply', {
+          fromSemester: $('roll-from').value, toSemester: $('roll-to').value, rows: rows,
+        });
+        bootstrapData.classes = res.classes;
+        renderNav();
+        const a = res.applied || {};
+        let html = '<div class="empty-hint" style="color:var(--color-success);">套用完成：改名 ' + (a.advanced || 0) +
+          ' 班、畢業 ' + (a.graduated || 0) + ' 班、原樣保留 ' + (a.kept || 0) + ' 班。</div>';
+        if (res.errors && res.errors.length) {
+          html += '<div class="empty-hint" style="color:var(--color-danger);">失敗 ' + res.errors.length + ' 列：</div><ul>' +
+            res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列（' + escapeHtml(er.classId || '') + '）：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+        }
+        html += '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button></div>';
+        el.innerHTML = html;
+        showToast('升級套用完成', res.errors && res.errors.length ? 'info' : 'success');
+        if (adminTab === 'semesters') renderAdminSemesters();
+      });
+    } catch (err) { showToast('套用失敗：' + err.message, 'error'); }
+  });
+}
+
+function openSemesterForm(sem) {
+  sem = sem || {};
+  const bodyHtml = '<form id="semester-form">' +
+    '<div class="field"><label>學期 ID（格式如 114-2）</label><input type="text" id="sem-id" value="' + escapeHtml(sem.id || '') + '" pattern="[0-9]{3}-[0-9]" ' + (sem.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>顯示名稱</label><input type="text" id="sem-label" value="' + escapeHtml(sem.label || '') + '"></div>' +
+    '<div class="row"><div class="field"><label>班會紀錄額度</label><input type="number" id="sem-quota-meeting" value="' + (sem.quotaMeeting || DEFAULT_QUOTA_MEETING) + '" min="1"></div>' +
+    '<div class="field"><label>導生活動額度</label><input type="number" id="sem-quota-activity" value="' + (sem.quotaActivity || DEFAULT_QUOTA_ACTIVITY) + '" min="1"></div></div>' +
+    '<div class="field"><label><input type="checkbox" id="sem-current" ' + (sem.isCurrent ? 'checked' : '') + '> 設為目前學期</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(sem.id ? '編輯學期' : '新增學期', bodyHtml);
+  $('semester-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const id = $('sem-id').value.trim();
+    if (!/^[0-9]{3}-[0-9]$/.test(id)) { showToast('學期 ID 格式須為 NNN-N，例如 114-2', 'error'); return; }
+    const entry = {
+      id: id, label: $('sem-label').value.trim(),
+      quotaMeeting: Number($('sem-quota-meeting').value) || DEFAULT_QUOTA_MEETING,
+      quotaActivity: Number($('sem-quota-activity').value) || DEFAULT_QUOTA_ACTIVITY,
+      isCurrent: $('sem-current').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertSemester', { semester: entry });
+        bootstrapData.semesters = res.semesters;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminSemesters();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="semester-new"]')) { openSemesterForm(); return; }
+  if (e.target.closest('[data-action="rollover-open"]')) { openRolloverModal(); return; }
+  const editBtn = e.target.closest('[data-action="semester-edit"]');
+  if (editBtn) openSemesterForm(semesterById(editBtn.dataset.id));
+});
+
+// ── 職員帳號 ──
+function renderAdminUsers() {
+  const users = bootstrapData.users || {};
+  const emails = Object.keys(users).filter(function (email) { return notDeleted(users[email]); });
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>職員帳號（admin / director）</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>角色</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    emails.map(function (email) {
+      const u = users[email] || {};
+      return '<tr><td data-label="Email">' + escapeHtml(email) + '</td><td data-label="姓名">' + escapeHtml(u.name || '') + '</td>' +
+        '<td data-label="角色">' + (u.role === 'admin' ? '管理員' : u.role === 'director' ? '學諮主任' : escapeHtml(u.role || '')) + '</td>' +
+        '<td data-label="狀態">' + (u.disabled ? '已停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="user-edit" data-email="' + escapeHtml(email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="user-delete" data-email="' + escapeHtml(email) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="user-new" style="margin-top:12px;">新增職員帳號</button></div>';
+}
+
+function openUserForm(email) {
+  const u = (email && bootstrapData.users && bootstrapData.users[email]) || {};
+  // 表單欄位 id 用 uf- 前綴，避免與 header 的 #user-name 元素撞 id（getElementById 會抓錯）。
+  const bodyHtml = '<form id="user-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="uf-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="uf-name" value="' + escapeHtml(u.name || '') + '"></div>' +
+    '<div class="field"><label>角色</label><select id="uf-role"><option value="admin"' + (u.role === 'admin' ? ' selected' : '') + '>管理員</option><option value="director"' + (u.role === 'director' ? ' selected' : '') + '>學諮主任</option></select></div>' +
+    '<div class="field"><label><input type="checkbox" id="uf-disabled" ' + (u.disabled ? 'checked' : '') + '> 停用此帳號</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(email ? '編輯職員帳號' : '新增職員帳號', bodyHtml);
+  $('user-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const targetEmail = $('uf-email').value.trim();
+    if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const entry = { name: $('uf-name').value.trim(), role: $('uf-role').value, disabled: $('uf-disabled').checked };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertUser', { email: targetEmail, user: entry });
+        bootstrapData.users = res.users;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminUsers();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="user-new"]')) { openUserForm(null); return; }
+  const editBtn = e.target.closest('[data-action="user-edit"]');
+  if (editBtn) { openUserForm(editBtn.dataset.email); return; }
+  const delBtn = e.target.closest('[data-action="user-delete"]');
+  if (delBtn) {
+    const email = delBtn.dataset.email;
+    const u = (bootstrapData.users && bootstrapData.users[email]) || null;
+    if (!u) return;
+    deleteEntity({
+      btn: delBtn, name: u.name || email, action: 'adminUpsertUser', payload: { email: email, user: { deleted: true } },
+      onDone: function (res) { bootstrapData.users = res.users; renderAdminUsers(); },
+    });
+  }
+});
+
+// ── Excel 匯入導師名單 v3：格式自動偵測＋差異預覽核對（Ticket E）──
+// 支援兩種格式：
+//   標準範本——表頭：學院 / 系所 / 導師制度 / 班級名稱(原始) / 班級顯示名稱(可修改) /
+//   應繳班會份數 / 導師1姓名 / 導師1email / 導師2姓名 / 導師2email（備註欄忽略）。
+//   統計表——學諮中心「班級、家族會議記錄暨班級業務統計」：分頁=學院、表頭 row0~4、
+//   資料自 row5，col0=系別(合併儲存格 forward-fill)、col2=班級、col3=導師姓名、col4=應開份數。
+// 兩種格式解析後統一為相同中間格式 rows＋flags，共用 email 姓名比對與差異預覽；
+// 確認匯入只送勾選列，沿用後端 adminImportRoster（fail-closed 驗證都在後端）。
+let _sheetJsLoading = null;
+function ensureSheetJsLoaded() {
+  if (window.XLSX) return Promise.resolve();
+  if (_sheetJsLoading) return _sheetJsLoading;
+  _sheetJsLoading = new Promise(function (resolve, reject) {
+    const s = document.createElement('script');
+    s.src = 'https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js';
+    s.onload = resolve;
+    s.onerror = function () { reject(new Error('SheetJS 載入失敗，請確認網路連線')); };
+    document.head.appendChild(s);
+  });
+  return _sheetJsLoading;
+}
+
+// __IMPORT_PARSER_START__
+// 匯入解析器（純函式區）：test/import-parser.test.js 以本標記從 dev/index.html 抽取本區段，
+// 在 node:vm 沙箱內單元測試（比照 test/harness.js 精神）。因此本區段**禁止**依賴
+// DOM / bootstrapData / XLSX / escapeHtml 等外部符號——輸入一律由呼叫端整理好傳入。
+
+// 與 CLASS_NAME_RE 同值（本區段須自足以便測試抽取；改動白名單時兩處同步）。
+const IMPORT_CLASS_NAME_RE_ = /^[A-Za-z0-9一-鿿]{1,20}$/;
+
+// 格式自動偵測：任一分頁 row2 col0==='系別' 且 row2 col2==='班級' → 統計表格式；否則標準範本。
+// sheets = [{ name, rows }]，rows 為 sheet_to_json({header:1}) 的二維陣列。
+function detectImportFormat(sheets) {
+  const hit = (sheets || []).some(function (sh) {
+    const r2 = (sh && sh.rows && sh.rows[2]) || [];
+    return String(r2[0] == null ? '' : r2[0]).trim() === '系別' && String(r2[2] == null ? '' : r2[2]).trim() === '班級';
+  });
+  return hit ? 'stats' : 'standard';
+}
+
+function statsCell_(row, i) {
+  const v = (row || [])[i];
+  return String(v == null ? '' : v).trim();
+}
+
+// 特殊班名檢查：回 uncertain 原因字串或 null。
+function statsClassNameIssue_(name) {
+  if (name.indexOf('共同指導') !== -1) return '含「共同指導」，請人工確認';
+  if (name === '家族') return '班名「家族」需展開為各導師一班，請人工確認';
+  if (name.indexOf('海青') !== -1) return '海青班，請人工確認';
+  if (!IMPORT_CLASS_NAME_RE_.test(name)) return '班名含空白/符號等非法字元，請修改';
+  return null;
+}
+
+function addFlagReason_(flags, reason) {
+  flags.uncertain = true;
+  flags.reason = flags.reason ? flags.reason + '；' + reason : reason;
+}
+
+// 統計表解析：輸出與標準範本相同的中間格式（requiredMeetingCount 空白＝undefined，
+// 不是 null——後端「未帶＝保留既有覆寫」語意依賴這點）＋每列 flags {uncertain, reason, type}。
+// 規則（依 114-2 實檔實測）：
+// - 分頁 row0 col0=學院名；含「、」（如「獸醫學院、國際學院、達人學院」合併分頁）→
+//   學院不明，整頁 collegeName 空、逐列標 uncertain。
+// - col0 系別為合併儲存格 → forward-fill；「XX合計」「合計」列＝小計，跳過且不污染 forward-fill。
+// - 班級空但有導師的列：col4 有值 → 家族導師（每人獨立一班，班名=「家族」+姓名*）；
+//   col4 空 → 上一個班級列的導師2；上一列已有導師2 或找不到可併入列 → 標 uncertain。
+//   *規格原訂「家族-姓名」，但 '-' 不在班名白名單（會被後端 fail-closed 拒絕），故直接相連。
+// - 特殊班名（共同指導/家族/海青/非法字元）→ 標 uncertain（預覽中預設不勾、班名可改）。
+function parseStatsWorkbook(sheets) {
+  const out = [];
+  (sheets || []).forEach(function (sh) {
+    const rows = (sh && sh.rows) || [];
+    const collegeRaw = statsCell_(rows[0], 0);
+    const mergedCollege = collegeRaw.indexOf('、') !== -1;
+    const collegeName = mergedCollege ? '' : collegeRaw;
+    let currentDept = '';
+    let lastClassRow = null; // 本分頁最近一個「一般班級」列（導師2併入目標）
+    for (let i = 5; i < rows.length; i++) {
+      const deptCell = statsCell_(rows[i], 0);
+      const className = statsCell_(rows[i], 2);
+      const tutor = statsCell_(rows[i], 3);
+      const countCell = statsCell_(rows[i], 4);
+      if (deptCell && /合計$/.test(deptCell)) continue;   // 小計列：跳過、不更新 currentDept
+      if (deptCell) currentDept = deptCell;               // 系別合併儲存格 forward-fill
+      if (!className && !tutor) continue;                 // 空列（含尾端大量空白列）
+      // 全表統計列（實檔每分頁底部一列：導師欄=「264/341」之類的已開/應開比值）→ 跳過。
+      if (tutor && /^[0-9][0-9\/.%]*$/.test(tutor)) continue;
+
+      const flags = { uncertain: false, reason: null, type: null };
+      if (mergedCollege) addFlagReason_(flags, '學院不明（合併分頁）');
+      // 應開份數：空白=undefined（後端保留既有覆寫）；數字照帶；「實習」＝本學期免繳
+      // （系統慣例 override 0，同班級表單「0＝本學期免繳，如實習」）但標 uncertain 供確認；
+      // 其他非數字照帶原值並標 uncertain（勾選匯入會被後端擋下、逐列回報）。
+      let countVal;
+      if (countCell === '') {
+        countVal = undefined;
+      } else if (!isNaN(Number(countCell))) {
+        countVal = Number(countCell);
+      } else if (countCell === '實習') {
+        countVal = 0;
+        addFlagReason_(flags, '應開份數「實習」→ 視為免繳（0），請確認');
+      } else {
+        countVal = countCell;
+        addFlagReason_(flags, '應開份數非數字（' + countCell + '），請確認');
+      }
+      const base = {
+        collegeName: collegeName, deptName: currentDept, systemName: '',
+        classNameRaw: className, classDisplayName: '',
+        requiredMeetingCount: countVal,
+        tutor1Name: tutor, tutor1Email: '', tutor2Name: '', tutor2Email: '',
+        flags: flags,
+      };
+
+      if (!className && tutor) {
+        if (countCell !== '') {
+          // 家族導師：col4 有自己的應開份數 → 每人獨立一班
+          base.classNameRaw = '家族' + tutor;
+          flags.type = 'family';
+          out.push(base);
+        } else if (lastClassRow && lastClassRow.deptName === currentDept && !lastClassRow.tutor2Name) {
+          lastClassRow.tutor2Name = tutor;   // 上一個班級列的導師2
+        } else {
+          addFlagReason_(flags, (lastClassRow && lastClassRow.deptName === currentDept)
+            ? '第三位導師，請人工確認' : '找不到可併入的班級列，請人工確認');
+          out.push(base);
+        }
+        continue;
+      }
+
+      // 一般班級列
+      const issue = statsClassNameIssue_(className);
+      if (issue) addFlagReason_(flags, issue);
+      out.push(base);
+      lastClassRow = base;
+    }
+  });
+  return out;
+}
+
+// 從 classes（含墓碑——歷史班的導師 email 也是有效比對來源）的正式 tutors 建
+// 「姓名 → email 陣列（去重）」對照表。只認正式 tutors，不採 suggestedTutors（未經確認）。
+function buildTutorEmailIndex(classes) {
+  const idx = {};
+  (classes || []).forEach(function (c) {
+    ((c && c.tutors) || []).forEach(function (t) {
+      const name = String((t && t.name) || '').trim();
+      const email = String((t && t.email) || '').trim().toLowerCase();
+      if (!name || !email) return;
+      if (!idx[name]) idx[name] = [];
+      if (idx[name].indexOf(email) === -1) idx[name].push(email);
+    });
+  });
+  return idx;
+}
+
+// email 姓名比對（兩種格式共用；僅在該列該導師 email 空白時）：
+// 唯一命中 → 自動帶入（emailStatus 'auto'）；同名多 email → 留白、標 uncertain；
+// 無命中 → 留白（'missing'，UI 標黃待補，不算 uncertain——匯入後可再於班級管理補上）。
+function applyEmailLookup(rows, emailIndex) {
+  (rows || []).forEach(function (r) {
+    ['1', '2'].forEach(function (n) {
+      const name = String(r['tutor' + n + 'Name'] || '').trim();
+      if (!name || String(r['tutor' + n + 'Email'] || '').trim()) return;
+      const hits = (emailIndex || {})[name] || [];
+      if (hits.length === 1) {
+        r['tutor' + n + 'Email'] = hits[0];
+        r.flags['tutor' + n + 'EmailStatus'] = 'auto';
+      } else if (hits.length > 1) {
+        r.flags['tutor' + n + 'EmailStatus'] = 'ambiguous';
+        addFlagReason_(r.flags, '「' + name + '」同名多 email，請確認');
+      } else {
+        r.flags['tutor' + n + 'EmailStatus'] = 'missing';
+      }
+    });
+  });
+  return rows;
+}
+
+// 差異比對（上傳前核對用）：以（系所名→現有系所、(deptId, 班名)→現有班級）比對現況。
+// status：'new'（新班級）/ 'unchanged'（無變動，預設不勾）/ 'tutor_changed'（導師變更）/
+// 'tutor2_added'（新增導師2）。導師比對以姓名為主；匯入列 email 空白時不比 email
+// （統計表無 email 欄，自動帶入值本來就取自現況）。
+function classifyImportRow(row, departments, classes) {
+  const deptName = String(row.deptName || '').trim();
+  const dept = (departments || []).filter(function (d) { return d && d.name === deptName; })[0];
+  if (!dept) return { status: 'new', currentTutors: [] };
+  const className = String(row.classNameRaw || '').trim();
+  const cls = (classes || []).filter(function (c) { return c && c.deptId === dept.id && c.name === className; })[0];
+  if (!cls) return { status: 'new', currentTutors: [] };
+  const current = (cls.tutors || []).map(function (t) {
+    return { name: String((t && t.name) || '').trim(), email: String((t && t.email) || '').trim().toLowerCase() };
+  });
+  const imported = [];
+  if (String(row.tutor1Name || '').trim()) imported.push({ name: String(row.tutor1Name).trim(), email: String(row.tutor1Email || '').trim().toLowerCase() });
+  if (String(row.tutor2Name || '').trim()) imported.push({ name: String(row.tutor2Name).trim(), email: String(row.tutor2Email || '').trim().toLowerCase() });
+  if (!imported.length) return { status: 'unchanged', currentTutors: current };  // 本列未帶導師 → 後端沿用既有
+  function sameTutor(cur, imp) { return cur && cur.name === imp.name && (!imp.email || cur.email === imp.email); }
+  const identical = imported.length === current.length &&
+    imported.every(function (t, i) { return sameTutor(current[i], t); });
+  if (identical) return { status: 'unchanged', currentTutors: current };
+  if (current.length === 1 && imported.length === 2 && sameTutor(current[0], imported[0])) {
+    return { status: 'tutor2_added', currentTutors: current };
+  }
+  return { status: 'tutor_changed', currentTutors: current };
+}
+// __IMPORT_PARSER_END__
+
+let rosterRows = null; // 解析後的中間格式 rows（含 flags 與 diff），預覽表逐列可修
+
+function renderAdminRoster() {
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>Excel 匯入導師名單</h3>' +
+    '<p class="field-hint">支援兩種格式（自動偵測）：<b>標準範本</b>（學院／系所／導師制度／班級名稱(原始)／班級顯示名稱／' +
+    '應繳班會份數／導師1姓名／導師1email／導師2姓名／導師2email）；或<b>統計表</b>（「班級、家族會議記錄暨班級業務統計」，' +
+    '分頁＝學院、欄位＝系別/班級/導師姓名/應開份數）。統計表格式的家族導師會展開為每導師一班；' +
+    'email 空白列匯入後導師無法核章，請儘速在班級管理補上。上傳後先產生差異預覽，逐列核對勾選再確認匯入。</p>' +
+    '<input type="file" id="roster-file" accept=".xlsx,.xls,.csv" />' +
+    '<div id="roster-format" class="field-hint" style="margin-top:8px; font-weight:600;"></div>' +
+    '<div id="roster-preview" style="margin-top:16px;"></div>' +
+    '</div>';
+  $('roster-file').addEventListener('change', onRosterFileChange);
+}
+
+async function onRosterFileChange(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  $('roster-preview').innerHTML = '<div class="empty-hint">解析中…</div>';
+  $('roster-format').textContent = '';
+  try {
+    await ensureSheetJsLoaded();
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheets = wb.SheetNames.map(function (n) {
+      return { name: n, rows: XLSX.utils.sheet_to_json(wb.Sheets[n], { header: 1, defval: '' }) };
+    });
+    const format = detectImportFormat(sheets);
+    $('roster-format').textContent = '偵測為：' + (format === 'stats' ? '統計表格式（班級、家族會議記錄暨班級業務統計）' : '標準範本格式');
+    let rows;
+    if (format === 'stats') {
+      rows = parseStatsWorkbook(sheets);
+    } else {
+      const objRows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+      rows = objRows.map(function (row) {
+        const countRaw = String(row['應繳班會份數'] != null ? row['應繳班會份數'] : '').trim();
+        return {
+          collegeName: String(row['學院'] || '').trim(),
+          deptName: String(row['系所'] || '').trim(),
+          systemName: String(row['導師制度'] || '').trim(),
+          classNameRaw: String(row['班級名稱(原始)'] || row['班級名稱（原始）'] || '').trim(),
+          classDisplayName: String(row['班級顯示名稱(可修改)'] || row['班級顯示名稱（可修改）'] || '').trim(),
+          // 空白＝undefined（後端「未帶＝保留既有覆寫」），不是空字串/null
+          requiredMeetingCount: countRaw === '' ? undefined : countRaw,
+          tutor1Name: String(row['導師1姓名'] || '').trim(), tutor1Email: String(row['導師1email'] || '').trim(),
+          tutor2Name: String(row['導師2姓名'] || '').trim(), tutor2Email: String(row['導師2email'] || '').trim(),
+          flags: { uncertain: false, reason: null, type: null },
+        };
+      }).filter(function (r) { return r.deptName && r.classNameRaw; });
+      rows.forEach(function (r) {
+        if (!IMPORT_CLASS_NAME_RE_.test(r.classNameRaw)) addFlagReason_(r.flags, '班名含空白/符號等非法字元，請修改');
+      });
+    }
+    applyEmailLookup(rows, buildTutorEmailIndex(bootstrapData.classes || []));
+    rows.forEach(function (r) { r.diff = classifyImportRow(r, bootstrapData.departments || [], bootstrapData.classes || []); });
+    rosterRows = rows;
+    renderRosterPreview();
+  } catch (err) {
+    $('roster-preview').innerHTML = '<div class="empty-hint">解析失敗：' + escapeHtml(err.message) + '</div>';
+  }
+}
+
+const IMPORT_DIFF_LABELS = { new: '新班級', unchanged: '無變動', tutor_changed: '導師變更', tutor2_added: '新增導師2' };
+const IMPORT_DIFF_BADGE = { new: 'badge-approved', unchanged: 'badge-muted', tutor_changed: 'badge-pending_tutor', tutor2_added: 'badge-pending_tutor' };
+
+function importTutorText(list) {
+  return (list || []).map(function (t) { return t.name + (t.email ? '（' + t.email + '）' : ''); }).join('、') || '（無）';
+}
+
+// email 欄渲染：空白（missing/ambiguous）→ 可編輯 input 標黃；自動帶入 → 文字＋提示；有值 → 文字。
+function importEmailCell(r, i, n) {
+  const email = r['tutor' + n + 'Email'] || '';
+  const status = r.flags['tutor' + n + 'EmailStatus'];
+  if (!r['tutor' + n + 'Name']) return '';
+  if (status === 'missing' || status === 'ambiguous') {
+    return '<input type="text" data-roster-email' + n + '="' + i + '" value="' + escapeHtml(email) + '" placeholder="待補 email" style="min-width:130px; background:var(--color-warning-bg);">';
+  }
+  return escapeHtml(email) + (status === 'auto' ? ' <span class="field-hint">（依姓名自動帶入）</span>' : '');
+}
+
+function renderRosterPreview() {
+  if (!rosterRows || !rosterRows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列。</div>'; return; }
+  const counts = { new: 0, unchanged: 0, tutor_changed: 0, tutor2_added: 0, uncertain: 0 };
+  rosterRows.forEach(function (r) {
+    counts[r.diff.status]++;
+    if (r.flags.uncertain) counts.uncertain++;
+  });
+  $('roster-preview').innerHTML =
+    '<p class="field-hint">共 ' + rosterRows.length + ' 列：新班級 ' + counts.new + '、無變動 ' + counts.unchanged +
+    '、導師變更 ' + counts.tutor_changed + '、新增導師2 ' + counts.tutor2_added +
+    '、待人工確認（標黃）' + counts.uncertain + '。無變動與待確認列預設不勾選。</p>' +
+    '<div style="display:flex; gap:8px; margin-bottom:8px;">' +
+      '<button type="button" class="btn btn-sm" data-roster-select="all">全選</button>' +
+      '<button type="button" class="btn btn-sm" data-roster-select="none">全不選</button>' +
+      '<button type="button" class="btn btn-sm" data-roster-select="changed">只選有變動</button>' +
+    '</div>' +
+    '<div class="table-wrap"><table><thead><tr><th></th><th>學院</th><th>系所</th><th>班級</th>' +
+    '<th>導師1</th><th>Email1</th><th>導師2</th><th>Email2</th><th>應繳</th><th>狀態</th><th>原因／提示</th></tr></thead><tbody>' +
+    rosterRows.map(function (r, i) {
+      const checked = !(r.flags.uncertain || r.diff.status === 'unchanged');
+      const nameCell = r.flags.uncertain
+        ? '<input type="text" data-roster-name="' + i + '" value="' + escapeHtml(r.classNameRaw) + '" maxlength="20" style="min-width:110px;">'
+        : escapeHtml(r.classNameRaw);
+      const notes = [];
+      if (r.flags.reason) notes.push(r.flags.reason);
+      if (r.diff.status === 'tutor_changed' || r.diff.status === 'tutor2_added') {
+        const imp = [];
+        if (r.tutor1Name) imp.push({ name: r.tutor1Name, email: r.tutor1Email });
+        if (r.tutor2Name) imp.push({ name: r.tutor2Name, email: r.tutor2Email });
+        notes.push('現行：' + importTutorText(r.diff.currentTutors) + ' → 匯入：' + importTutorText(imp));
+      }
+      return '<tr data-roster-row="' + i + '"' + (r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+        '<td><input type="checkbox" data-roster-check="' + i + '"' + (checked ? ' checked' : '') + '></td>' +
+        '<td data-label="學院">' + escapeHtml(r.collegeName) + '</td>' +
+        '<td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
+        '<td data-label="班級">' + nameCell + (r.flags.type === 'family' ? ' <span class="badge badge-type">家族</span>' : '') + '</td>' +
+        '<td data-label="導師1">' + escapeHtml(r.tutor1Name) + '</td>' +
+        '<td data-label="Email1">' + importEmailCell(r, i, '1') + '</td>' +
+        '<td data-label="導師2">' + escapeHtml(r.tutor2Name) + '</td>' +
+        '<td data-label="Email2">' + importEmailCell(r, i, '2') + '</td>' +
+        '<td data-label="應繳">' + (r.requiredMeetingCount === undefined ? '<span class="field-hint">（制度預設）</span>' : escapeHtml(String(r.requiredMeetingCount))) + '</td>' +
+        '<td data-label="狀態"><span class="badge ' + IMPORT_DIFF_BADGE[r.diff.status] + '">' + IMPORT_DIFF_LABELS[r.diff.status] + '</span></td>' +
+        '<td data-label="原因／提示">' + escapeHtml(notes.join('；')) + '</td></tr>';
+    }).join('') + '</tbody></table></div>' +
+    '<p class="field-hint">勾選＝確認匯入該列（上傳前的核對就在此完成）；標黃列請確認班名/導師後再勾選。' +
+    '確認匯入後由後端逐列驗證與寫入，單列失敗不影響其他列。</p>' +
+    '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入勾選列</button>';
+
+  // 全選／全不選／只選有變動（有變動＝新班級/導師變更/新增導師2，且非待確認列）
+  $('roster-preview').querySelectorAll('[data-roster-select]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      const mode = btn.dataset.rosterSelect;
+      rosterRows.forEach(function (r, i) {
+        const cb = document.querySelector('[data-roster-check="' + i + '"]');
+        if (!cb) return;
+        if (mode === 'all') cb.checked = true;
+        else if (mode === 'none') cb.checked = false;
+        else cb.checked = r.diff.status !== 'unchanged' && !r.flags.uncertain;
+      });
+    });
+  });
+}
+
+document.body.addEventListener('click', async function (e) {
+  const btn = e.target.closest('[data-action="roster-confirm"]');
+  if (!btn || !rosterRows || !rosterRows.length) return;
+  const root = $('roster-preview');
+  const selected = [];
+  let badCount = 0;
+  rosterRows.forEach(function (r, i) {
+    const tr = root.querySelector('[data-roster-row="' + i + '"]');
+    const cb = root.querySelector('[data-roster-check="' + i + '"]');
+    if (!cb || !cb.checked) return;
+    const nameInput = root.querySelector('[data-roster-name="' + i + '"]');
+    const className = String(nameInput ? nameInput.value : r.classNameRaw).trim();
+    // 送出前用既有白名單再驗一次班名，不合法列擋下標紅
+    if (!CLASS_NAME_RE.test(className)) {
+      badCount++;
+      if (tr) tr.style.background = 'var(--color-danger-bg)';
+      return;
+    }
+    const e1 = root.querySelector('[data-roster-email1="' + i + '"]');
+    const e2 = root.querySelector('[data-roster-email2="' + i + '"]');
+    selected.push({
+      collegeName: r.collegeName, deptName: r.deptName, systemName: r.systemName,
+      classNameRaw: className, classDisplayName: r.classDisplayName,
+      requiredMeetingCount: r.requiredMeetingCount,  // undefined＝未帶（保留既有覆寫）
+      tutor1Name: r.tutor1Name, tutor1Email: String(e1 ? e1.value : r.tutor1Email).trim().toLowerCase(),
+      tutor2Name: r.tutor2Name, tutor2Email: String(e2 ? e2.value : r.tutor2Email).trim().toLowerCase(),
+    });
+  });
+  if (badCount) { showToast('有 ' + badCount + ' 列班名不合法（已標紅），請修正後再匯入', 'error'); return; }
+  if (!selected.length) { showToast('未勾選任何列', 'error'); return; }
+  try {
+    await withBtnPending(btn, async function () {
+      const res = await proxyCall('adminImportRoster', { rows: selected });
+      bootstrapData.colleges = res.colleges;
+      bootstrapData.departments = res.departments;
+      bootstrapData.tutorSystems = res.tutorSystems;
+      bootstrapData.classes = res.classes;
+      renderNav();
+      if (res.errors && res.errors.length) {
+        showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
+        $('roster-preview').innerHTML =
+          '<div class="empty-hint" style="color:var(--color-danger);">失敗列：</div>' +
+          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+      } else {
+        showToast('匯入完成，成功 ' + res.successCount + ' 列', 'success');
+        rosterRows = null;
+        renderAdminRoster();
+      }
+    });
+  } catch (err) {
+    showToast('匯入失敗：' + err.message, 'error');
+  }
+});
 </script>
-<p>導師資訊系統（正式版）前端尚未建置。</p>
 </body>
 </html>
