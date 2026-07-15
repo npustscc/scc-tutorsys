@@ -112,6 +112,10 @@
   th,td{text-align:left; padding:9px 8px; border-bottom:1px solid var(--color-border); vertical-align:middle;}
   th{color:var(--color-text-light); font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
   .table-wrap{overflow-x:auto;}
+  #roster-preview-table{min-width:1080px;}
+  #roster-preview-table td[data-label="班級"],
+  #roster-preview-table td[data-label="導師1"],
+  #roster-preview-table td[data-label="導師2"]{white-space:nowrap;}
 
   .empty-hint{color:var(--color-muted); text-align:center; padding:30px 10px; font-size:.9rem;}
   .attachment-list{list-style:none; margin:6px 0 0; padding:0; display:flex; flex-direction:column; gap:4px;}
@@ -1874,7 +1878,7 @@ function renderAdminColleges() {
 function openCollegeForm(college) {
   college = college || {};
   const bodyHtml = '<form id="college-form">' +
-    '<div class="field"><label>學院 ID</label><input type="text" id="college-id" value="' + escapeHtml(college.id || '') + '" ' + (college.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>學院 ID</label><input type="text" id="college-id" value="' + escapeHtml(college.id || '') + '" ' + (college.id ? 'readonly' : 'placeholder="留空自動由名稱產生"') + '></div>' +
     '<div class="field"><label>學院名稱</label><input type="text" id="college-name" value="' + escapeHtml(college.name || '') + '" required></div>' +
     '<div class="field"><label>排序（數字越小越前面）</label><input type="number" id="college-order" value="' + (college.order != null ? college.order : (bootstrapData.colleges || []).length) + '"></div>' +
     '<div class="field"><label><input type="checkbox" id="college-disabled" ' + (college.disabled ? 'checked' : '') + '> 停用</label></div>' +
@@ -1934,7 +1938,7 @@ function renderAdminTutorSystems() {
 function openTutorSystemForm(sys) {
   sys = sys || {};
   const bodyHtml = '<form id="system-form">' +
-    '<div class="field"><label>制度 ID</label><input type="text" id="system-id" value="' + escapeHtml(sys.id || '') + '" ' + (sys.id ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>制度 ID</label><input type="text" id="system-id" value="' + escapeHtml(sys.id || '') + '" ' + (sys.id ? 'readonly' : 'placeholder="留空自動由名稱產生"') + '></div>' +
     '<div class="field"><label>制度名稱</label><input type="text" id="system-name" value="' + escapeHtml(sys.name || '') + '" required></div>' +
     '<div class="field"><label>應繳班會份數</label><input type="number" id="system-count" value="' + (sys.requiredMeetingCount != null ? sys.requiredMeetingCount : '') + '" min="0"></div>' +
     '<div class="field"><label>修業年限（年，1–7；留空＝未設定）</label><input type="number" id="system-duration" value="' + (sys.durationYears != null ? sys.durationYears : '') + '" min="1" max="7">' +
@@ -2970,6 +2974,9 @@ function renderAdminRoster() {
     '應繳班會份數／導師1姓名／導師1email／導師2姓名／導師2email）；或<b>統計表</b>（「班級、家族會議記錄暨班級業務統計」，' +
     '分頁＝學院、欄位＝系別/班級/導師姓名/應開份數）。統計表格式的家族導師會展開為每導師一班；' +
     'email 空白列匯入後導師無法核章，請儘速在班級管理補上。上傳後先產生差異預覽，逐列核對勾選再確認匯入。</p>' +
+    '<p class="field-hint">已畢業／已停用班級會被拒絕匯入（逐列錯誤顯示「class disabled: 班級ID」），這是設計如此、用來避免誤蓋畢業班資料。' +
+    '若確實需要為該班補匯舊學期資料：先到「班級」頁籤編輯該班級、勾選「啟用」並儲存，重新執行本頁匯入；匯入完成後再回到該班編輯，' +
+    '取消勾選「啟用」以還原停用／畢業狀態（此還原不影響已記錄的畢業學期）。</p>' +
     '<input type="file" id="roster-file" accept=".xlsx,.xls,.csv" />' +
     '<div id="roster-format" class="field-hint" style="margin-top:8px; font-weight:600;"></div>' +
     '<div id="roster-preview" style="margin-top:16px;"></div>' +
@@ -3058,7 +3065,7 @@ function renderRosterPreview() {
       '<button type="button" class="btn btn-sm" data-roster-select="none">全不選</button>' +
       '<button type="button" class="btn btn-sm" data-roster-select="changed">只選有變動</button>' +
     '</div>' +
-    '<div class="table-wrap"><table><thead><tr><th></th><th>學院</th><th>系所</th><th>班級</th>' +
+    '<div class="table-wrap"><table id="roster-preview-table"><thead><tr><th></th><th>學院</th><th>系所</th><th>班級</th>' +
     '<th>導師1</th><th>Email1</th><th>導師2</th><th>Email2</th><th>應繳</th><th>狀態</th><th>原因／提示</th></tr></thead><tbody>' +
     rosterRows.map(function (r, i) {
       const checked = !(r.flags.uncertain || r.diff.status === 'unchanged');
@@ -3145,9 +3152,12 @@ document.body.addEventListener('click', async function (e) {
       renderNav();
       if (res.errors && res.errors.length) {
         showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
+        const hasDisabledClassError = res.errors.some(function (er) { return /class disabled:/.test(er.error || ''); });
         $('roster-preview').innerHTML =
           '<div class="empty-hint" style="color:var(--color-danger);">失敗列：</div>' +
-          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>' +
+          (hasDisabledClassError ? '<p class="field-hint">「class disabled」＝該班級已畢業／已停用，匯入被拒絕（設計如此）。' +
+            '如需補匯：先到「班級」頁籤編輯該班、勾選「啟用」並儲存，重新上傳匯入；完成後再取消勾選「啟用」還原狀態。</p>' : '');
       } else {
         showToast('匯入完成，成功 ' + res.successCount + ' 列', 'success');
         rosterRows = null;
