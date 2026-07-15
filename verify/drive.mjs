@@ -228,6 +228,75 @@ await flow('C', async () => {
   await page.locator('#modal-box [data-action="close-modal"]').click();
 });
 
+// ══ C2：班級管理版面（學院 tabs＋系所分群＋收合/展開，Ticket 班級tab）═══════════
+// 種子：農學院（農園系 3 班＋森林系 1 班）、獸醫學院（獸醫系 1 班）。
+await flow('C2', async () => {
+  await page.locator('[data-admin-tab="classes"]').click();
+  await check('C2', '學院 tabs 帶班級數：農學院（4）＋獸醫學院（1）', async () => {
+    await page.locator('#admin-tab-content [data-class-tab]').first().waitFor({ timeout: 5000 });
+    const tabs = await page.locator('#admin-tab-content [data-class-tab]').allTextContents();
+    evid['C2-class-tabs'] = JSON.stringify(tabs);
+    expect(tabs.length === 2 && tabs[0] === '農學院（4）' && tabs[1] === '獸醫學院（1）', 'tabs=' + JSON.stringify(tabs));
+  });
+  await check('C2', '系所群組標題列：農園系（3 班）＋森林系（1 班）', async () => {
+    const heads = await page.locator('#admin-tab-content .dept-group-head').allTextContents();
+    evid['C2-dept-heads'] = JSON.stringify(heads);
+    expect(heads.some((h) => h.includes('農園系（3 班）')), '無農園系標題：' + JSON.stringify(heads));
+    expect(heads.some((h) => h.includes('森林系（1 班）')), '無森林系標題：' + JSON.stringify(heads));
+  });
+  await shot(page, 'C2-班級tab全貌');
+
+  // 收合農園系 → 該組班級列消失、其他組不受影響
+  await page.locator('[data-class-dept-toggle="農園系"]').click();
+  await check('C2', '收合農園系：該組班級列消失、森林系列仍在', async () => {
+    expect((await page.locator('#admin-tab-content tr', { hasText: '農園系_四技一A' }).count()) === 0, '農園系_四技一A 仍可見');
+    expect((await page.locator('#admin-tab-content tr', { hasText: '森林系_家族陳美惠' }).count()) === 1, '森林系列消失了');
+  });
+
+  // 切 tab 來回 → 收合狀態保留（狀態存模組層級變數非 DOM）
+  await page.locator('[data-class-tab="獸醫學院"]').click();
+  await check('C2', '獸醫學院 tab：獸醫系（1 班）群組與班級列', async () => {
+    await page.locator('#admin-tab-content .dept-group-head', { hasText: '獸醫系（1 班）' }).waitFor({ timeout: 3000 });
+    expect((await page.locator('#admin-tab-content tr', { hasText: '獸醫系_四技四A' }).count()) === 1, '獸醫班列不可見');
+  });
+  await page.locator('[data-class-tab="農學院"]').click();
+  await check('C2', '切 tab 來回後：農園系仍收合、森林系仍展開', async () => {
+    await page.locator('#admin-tab-content .dept-group-head', { hasText: '農園系' }).waitFor({ timeout: 3000 });
+    expect((await page.locator('#admin-tab-content tr', { hasText: '農園系_四技一A' }).count()) === 0, '收合狀態掉了');
+    expect((await page.locator('#admin-tab-content tr', { hasText: '森林系_家族陳美惠' }).count()) === 1, '森林系列消失了');
+  });
+  await shot(page, 'C2-班級tab-收合狀態');
+
+  // 群組內「編輯」開 modal 正常；儲存後重繪仍保留收合
+  await page.locator('#admin-tab-content tr', { hasText: '森林系_家族陳美惠' }).locator('[data-action="class-edit"]').click();
+  await check('C2', '群組內「編輯」開 modal 正常', async () => {
+    await page.locator('#class-form').waitFor({ timeout: 3000 });
+  });
+  await page.locator('#class-form button[type=submit]').click();
+  await check('C2', '編輯儲存後重繪：農園系收合狀態保留', async () => {
+    // closeModal 只移除 overlay 的 open class（DOM 保留），等 '#modal-overlay.open' 不再匹配即關閉
+    await page.locator('#modal-overlay.open').waitFor({ state: 'detached', timeout: 8000 });
+    await page.locator('#admin-tab-content .dept-group-head', { hasText: '農園系' }).waitFor({ timeout: 3000 });
+    expect((await page.locator('#admin-tab-content tr', { hasText: '農園系_四技一A' }).count()) === 0, '編輯重繪後收合狀態掉了');
+    expect((await page.locator('#admin-tab-content tr', { hasText: '森林系_家族陳美惠' }).count()) === 1, '森林系列消失了');
+  });
+
+  // 全部展開／全部收合（作用於當前 tab 的所有系所群組）
+  await page.locator('[data-class-expand-all]').click();
+  await check('C2', '全部展開：農園系班級列恢復', async () => {
+    expect((await page.locator('#admin-tab-content tr', { hasText: '農園系_四技一A' }).count()) === 1, '展開後仍不可見');
+  });
+  await page.locator('[data-class-collapse-all]').click();
+  await check('C2', '全部收合：當前 tab 所有班級列消失（群組標題仍在）', async () => {
+    expect((await page.locator('#admin-tab-content tr', { hasText: '農園系_' }).count()) === 0, '農園系列仍可見');
+    expect((await page.locator('#admin-tab-content tr', { hasText: '森林系_家族' }).count()) === 0, '森林系列仍可見');
+    const heads = await page.locator('#admin-tab-content .dept-group-head').count();
+    expect(heads === 2, '群組標題數=' + heads);
+  });
+  await shot(page, 'C2-班級tab-全部收合');
+  await page.locator('[data-class-expand-all]').click();  // 還原展開，避免影響後續流程
+});
+
 // ══ D：換學期升級 ═══════════════════════════════════════════════════════════════
 await flow('D', async () => {
 await page.locator('[data-admin-tab="semesters"]').click();
@@ -274,7 +343,8 @@ await shot(page, 'D-套用結果摘要含撞名失敗');
 await page.locator('#modal-box [data-action="close-modal"]').last().click();
 
 await page.locator('[data-admin-tab="classes"]').click();
-await check('D', '班級列表：獸醫班已改名四技五A', async () => {
+await page.locator('[data-class-tab="獸醫學院"]').click();  // 獸醫班在獸醫學院分頁
+await check('D', '班級列表（獸醫學院 tab）：獸醫班已改名四技五A', async () => {
   await page.locator('#admin-tab-content tr', { hasText: '四技五A' }).waitFor({ timeout: 5000 });
 });
 await shot(page, 'D-班級列表改名生效');

@@ -126,6 +126,8 @@
   #roster-preview-table th:nth-child(8){width:58px;}
   #roster-preview-table th:nth-child(9){width:84px;}
   .roster-dept-head td{background:var(--color-bg); font-weight:700;}
+  /* 班級管理：系所群組標題列（點擊收合/展開） */
+  .dept-group-head td{background:var(--color-bg); font-weight:700; cursor:pointer; user-select:none;}
   #roster-preview-table .roster-dept-head input[type="text"]{width:auto; min-width:170px; display:inline-block; font-weight:700; vertical-align:middle;}
   #roster-preview-table td.roster-notes{font-size:.8rem; color:var(--color-text-light); min-width:140px;}
 
@@ -2236,6 +2238,31 @@ function requiredMeetingCountDisplay(c) {
   return '（未設定）';
 }
 
+// ── 班級管理視圖狀態（模組層級，切分頁/編輯後重繪都保留；重新整理頁面歸零）──
+let adminClassTab = null;                    // 當前學院分頁 key（=college.id；'' = 未分學院）
+const adminClassCollapsedDepts = new Set();  // 已收合的系所群組（deptId）
+
+// 班級 → 學院歸屬鏈：class.deptId → departments[].collegeId → colleges[].id。
+// 系所沒掛學院、或掛的學院已停用/刪除 → 歸「未分學院」（照樣顯示，資料不會憑空消失）。
+function classCollegeKey(cls) {
+  const dept = deptById(cls.deptId);
+  const college = (dept && dept.collegeId) ? collegeById(dept.collegeId) : null;
+  return (college && college.deleted !== true && !college.disabled) ? college.id : '';
+}
+
+function classRowHtml(c) {
+  return '<tr><td data-label="ID">' + escapeHtml(c.id) + '</td>' +
+    '<td data-label="顯示名稱">' + escapeHtml(c.displayName || c.name) + '</td>' +
+    '<td data-label="原始名稱">' + escapeHtml(c.name) + '</td>' +
+    '<td data-label="制度">' + escapeHtml((tutorSystemById(c.systemId) || {}).name || '（未設定）') + '</td>' +
+    '<td data-label="應繳份數">' + requiredMeetingCountDisplay(c) + '</td>' +
+    '<td data-label="導師">' + (c.tutors || []).map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
+    '<td data-label="狀態">' + (c.active === false ? '停用' : '啟用') + '</td>' +
+    '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+    '<button class="btn btn-sm" data-action="class-history" data-id="' + escapeHtml(c.id) + '">歷史</button> ' +
+    '<button class="btn btn-sm btn-danger" data-action="class-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
+}
+
 function renderAdminClasses() {
   const classes = (bootstrapData.classes || []).filter(notDeleted);
   const pending = pendingSuggestionList();
@@ -2258,24 +2285,87 @@ function renderAdminClasses() {
       }).join('') + '</tbody></table></div></div>'
     : '';
 
+  // 學院分頁（仿匯入預覽/統計頁）：依學院清單的排序出 tab（沒有班級的學院不出）；
+  // 「未分學院」（歸屬鏈斷掉的班）若有，固定放最後。
+  const byKey = {};
+  classes.forEach(function (c) {
+    const k = classCollegeKey(c);
+    (byKey[k] = byKey[k] || []).push(c);
+  });
+  const keys = (bootstrapData.colleges || []).filter(notDeleted).slice()
+    .sort(function (a, b) { return (a.order || 0) - (b.order || 0); })
+    .map(function (c) { return c.id; })
+    .filter(function (k) { return byKey[k]; });
+  if (byKey['']) keys.push('');
+  if (keys.indexOf(adminClassTab) === -1) adminClassTab = keys[0] || '';
+
+  let bodyHtml;
+  if (!classes.length) {
+    bodyHtml = '<div class="empty-hint">尚無班級。</div>';
+  } else {
+    const tabClasses = byKey[adminClassTab] || [];
+    // 分頁內依系所分群（依出現順序）；群組可收合（狀態在 adminClassCollapsedDepts）
+    const groupMap = {};
+    const groups = [];
+    tabClasses.forEach(function (c) {
+      const d = String(c.deptId || '');
+      if (!groupMap[d]) { groupMap[d] = { deptId: d, list: [] }; groups.push(groupMap[d]); }
+      groupMap[d].list.push(c);
+    });
+    const deptIdsCsv = groups.map(function (g) { return g.deptId; }).join(',');
+
+    bodyHtml =
+      '<div class="tab-bar">' + keys.map(function (k) {
+        const label = k === '' ? '未分學院' : ((collegeById(k) || {}).name || k);
+        return '<button type="button" class="tab-btn' + (k === adminClassTab ? ' active' : '') + '" data-class-tab="' + escapeHtml(k) + '">' +
+          escapeHtml(label) + '（' + byKey[k].length + '）</button>';
+      }).join('') + '</div>' +
+      '<div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">' +
+        '<button type="button" class="btn btn-sm" data-class-collapse-all="' + escapeHtml(deptIdsCsv) + '">全部收合</button>' +
+        '<button type="button" class="btn btn-sm" data-class-expand-all="' + escapeHtml(deptIdsCsv) + '">全部展開</button>' +
+        '<span class="field-hint" style="margin:0;">（點系所標題列可收合/展開該系）</span>' +
+      '</div>' +
+      '<div class="table-wrap"><table><thead><tr><th>ID</th><th>顯示名稱</th><th>原始名稱</th><th>制度</th><th>應繳份數</th><th>導師</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+      groups.map(function (g) {
+        const collapsed = adminClassCollapsedDepts.has(g.deptId);
+        return '<tr class="dept-group-head" data-class-dept-toggle="' + escapeHtml(g.deptId) + '"><td colspan="8">' +
+          (collapsed ? '▸' : '▾') + ' ' + escapeHtml(deptName(g.deptId)) + '（' + g.list.length + ' 班）' +
+          (collapsed ? ' <span class="field-hint" style="display:inline; font-weight:400;">已收合，點擊展開</span>' : '') +
+          '</td></tr>' +
+          (collapsed ? '' : g.list.map(classRowHtml).join(''));
+      }).join('') + '</tbody></table></div>';
+  }
+
   $('admin-tab-content').innerHTML =
     pendingHtml +
-    '<div class="card"><h3>班級清單</h3><div class="table-wrap"><table><thead><tr><th>ID</th><th>顯示名稱</th><th>原始名稱</th><th>系所</th><th>制度</th><th>應繳份數</th><th>導師</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
-    classes.map(function (c) {
-      return '<tr><td data-label="ID">' + escapeHtml(c.id) + '</td>' +
-        '<td data-label="顯示名稱">' + escapeHtml(c.displayName || c.name) + '</td>' +
-        '<td data-label="原始名稱">' + escapeHtml(c.name) + '</td>' +
-        '<td data-label="系所">' + escapeHtml(deptName(c.deptId)) + '</td>' +
-        '<td data-label="制度">' + escapeHtml((tutorSystemById(c.systemId) || {}).name || '（未設定）') + '</td>' +
-        '<td data-label="應繳份數">' + requiredMeetingCountDisplay(c) + '</td>' +
-        '<td data-label="導師">' + (c.tutors || []).map(function (t) { return escapeHtml(t.name) + '（' + escapeHtml(t.email) + '）'; }).join('、') + '</td>' +
-        '<td data-label="狀態">' + (c.active === false ? '停用' : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="class-edit" data-id="' + escapeHtml(c.id) + '">編輯</button> ' +
-        '<button class="btn btn-sm" data-action="class-history" data-id="' + escapeHtml(c.id) + '">歷史</button> ' +
-        '<button class="btn btn-sm btn-danger" data-action="class-delete" data-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
-    }).join('') + '</tbody></table></div>' +
+    '<div class="card"><h3>班級清單</h3>' + bodyHtml +
     '<button class="btn btn-primary" data-action="class-new" style="margin-top:12px;">新增班級</button></div>';
 }
+
+// 班級管理：學院分頁切換／系所群組收合展開（視圖狀態寫模組層級變數，重繪保留）
+document.body.addEventListener('click', function (e) {
+  const tabBtn = e.target.closest('[data-class-tab]');
+  if (tabBtn) { adminClassTab = tabBtn.dataset.classTab; renderAdminClasses(); return; }
+  const toggleRow = e.target.closest('[data-class-dept-toggle]');
+  if (toggleRow) {
+    const id = toggleRow.dataset.classDeptToggle;
+    if (adminClassCollapsedDepts.has(id)) adminClassCollapsedDepts.delete(id);
+    else adminClassCollapsedDepts.add(id);
+    renderAdminClasses();
+    return;
+  }
+  const collapseAll = e.target.closest('[data-class-collapse-all]');
+  if (collapseAll) {
+    collapseAll.dataset.classCollapseAll.split(',').forEach(function (id) { if (id) adminClassCollapsedDepts.add(id); });
+    renderAdminClasses();
+    return;
+  }
+  const expandAll = e.target.closest('[data-class-expand-all]');
+  if (expandAll) {
+    expandAll.dataset.classExpandAll.split(',').forEach(function (id) { if (id) adminClassCollapsedDepts.delete(id); });
+    renderAdminClasses();
+  }
+});
 
 // ── 導師歷史＋期中更換（Ticket C）──
 // 歷史 modal：按需呼叫 tutorHistoryGet（bootstrap 不帶 tutorHistory，控制 payload）。
