@@ -112,10 +112,22 @@
   th,td{text-align:left; padding:9px 8px; border-bottom:1px solid var(--color-border); vertical-align:middle;}
   th{color:var(--color-text-light); font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
   .table-wrap{overflow-x:auto;}
-  #roster-preview-table{min-width:1080px;}
-  #roster-preview-table td[data-label="班級"],
-  #roster-preview-table td[data-label="導師1"],
-  #roster-preview-table td[data-label="導師2"]{white-space:nowrap;}
+  /* 匯入差異預覽（仿 Excel 統計表）：學院分頁＋系所群組列＋全欄位 inline input */
+  #roster-preview-table{min-width:1060px;}
+  #roster-preview-table input[type="text"]{
+    width:100%; min-width:0; box-sizing:border-box; padding:4px 6px;
+    border:1px solid var(--color-border); border-radius:5px; font-size:.84rem; background:#fff;
+  }
+  #roster-preview-table input[type="text"].roster-warn{background:var(--color-warning-bg);}
+  #roster-preview-table th:nth-child(1){width:30px;}
+  #roster-preview-table th:nth-child(2),#roster-preview-table th:nth-child(3){width:118px;}
+  #roster-preview-table th:nth-child(4),#roster-preview-table th:nth-child(6){width:88px;}
+  #roster-preview-table th:nth-child(5),#roster-preview-table th:nth-child(7){width:148px;}
+  #roster-preview-table th:nth-child(8){width:58px;}
+  #roster-preview-table th:nth-child(9){width:84px;}
+  .roster-dept-head td{background:var(--color-bg); font-weight:700;}
+  #roster-preview-table .roster-dept-head input[type="text"]{width:auto; min-width:170px; display:inline-block; font-weight:700; vertical-align:middle;}
+  #roster-preview-table td.roster-notes{font-size:.8rem; color:var(--color-text-light); min-width:140px;}
 
   .empty-hint{color:var(--color-muted); text-align:center; padding:30px 10px; font-size:.9rem;}
   .attachment-list{list-style:none; margin:6px 0 0; padding:0; display:flex; flex-direction:column; gap:4px;}
@@ -2813,7 +2825,43 @@ function statsClassNameIssue_(name) {
 
 function addFlagReason_(flags, reason) {
   flags.uncertain = true;
+  if (flags.reason && flags.reason.indexOf(reason) !== -1) return;  // 同一原因不重複累加（編輯後單列重跑 email 比對會再進來）
   flags.reason = flags.reason ? flags.reason + '；' + reason : reason;
+}
+
+// ── displayName 自動融合（前端複本）─────────────────────────────────────────
+// 與 dev/Code.gs 的 deptShortName_ / fuseClassDisplayName_ 完全同邏輯（改動時兩處同步，
+// 比照 IMPORT_CLASS_NAME_RE_ ↔ CLASS_NAME_RE 的先例；test/import-parser.test.js 另有
+// parity 測試直接抽出 Code.gs 版本比對輸出，兩處漂移即紅燈）。
+// 用途：匯入預覽對每列預填「簡稱」建議值（既有班級由呼叫端帶現行 displayName，不走此函式），
+// 確認匯入送出的是使用者看到/修改過的值（後端 importRosterRow_ 本來就接受 classDisplayName）。
+// 規則：系簡稱 = 系所名去尾字「系」；四技一A→「四+系簡+一A」、四技進一A→「進四+系簡+一A」、
+// 碩一→「碩+系簡+一」、碩專一B→「碩專+系簡+一B」、博一→「博+系簡+一」、
+// 家族→「系簡+家族(導師名)」（未帶導師名則不含括號）；技優/產訓/產專/海青前綴→前綴保留、
+// 系簡插入其後；完全無法判別→「系簡+原名」。純字串規則，不查資料庫。
+function deptShortNameFront(deptName) {
+  const n = String(deptName || '').trim();
+  return (n.length > 1 && n.slice(-1) === '系') ? n.slice(0, -1) : n;
+}
+
+function fuseClassDisplayNameFront(className, deptName, systemId, tutorName) {
+  const name = String(className || '').trim();
+  const short = deptShortNameFront(deptName);
+  if (!name) return short;
+  if (name.indexOf('家族') !== -1) {
+    return tutorName ? (short + '家族(' + tutorName + ')') : (short + '家族');
+  }
+  if (name.indexOf('四技進') === 0) return '進四' + short + name.slice(3);
+  if (name.indexOf('四技') === 0) return '四' + short + name.slice(2);
+  if (name.indexOf('碩專') === 0) return '碩專' + short + name.slice(2);
+  if (name.indexOf('碩') === 0) return '碩' + short + name.slice(1);
+  if (name.indexOf('博') === 0) return '博' + short + name.slice(1);
+  const otherPrefixes = ['技優', '產訓', '產專', '海青'];
+  for (let i = 0; i < otherPrefixes.length; i++) {
+    const p = otherPrefixes[i];
+    if (name.indexOf(p) === 0) return p + short + name.slice(p.length);
+  }
+  return short + name;
 }
 
 // 統計表解析：輸出與標準範本相同的中間格式（requiredMeetingCount 空白＝undefined，
@@ -2965,7 +3013,12 @@ function classifyImportRow(row, departments, classes) {
 }
 // __IMPORT_PARSER_END__
 
-let rosterRows = null; // 解析後的中間格式 rows（含 flags 與 diff），預覽表逐列可修
+// 匯入預覽狀態——rosterRows 是單一事實來源：所有編輯值（班名/簡稱/導師/email/應繳/系所）、
+// 勾選狀態（r.checked）、差異分類（r.diff）全存在列物件上；切學院分頁重繪 DOM 不會掉狀態，
+// 「確認匯入」也一律從 rosterRows 讀值（跨所有分頁的勾選列都送），不讀 DOM。
+let rosterRows = null;
+let rosterTab = '';          // 當前學院分頁 key（=collegeName；'' 代表「未分學院」）
+let rosterEmailIndex = null; // 姓名→email 對照（上傳解析時建立；編輯導師姓名後單列重跑比對用）
 
 function renderAdminRoster() {
   $('admin-tab-content').innerHTML =
@@ -2973,7 +3026,8 @@ function renderAdminRoster() {
     '<p class="field-hint">支援兩種格式（自動偵測）：<b>標準範本</b>（學院／系所／導師制度／班級名稱(原始)／班級顯示名稱／' +
     '應繳班會份數／導師1姓名／導師1email／導師2姓名／導師2email）；或<b>統計表</b>（「班級、家族會議記錄暨班級業務統計」，' +
     '分頁＝學院、欄位＝系別/班級/導師姓名/應開份數）。統計表格式的家族導師會展開為每導師一班；' +
-    'email 空白列匯入後導師無法核章，請儘速在班級管理補上。上傳後先產生差異預覽，逐列核對勾選再確認匯入。</p>' +
+    'email 空白列匯入後導師無法核章，請儘速在班級管理補上。上傳後先產生差異預覽（仿統計表樣態：上方學院分頁、' +
+    '分頁內依系所分組，欄位可像 Excel 儲存格直接修改），逐列核對勾選再確認匯入。</p>' +
     '<p class="field-hint">已畢業／已停用班級會被拒絕匯入（逐列錯誤顯示「class disabled: 班級ID」），這是設計如此、用來避免誤蓋畢業班資料。' +
     '若確實需要為該班補匯舊學期資料：先到「班級」頁籤編輯該班級、勾選「啟用」並儲存，重新執行本頁匯入；匯入完成後再回到該班編輯，' +
     '取消勾選「啟用」以還原停用／畢業狀態（此還原不影響已記錄的畢業學期）。</p>' +
@@ -3022,9 +3076,27 @@ async function onRosterFileChange(e) {
         if (!IMPORT_CLASS_NAME_RE_.test(r.classNameRaw)) addFlagReason_(r.flags, '班名含空白/符號等非法字元，請修改');
       });
     }
-    applyEmailLookup(rows, buildTutorEmailIndex(bootstrapData.classes || []));
+    rosterEmailIndex = buildTutorEmailIndex(bootstrapData.classes || []);
+    applyEmailLookup(rows, rosterEmailIndex);
     rows.forEach(function (r) { r.diff = classifyImportRow(r, bootstrapData.departments || [], bootstrapData.classes || []); });
+    // 預填「簡稱」（classDisplayName）：既有班級帶現行 displayName（送回同值＝不變更，
+    // 不會覆蓋管理員自訂簡稱）；新班級用前端複本 fuseClassDisplayNameFront 預填融合建議值
+    // （與後端 importRosterRow_ 建立新班時同規則）。確認匯入送出使用者看到/修改過的值。
+    const deptByName = {};
+    (bootstrapData.departments || []).forEach(function (d) { if (d && d.name) deptByName[d.name] = d; });
+    rows.forEach(function (r) {
+      if (String(r.classDisplayName || '').trim()) return;
+      const dept = deptByName[String(r.deptName || '').trim()];
+      const cls = dept ? (bootstrapData.classes || []).filter(function (c) {
+        return c && c.deptId === dept.id && c.name === String(r.classNameRaw || '').trim();
+      })[0] : null;
+      r.classDisplayName = (cls && cls.displayName) ? cls.displayName
+        : fuseClassDisplayNameFront(r.classNameRaw, r.deptName, null, String(r.tutor1Name || '').trim() || undefined);
+    });
+    // 勾選狀態存進列本身（切分頁重繪不掉）；無變動與待確認列預設不勾。
+    rows.forEach(function (r) { r.checked = !(r.flags.uncertain || r.diff.status === 'unchanged'); });
     rosterRows = rows;
+    rosterTab = rosterTabKeys()[0] || '';
     renderRosterPreview();
   } catch (err) {
     $('roster-preview').innerHTML = '<div class="empty-hint">解析失敗：' + escapeHtml(err.message) + '</div>';
@@ -3038,109 +3110,236 @@ function importTutorText(list) {
   return (list || []).map(function (t) { return t.name + (t.email ? '（' + t.email + '）' : ''); }).join('、') || '（無）';
 }
 
-// email 欄渲染：空白（missing/ambiguous）→ 可編輯 input 標黃；自動帶入 → 文字＋提示；有值 → 文字。
-function importEmailCell(r, i, n) {
-  const email = r['tutor' + n + 'Email'] || '';
-  const status = r.flags['tutor' + n + 'EmailStatus'];
-  if (!r['tutor' + n + 'Name']) return '';
-  if (status === 'missing' || status === 'ambiguous') {
-    return '<input type="text" data-roster-email' + n + '="' + i + '" value="' + escapeHtml(email) + '" placeholder="待補 email" style="min-width:130px; background:var(--color-warning-bg);">';
-  }
-  return escapeHtml(email) + (status === 'auto' ? ' <span class="field-hint">（依姓名自動帶入）</span>' : '');
+// 學院分頁 key 集合：rosterRows 中 collegeName 的出現順序去重（'' = 未分學院，
+// 對應統計表「獸醫學院、國際學院、達人學院」合併分頁等學院不明的列）。
+function rosterTabKeys() {
+  const keys = [];
+  (rosterRows || []).forEach(function (r) {
+    const k = String(r.collegeName || '').trim();
+    if (keys.indexOf(k) === -1) keys.push(k);
+  });
+  return keys;
 }
+function rosterTabLabel(key) { return key === '' ? '未分學院' : key; }
 
-function renderRosterPreview() {
-  if (!rosterRows || !rosterRows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列。</div>'; return; }
+// 全域摘要（跨所有分頁）；編輯後即時重算
+function rosterSummaryText() {
   const counts = { new: 0, unchanged: 0, tutor_changed: 0, tutor2_added: 0, uncertain: 0 };
   rosterRows.forEach(function (r) {
     counts[r.diff.status]++;
     if (r.flags.uncertain) counts.uncertain++;
   });
-  $('roster-preview').innerHTML =
-    '<p class="field-hint">共 ' + rosterRows.length + ' 列：新班級 ' + counts.new + '、無變動 ' + counts.unchanged +
+  return '共 ' + rosterRows.length + ' 列：新班級 ' + counts.new + '、無變動 ' + counts.unchanged +
     '、導師變更 ' + counts.tutor_changed + '、新增導師2 ' + counts.tutor2_added +
-    '、待人工確認（標黃）' + counts.uncertain + '。無變動與待確認列預設不勾選。</p>' +
-    '<div style="display:flex; gap:8px; margin-bottom:8px;">' +
+    '、待人工確認（標黃）' + counts.uncertain + '。無變動與待確認列預設不勾選（統計含所有學院分頁）。';
+}
+
+function rosterStatusBadge(r) {
+  return '<span class="badge ' + IMPORT_DIFF_BADGE[r.diff.status] + '">' + IMPORT_DIFF_LABELS[r.diff.status] + '</span>';
+}
+
+function rosterNotesText(r) {
+  const notes = [];
+  if (r.flags.reason) notes.push(r.flags.reason);
+  if (r.diff.status === 'tutor_changed' || r.diff.status === 'tutor2_added') {
+    const imp = [];
+    if (String(r.tutor1Name || '').trim()) imp.push({ name: String(r.tutor1Name).trim(), email: r.tutor1Email });
+    if (String(r.tutor2Name || '').trim()) imp.push({ name: String(r.tutor2Name).trim(), email: r.tutor2Email });
+    notes.push('現行：' + importTutorText(r.diff.currentTutors) + ' → 匯入：' + importTutorText(imp));
+  }
+  return notes.join('；');
+}
+
+function rosterTextInput(i, field, value, extra) {
+  return '<input type="text" data-roster-field="' + field + '" data-roster-i="' + i + '" value="' +
+    escapeHtml(value == null ? '' : String(value)) + '"' + (extra || '') + '>';
+}
+
+// email 欄：一律 inline input（仿 Excel 儲存格）；missing/ambiguous 標黃、auto 附提示
+function rosterEmailCellHtml(r, i, n) {
+  const status = r.flags['tutor' + n + 'EmailStatus'];
+  const warn = (status === 'missing' || status === 'ambiguous') && String(r['tutor' + n + 'Name'] || '').trim();
+  return rosterTextInput(i, 'tutor' + n + 'Email', r['tutor' + n + 'Email'] || '',
+      ' placeholder="待補 email"' + (warn ? ' class="roster-warn"' : '')) +
+    (status === 'auto' ? '<div class="field-hint">依姓名自動帶入</div>' : '');
+}
+
+// 仿 Excel 統計表樣態：上方學院分頁（tabs），分頁內依系所分組（群組標題列仿系別合併儲存格），
+// 班級列不重複學院/系所欄。全部渲染自 rosterRows（單一事實來源），切分頁只是重繪視圖。
+function renderRosterPreview() {
+  if (!rosterRows || !rosterRows.length) { $('roster-preview').innerHTML = '<div class="empty-hint">沒有可匯入的資料列。</div>'; return; }
+  const keys = rosterTabKeys();
+  if (keys.indexOf(rosterTab) === -1) rosterTab = keys[0];
+  // 當前分頁的列（全域索引），依 deptName 首次出現順序分組
+  const groupMap = {};
+  const groups = [];
+  rosterRows.forEach(function (r, i) {
+    if (String(r.collegeName || '').trim() !== rosterTab) return;
+    const d = String(r.deptName || '').trim();
+    if (!groupMap[d]) { groupMap[d] = { dept: d, idx: [] }; groups.push(groupMap[d]); }
+    groupMap[d].idx.push(i);
+  });
+
+  let html = '<p class="field-hint" id="roster-summary">' + escapeHtml(rosterSummaryText()) + '</p>' +
+    '<div class="tab-bar">' + keys.map(function (k) {
+      const n = rosterRows.filter(function (r) { return String(r.collegeName || '').trim() === k; }).length;
+      return '<button type="button" class="tab-btn' + (k === rosterTab ? ' active' : '') + '" data-roster-tab="' + escapeHtml(k) + '">' +
+        escapeHtml(rosterTabLabel(k)) + '（' + n + '）</button>';
+    }).join('') + '</div>' +
+    '<div style="display:flex; gap:8px; margin-bottom:8px; align-items:center; flex-wrap:wrap;">' +
       '<button type="button" class="btn btn-sm" data-roster-select="all">全選</button>' +
       '<button type="button" class="btn btn-sm" data-roster-select="none">全不選</button>' +
       '<button type="button" class="btn btn-sm" data-roster-select="changed">只選有變動</button>' +
+      '<span class="field-hint" style="margin:0;">（只作用於「' + escapeHtml(rosterTabLabel(rosterTab)) + '」分頁）</span>' +
     '</div>' +
-    '<div class="table-wrap"><table id="roster-preview-table"><thead><tr><th></th><th>學院</th><th>系所</th><th>班級</th>' +
-    '<th>導師1</th><th>Email1</th><th>導師2</th><th>Email2</th><th>應繳</th><th>狀態</th><th>原因／提示</th></tr></thead><tbody>' +
-    rosterRows.map(function (r, i) {
-      const checked = !(r.flags.uncertain || r.diff.status === 'unchanged');
-      const nameCell = r.flags.uncertain
-        ? '<input type="text" data-roster-name="' + i + '" value="' + escapeHtml(r.classNameRaw) + '" maxlength="20" style="min-width:110px;">'
-        : escapeHtml(r.classNameRaw);
-      const notes = [];
-      if (r.flags.reason) notes.push(r.flags.reason);
-      if (r.diff.status === 'tutor_changed' || r.diff.status === 'tutor2_added') {
-        const imp = [];
-        if (r.tutor1Name) imp.push({ name: r.tutor1Name, email: r.tutor1Email });
-        if (r.tutor2Name) imp.push({ name: r.tutor2Name, email: r.tutor2Email });
-        notes.push('現行：' + importTutorText(r.diff.currentTutors) + ' → 匯入：' + importTutorText(imp));
-      }
-      return '<tr data-roster-row="' + i + '"' + (r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
-        '<td><input type="checkbox" data-roster-check="' + i + '"' + (checked ? ' checked' : '') + '></td>' +
-        '<td data-label="學院">' + escapeHtml(r.collegeName) + '</td>' +
-        '<td data-label="系所">' + escapeHtml(r.deptName) + '</td>' +
-        '<td data-label="班級">' + nameCell + (r.flags.type === 'family' ? ' <span class="badge badge-type">家族</span>' : '') + '</td>' +
-        '<td data-label="導師1">' + escapeHtml(r.tutor1Name) + '</td>' +
-        '<td data-label="Email1">' + importEmailCell(r, i, '1') + '</td>' +
-        '<td data-label="導師2">' + escapeHtml(r.tutor2Name) + '</td>' +
-        '<td data-label="Email2">' + importEmailCell(r, i, '2') + '</td>' +
-        '<td data-label="應繳">' + (r.requiredMeetingCount === undefined ? '<span class="field-hint">（制度預設）</span>' : escapeHtml(String(r.requiredMeetingCount))) + '</td>' +
-        '<td data-label="狀態"><span class="badge ' + IMPORT_DIFF_BADGE[r.diff.status] + '">' + IMPORT_DIFF_LABELS[r.diff.status] + '</span></td>' +
-        '<td data-label="原因／提示">' + escapeHtml(notes.join('；')) + '</td></tr>';
-    }).join('') + '</tbody></table></div>' +
-    '<p class="field-hint">勾選＝確認匯入該列（上傳前的核對就在此完成）；標黃列請確認班名/導師後再勾選。' +
-    '確認匯入後由後端逐列驗證與寫入，單列失敗不影響其他列。</p>' +
-    '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入勾選列</button>';
+    '<div class="table-wrap"><table id="roster-preview-table"><thead><tr><th></th><th>班級名稱(原始)</th><th>簡稱</th>' +
+    '<th>導師1</th><th>Email1</th><th>導師2</th><th>Email2</th><th>應繳</th><th>狀態</th><th>原因／提示</th></tr></thead><tbody>';
 
-  // 全選／全不選／只選有變動（有變動＝新班級/導師變更/新增導師2，且非待確認列）
-  $('roster-preview').querySelectorAll('[data-roster-select]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      const mode = btn.dataset.rosterSelect;
-      rosterRows.forEach(function (r, i) {
-        const cb = document.querySelector('[data-roster-check="' + i + '"]');
-        if (!cb) return;
-        if (mode === 'all') cb.checked = true;
-        else if (mode === 'none') cb.checked = false;
-        else cb.checked = r.diff.status !== 'unchanged' && !r.flags.uncertain;
-      });
+  groups.forEach(function (g) {
+    // 系所群組標題列（仿 Excel 系別合併儲存格）：系所名可修，套用到本群組所有列
+    html += '<tr class="roster-dept-head"><td colspan="10">系所：' +
+      '<input type="text" data-roster-dept="' + g.idx.join(',') + '" value="' + escapeHtml(g.dept) + '">' +
+      '<span class="field-hint" style="display:inline; margin-left:8px;">（修改套用到本群組 ' + g.idx.length + ' 列）</span></td></tr>';
+    g.idx.forEach(function (i) {
+      const r = rosterRows[i];
+      html += '<tr data-roster-row="' + i + '"' + (r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+        '<td><input type="checkbox" data-roster-check="' + i + '"' + (r.checked ? ' checked' : '') + '></td>' +
+        '<td data-label="班級名稱(原始)">' + rosterTextInput(i, 'classNameRaw', r.classNameRaw, ' maxlength="20"') +
+          (r.flags.type === 'family' ? ' <span class="badge badge-type">家族</span>' : '') + '</td>' +
+        '<td data-label="簡稱">' + rosterTextInput(i, 'classDisplayName', r.classDisplayName) + '</td>' +
+        '<td data-label="導師1">' + rosterTextInput(i, 'tutor1Name', r.tutor1Name) + '</td>' +
+        '<td data-label="Email1" data-roster-email-cell="' + i + ':1">' + rosterEmailCellHtml(r, i, '1') + '</td>' +
+        '<td data-label="導師2">' + rosterTextInput(i, 'tutor2Name', r.tutor2Name) + '</td>' +
+        '<td data-label="Email2" data-roster-email-cell="' + i + ':2">' + rosterEmailCellHtml(r, i, '2') + '</td>' +
+        '<td data-label="應繳">' + rosterTextInput(i, 'requiredMeetingCount',
+          r.requiredMeetingCount === undefined ? '' : String(r.requiredMeetingCount), ' placeholder="制度預設"') + '</td>' +
+        '<td data-label="狀態" data-roster-status="' + i + '">' + rosterStatusBadge(r) + '</td>' +
+        '<td data-label="原因／提示" data-roster-notes="' + i + '" class="roster-notes">' + escapeHtml(rosterNotesText(r)) + '</td></tr>';
     });
   });
+
+  html += '</tbody></table></div>' +
+    '<p class="field-hint">勾選＝確認匯入該列；欄位可直接修改（仿 Excel 儲存格），修改即時保存並重算差異，切換學院分頁不會遺失。' +
+    '標黃列請確認班名/導師後再勾選。確認匯入後由後端逐列驗證與寫入，單列失敗不影響其他列。</p>' +
+    '<button class="btn btn-primary" data-action="roster-confirm" style="margin-top:10px;">確認匯入勾選列（含所有學院分頁）</button>';
+  $('roster-preview').innerHTML = html;
 }
+
+// 單列差異重算＋DOM 局部更新（badge/提示欄），不整表重繪（避免打斷正在輸入的 input）
+function refreshRosterRowDiff(i) {
+  const r = rosterRows[i];
+  r.diff = classifyImportRow(r, bootstrapData.departments || [], bootstrapData.classes || []);
+  const st = document.querySelector('[data-roster-status="' + i + '"]');
+  if (st) st.innerHTML = rosterStatusBadge(r);
+  const nt = document.querySelector('[data-roster-notes="' + i + '"]');
+  if (nt) nt.textContent = rosterNotesText(r);
+}
+function refreshRosterSummary() {
+  const el = $('roster-summary');
+  if (el && rosterRows && rosterRows.length) el.textContent = rosterSummaryText();
+}
+
+// 分頁切換／勾選範圍按鈕（作用於當前分頁）——狀態一律寫回 rosterRows
+document.body.addEventListener('click', function (e) {
+  const tabBtn = e.target.closest('[data-roster-tab]');
+  if (tabBtn && rosterRows) { rosterTab = tabBtn.dataset.rosterTab; renderRosterPreview(); return; }
+  const selBtn = e.target.closest('[data-roster-select]');
+  if (selBtn && rosterRows) {
+    const mode = selBtn.dataset.rosterSelect;
+    rosterRows.forEach(function (r, i) {
+      if (String(r.collegeName || '').trim() !== rosterTab) return;  // 只作用於當前分頁
+      r.checked = mode === 'all' ? true : (mode === 'none' ? false : (r.diff.status !== 'unchanged' && !r.flags.uncertain));
+      const cb = document.querySelector('[data-roster-check="' + i + '"]');
+      if (cb) cb.checked = r.checked;
+    });
+  }
+});
+
+document.body.addEventListener('change', function (e) {
+  const cb = e.target.closest('[data-roster-check]');
+  if (cb && rosterRows) rosterRows[Number(cb.dataset.rosterCheck)].checked = cb.checked;
+});
+
+// inline 編輯：input 事件即時寫回 rosterRows[i]，並依欄位重跑 email 比對／差異分類
+document.body.addEventListener('input', function (e) {
+  if (!rosterRows) return;
+  const deptInput = e.target.closest('[data-roster-dept]');
+  if (deptInput) {
+    // 系所群組標題列：改一次套用到本群組所有列，並逐列重算差異
+    deptInput.dataset.rosterDept.split(',').forEach(function (s) {
+      const i = Number(s);
+      rosterRows[i].deptName = deptInput.value;
+      refreshRosterRowDiff(i);
+    });
+    refreshRosterSummary();
+    return;
+  }
+  const inp = e.target.closest('[data-roster-field]');
+  if (!inp) return;
+  const i = Number(inp.dataset.rosterI);
+  const field = inp.dataset.rosterField;
+  const r = rosterRows[i];
+  if (field === 'requiredMeetingCount') {
+    // 語意同解析：留空＝undefined（後端保留既有覆寫）、數字照帶、非數字照帶原值（後端逐列擋）
+    const v = inp.value.trim();
+    r.requiredMeetingCount = v === '' ? undefined : (isNaN(Number(v)) ? v : Number(v));
+    return; // 應繳不影響差異分類
+  }
+  r[field] = inp.value;
+  if (field === 'tutor1Name' || field === 'tutor2Name') {
+    const n = field === 'tutor1Name' ? '1' : '2';
+    // 先前「依姓名自動帶入」的 email 是舊姓名的比對結果 → 清掉重比；使用者手填/檔案原有值不動
+    if (r.flags['tutor' + n + 'EmailStatus'] === 'auto') r['tutor' + n + 'Email'] = '';
+    if (!String(r['tutor' + n + 'Email'] || '').trim()) {
+      delete r.flags['tutor' + n + 'EmailStatus'];
+      applyEmailLookup([r], rosterEmailIndex || {});
+      const cell = document.querySelector('[data-roster-email-cell="' + i + ':' + n + '"]');
+      if (cell) cell.innerHTML = rosterEmailCellHtml(r, i, n);
+    }
+  }
+  if (field !== 'classDisplayName') {  // 簡稱不影響差異分類
+    refreshRosterRowDiff(i);
+    refreshRosterSummary();
+  }
+});
 
 document.body.addEventListener('click', async function (e) {
   const btn = e.target.closest('[data-action="roster-confirm"]');
   if (!btn || !rosterRows || !rosterRows.length) return;
-  const root = $('roster-preview');
+  // 從 rosterRows 讀值（跨所有分頁的勾選列都送，不讀 DOM）；送出前跨分頁驗班名
   const selected = [];
-  let badCount = 0;
+  const bad = [];  // { i, college }
   rosterRows.forEach(function (r, i) {
-    const tr = root.querySelector('[data-roster-row="' + i + '"]');
-    const cb = root.querySelector('[data-roster-check="' + i + '"]');
-    if (!cb || !cb.checked) return;
-    const nameInput = root.querySelector('[data-roster-name="' + i + '"]');
-    const className = String(nameInput ? nameInput.value : r.classNameRaw).trim();
-    // 送出前用既有白名單再驗一次班名，不合法列擋下標紅
-    if (!CLASS_NAME_RE.test(className)) {
-      badCount++;
-      if (tr) tr.style.background = 'var(--color-danger-bg)';
-      return;
-    }
-    const e1 = root.querySelector('[data-roster-email1="' + i + '"]');
-    const e2 = root.querySelector('[data-roster-email2="' + i + '"]');
+    if (!r.checked) return;
+    const className = String(r.classNameRaw || '').trim();
+    if (!CLASS_NAME_RE.test(className)) { bad.push({ i: i, college: String(r.collegeName || '').trim() }); return; }
     selected.push({
-      collegeName: r.collegeName, deptName: r.deptName, systemName: r.systemName,
-      classNameRaw: className, classDisplayName: r.classDisplayName,
+      collegeName: String(r.collegeName || '').trim(), deptName: String(r.deptName || '').trim(),
+      systemName: r.systemName,
+      classNameRaw: className, classDisplayName: String(r.classDisplayName || '').trim(),
       requiredMeetingCount: r.requiredMeetingCount,  // undefined＝未帶（保留既有覆寫）
-      tutor1Name: r.tutor1Name, tutor1Email: String(e1 ? e1.value : r.tutor1Email).trim().toLowerCase(),
-      tutor2Name: r.tutor2Name, tutor2Email: String(e2 ? e2.value : r.tutor2Email).trim().toLowerCase(),
+      tutor1Name: String(r.tutor1Name || '').trim(), tutor1Email: String(r.tutor1Email || '').trim().toLowerCase(),
+      tutor2Name: String(r.tutor2Name || '').trim(), tutor2Email: String(r.tutor2Email || '').trim().toLowerCase(),
     });
   });
-  if (badCount) { showToast('有 ' + badCount + ' 列班名不合法（已標紅），請修正後再匯入', 'error'); return; }
+  if (bad.length) {
+    // toast 帶各學院不合法列數；自動切到第一個含不合法列的分頁並標紅
+    const byCollege = {};
+    const order = [];
+    bad.forEach(function (b) {
+      if (!(b.college in byCollege)) { byCollege[b.college] = 0; order.push(b.college); }
+      byCollege[b.college]++;
+    });
+    rosterTab = bad[0].college;
+    renderRosterPreview();
+    bad.forEach(function (b) {
+      const tr = document.querySelector('[data-roster-row="' + b.i + '"]');
+      if (tr) tr.style.background = 'var(--color-danger-bg)';
+    });
+    showToast('班名不合法（已標紅）：' + order.map(function (k) { return rosterTabLabel(k) + ' ' + byCollege[k] + ' 列'; }).join('、') +
+      '，請修正後再匯入', 'error');
+    return;
+  }
   if (!selected.length) { showToast('未勾選任何列', 'error'); return; }
   try {
     await withBtnPending(btn, async function () {
