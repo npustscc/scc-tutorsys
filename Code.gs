@@ -133,7 +133,7 @@ function doGet(e) {
   // via/hasPayload 為診斷欄位：前端 loadBootstrap 的形狀防衛若回報收到本回應，
   // 即證明瀏覽器的 POST 在途中被降級成 GET（doPost 從未執行），且可看出 query 是否還帶著 payload。
   return jsonResp_({
-    ok: true, service: 'SCC Tutor System Drive Proxy (DEV)', via: 'doGet',
+    ok: true, service: 'SCC Tutor System Drive Proxy (PROD)', via: 'doGet',
     hasPayload: !!(e && e.parameter && e.parameter.payload),
   });
 }
