@@ -314,3 +314,57 @@ test('classifyImportRow: 現行 1 位＋匯入同名第 1 位＋多第 2 位 →
   const removed = S.classifyImportRow(diffRow({ classNameRaw: '四技一B', tutor1Name: '甲', tutor1Email: 'a@x.com' }), DIFF_DEPTS, DIFF_CLASSES);
   assert.equal(removed.status, 'tutor_changed');
 });
+
+// ── displayName 自動融合（前端複本 fuseClassDisplayNameFront）────────────────
+// 與 dev/Code.gs 的 fuseClassDisplayName_ 為同邏輯雙生（改動時兩處同步）；除固定案例外，
+// 另以 test/harness.js 抽出 Code.gs 版本做 parity 比對——兩處漂移即紅燈。
+
+const { load: loadGs } = require('./harness');
+
+test('fuseClassDisplayNameFront: 四技/四技進/碩/碩專/博/家族/海青/無學制關鍵字 fallback 的固定案例', () => {
+  const S = loadParser();
+  const f = S.fuseClassDisplayNameFront;
+  assert.equal(f('四技一A', '農園系'), '四農園一A');
+  assert.equal(f('四技進一A', '農園系'), '進四農園一A');
+  assert.equal(f('碩一', '農園系'), '碩農園一');
+  assert.equal(f('碩專一B', '農園系'), '碩專農園一B');
+  assert.equal(f('博一', '農園系'), '博農園一');
+  assert.equal(f('家族陳美惠', '森林系', null, '陳美惠'), '森林家族(陳美惠)');
+  assert.equal(f('家族陳美惠', '森林系'), '森林家族', '未帶導師名 → 不含括號');
+  assert.equal(f('海青技術研習班', '農園系'), '海青農園技術研習班');
+  assert.equal(f('技優一A', '農園系'), '技優農園一A');
+  assert.equal(f('進修部一A', '農園系'), '農園進修部一A', '無學制關鍵字 → 系簡+原名 fallback');
+  assert.equal(f('', '農園系'), '農園', '空班名 → 只回系簡稱');
+  assert.equal(f('四技一A', '通識教育中心'), '四通識教育中心一A', '非「系」結尾 → 用全名');
+});
+
+test('fuseClassDisplayNameFront ↔ Code.gs fuseClassDisplayName_ parity（同輸入同輸出，抓兩處漂移）', () => {
+  const S = loadParser();
+  const G = loadGs(['deptShortName_', 'fuseClassDisplayName_']);
+  const cases = [
+    ['四技一A', '農園系', null, undefined],
+    ['四技進一A', '農園系', null, undefined],
+    ['碩一', '農園系', 'master', undefined],
+    ['碩專一B', '農園系', null, undefined],
+    ['博一', '獸醫系', null, undefined],
+    ['家族陳美惠', '森林系', 'family', '陳美惠'],
+    ['家族陳美惠', '森林系', 'family', undefined],
+    ['家族', '森林系', null, '王志強'],
+    ['技優一A', '農園系', null, undefined],
+    ['產訓一A', '農園系', null, undefined],
+    ['產專一A', '農園系', null, undefined],
+    ['海青技術研習班', '農園系', null, undefined],
+    ['進修部一A', '農園系', null, undefined],
+    ['', '農園系', null, undefined],
+    ['四技一A', '通識教育中心', null, undefined],
+    ['四技一A', '系', null, undefined],          // 邊界：單字「系」不去尾
+    [undefined, undefined, null, undefined],
+  ];
+  cases.forEach(function (c) {
+    assert.equal(
+      S.fuseClassDisplayNameFront(c[0], c[1], c[2], c[3]),
+      G.fuseClassDisplayName_(c[0], c[1], c[2], c[3]),
+      'parity 失敗：' + JSON.stringify(c)
+    );
+  });
+});

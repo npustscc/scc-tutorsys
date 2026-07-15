@@ -290,44 +290,97 @@ await check('D', '🔍 overviewStats(114-2) 回舊班名（nameHistory 生效）
 });
 });
 
-// ══ E：匯入 v3（真實統計表）═══════════════════════════════════════════════════
+// ══ E：匯入 v3（真實統計表，仿 Excel 樣態預覽：學院 tabs＋系所分組＋全欄位可修）═══
 await flow('E', async () => {
 await page.locator('[data-admin-tab="roster"]').click();
 await page.setInputFiles('#roster-file', XLSX_REAL);
-await check('E', '偵測為統計表格式＋摘要數字（總 369／家族 61／uncertain 63）', async () => {
+await check('E', '偵測為統計表格式＋摘要數字（總 369／uncertain 63）', async () => {
   await page.locator('#roster-format', { hasText: '統計表格式' }).waitFor({ timeout: 30000 });
   await page.locator('#roster-preview', { hasText: '共 369 列' }).waitFor({ timeout: 30000 });
-  const summary = await page.locator('#roster-preview p').first().textContent();
+  const summary = await page.locator('#roster-summary').textContent();
   evid['E-summary-1st'] = summary;
   expect(summary.includes('待人工確認（標黃）63'), '摘要=' + summary);
 });
-await shot(page, 'E-匯入偵測與摘要');
-await check('E', '預覽表在 1280px 視窗下：外層可橫向捲動＋表格撐寬觸發捲動＋班級/導師欄 white-space:nowrap（不逐字直排）', async () => {
-  const wrap = page.locator('#roster-preview .table-wrap');
-  const overflowX = await wrap.evaluate((el) => getComputedStyle(el).overflowX);
-  expect(overflowX === 'auto', 'table-wrap overflow-x=' + overflowX);
-  const scrollInfo = await wrap.evaluate((el) => ({ scrollWidth: el.scrollWidth, clientWidth: el.clientWidth }));
-  evid['E-table-wrap-scroll'] = JSON.stringify(scrollInfo);
-  const table = page.locator('#roster-preview-table');
-  const tableWidth = await table.evaluate((el) => el.getBoundingClientRect().width);
-  expect(tableWidth >= 1080, 'table 寬度=' + tableWidth + '（應吃到 min-width:1080px）');
-  // white-space:nowrap 是「不逐字直排」的結構性保證（CSS 規範下該屬性使該儲存格文字不可換行，
-  // 與同列其他欄位（如「原因/提示」自由文字，本就允許正常換行）的列高無關，故不用列高間接推論）。
-  for (const label of ['班級', '導師1', '導師2']) {
-    const ws = await page.locator('#roster-preview-table td[data-label="' + label + '"]').first().evaluate((el) => getComputedStyle(el).whiteSpace);
-    expect(ws === 'nowrap', label + ' 欄 white-space=' + ws);
-  }
+await check('E', '學院分頁 tabs：每個 tab 帶列數、含「未分學院」（合併分頁），列數總和=369', async () => {
+  const tabs = await page.locator('#roster-preview .tab-bar [data-roster-tab]').allTextContents();
+  evid['E-tabs'] = JSON.stringify(tabs);
+  expect(tabs.length >= 2, 'tabs 數=' + tabs.length);
+  expect(tabs.every((t) => /（\d+）$/.test(t)), '有 tab 未帶列數：' + tabs.join(' / '));
+  expect(tabs.some((t) => t.startsWith('未分學院（')), '無「未分學院」tab：' + tabs.join(' / '));
+  const total = tabs.reduce((s, t) => s + Number((t.match(/（(\d+)）/) || [])[1] || 0), 0);
+  expect(total === 369, '各 tab 列數總和=' + total);
 });
-await shot(page, 'E-預覽表上段');
-await page.locator('#roster-preview .table-wrap').evaluate((el) => { el.scrollTop = 0; });
+await check('E', '系所群組標題列（仿系別合併儲存格）：colspan 整寬＋系所名 input', async () => {
+  const head = page.locator('#roster-preview-table .roster-dept-head').first();
+  await head.waitFor({ timeout: 5000 });
+  expect(await head.locator('td').first().getAttribute('colspan') === '10', 'colspan 非 10');
+  const deptVal = await head.locator('input[data-roster-dept]').inputValue();
+  evid['E-first-dept-group'] = deptVal;
+  expect(deptVal.trim().length > 0, '系所群組 input 為空');
+});
+await check('E', '版面：外層 overflow-x:auto＋表格 min-width:1060 生效', async () => {
+  const overflowX = await page.locator('#roster-preview .table-wrap').evaluate((el) => getComputedStyle(el).overflowX);
+  expect(overflowX === 'auto', 'overflow-x=' + overflowX);
+  const w = await page.locator('#roster-preview-table').evaluate((el) => el.getBoundingClientRect().width);
+  expect(w >= 1060, 'table 寬=' + w);
+});
+await shot(page, 'E-tabs與巢狀分組全貌');
+await check('E', '簡稱欄預填且可修：既有班級四技一A 帶現行 displayName「四農園一A」', async () => {
+  const firstRow = page.locator('#roster-preview-table [data-roster-row]').first();
+  const clsName = await firstRow.locator('input[data-roster-field="classNameRaw"]').inputValue();
+  const disp = await firstRow.locator('input[data-roster-field="classDisplayName"]').inputValue();
+  evid['E-first-row-prefill'] = JSON.stringify({ clsName, disp });
+  expect(clsName === '四技一A', '首列班名=' + clsName);
+  expect(disp === '四農園一A', '簡稱預填=' + disp);
+  expect(await firstRow.locator('input[data-roster-field="classDisplayName"]').getAttribute('readonly') === null, '簡稱欄不可 readonly');
+});
+await check('E', '修改導師姓名 → 單列 email 自動比對＋狀態 badge 即時重算（導師變更→無變動）', async () => {
+  const row = page.locator('#roster-preview-table [data-roster-row]').first();
+  const st0 = (await row.locator('[data-roster-status] .badge').textContent()).trim();
+  expect(st0 === '導師變更', '初始狀態=' + st0);
+  await row.locator('input[data-roster-field="tutor1Name"]').fill('李新師');
+  await row.locator('input[data-roster-field="tutor2Name"]').fill('王助教');
+  const e1 = await row.locator('input[data-roster-field="tutor1Email"]').inputValue();
+  const e2 = await row.locator('input[data-roster-field="tutor2Email"]').inputValue();
+  evid['E-live-email-lookup'] = JSON.stringify({ e1, e2 });
+  expect(e1 === 'lee@test.local', 'tutor1 email 自動帶入=' + e1);
+  expect(e2 === 'assistant2@test.local', 'tutor2 email 自動帶入=' + e2);
+  const st1 = (await row.locator('[data-roster-status] .badge').textContent()).trim();
+  expect(st1 === '無變動', '修改後狀態=' + st1);
+});
+await shot(page, 'E-即時重算差異');
+await check('E', '切換分頁後編輯值與勾選狀態保留（狀態存 rosterRows 非 DOM）', async () => {
+  const row = page.locator('#roster-preview-table [data-roster-row]').first();
+  const idx = await row.getAttribute('data-roster-row');
+  await row.locator('input[data-roster-field="classDisplayName"]').fill('自訂簡稱X');
+  await row.locator('input[data-roster-check]').setChecked(false);
+  const tabs = page.locator('#roster-preview .tab-bar [data-roster-tab]');
+  await tabs.nth(1).click();
+  await page.locator('#roster-preview-table').waitFor({ timeout: 5000 });
+  await tabs.nth(0).click();
+  const row2 = page.locator('[data-roster-row="' + idx + '"]');
+  const disp = await row2.locator('input[data-roster-field="classDisplayName"]').inputValue();
+  expect(disp === '自訂簡稱X', '簡稱編輯值未保留：' + disp);
+  expect((await row2.locator('input[data-roster-check]').isChecked()) === false, '勾選狀態未保留');
+  await row2.locator('input[data-roster-field="classDisplayName"]').fill('四農園一A');  // 還原，避免污染後續
+});
 // 捲到含「現行→匯入」對照與標黃列處多截幾張
 await page.locator('#roster-preview tr', { hasText: '現行：' }).first().scrollIntoViewIfNeeded().catch(() => {});
 await shot(page, 'E-預覽表-現行對照');
 await page.locator('#roster-preview tr[style*="warning"]').first().scrollIntoViewIfNeeded().catch(() => {});
 await shot(page, 'E-預覽表-標黃列');
-await page.locator('[data-roster-select="changed"]').click();
+await page.locator('[data-roster-select="changed"]').click();  // 只作用當前分頁；其他分頁維持預設勾選
 await page.locator('[data-action="roster-confirm"]').scrollIntoViewIfNeeded();
-await page.locator('[data-action="roster-confirm"]').click();
+const [importReq] = await Promise.all([
+  page.waitForRequest((q) => q.url().startsWith(APPS_SCRIPT_URL) && String(q.postData() || '').includes('adminImportRoster'), { timeout: 60000 }),
+  page.locator('[data-action="roster-confirm"]').click(),
+]);
+await check('E', '🔍 確認匯入送出跨分頁勾選列（payload 含非當前分頁的學院）', async () => {
+  const payload = JSON.parse(new URLSearchParams(importReq.postData()).get('payload'));
+  const colleges = [...new Set((payload.rows || []).map((r) => String(r.collegeName || '')))];
+  evid['E-payload-colleges'] = JSON.stringify(colleges) + ' rows=' + (payload.rows || []).length;
+  expect(colleges.length >= 2 && colleges.some((c) => c !== '農學院'), '學院集合=' + JSON.stringify(colleges));
+});
 await check('E', '確認匯入成功（成功/失敗摘要出現）', async () => {
   await page.locator('.toast', { hasText: '匯入完成' }).waitFor({ timeout: 60000 });
   const toast = await page.locator('.toast', { hasText: '匯入完成' }).textContent();
@@ -340,7 +393,7 @@ await page.locator('[data-admin-tab="roster"]').click();
 await page.setInputFiles('#roster-file', XLSX_REAL);
 await check('E', '🔍 同檔再上傳：多數列變「無變動」（冪等性）', async () => {
   await page.locator('#roster-preview', { hasText: '共 369 列' }).waitFor({ timeout: 30000 });
-  const summary = await page.locator('#roster-preview p').first().textContent();
+  const summary = await page.locator('#roster-summary').textContent();
   evid['E-summary-2nd'] = summary;
   const m = summary.match(/無變動 (\d+)/);
   expect(m && Number(m[1]) >= 250, '無變動數=' + (m && m[1]) + '，摘要=' + summary);
@@ -362,11 +415,18 @@ await flow('F', async () => {
 
   await page.locator('[data-admin-tab="roster"]').click();
   await page.setInputFiles('#roster-file', csvPath);
-  await check('F', '偵測為標準範本格式，共 2 列', async () => {
+  await check('F', '偵測為標準範本格式，共 2 列；學院分頁=農學院（1）＋未分學院（1）', async () => {
     await page.locator('#roster-format', { hasText: '標準範本格式' }).waitFor({ timeout: 10000 });
     await page.locator('#roster-preview', { hasText: '共 2 列' }).waitFor({ timeout: 10000 });
+    const tabs = await page.locator('#roster-preview .tab-bar [data-roster-tab]').allTextContents();
+    evid['F-tabs'] = JSON.stringify(tabs);
+    expect(tabs.length === 2 && tabs[0] === '農學院（1）' && tabs[1] === '未分學院（1）', 'tabs=' + JSON.stringify(tabs));
   });
   await shot(page, 'F-畢業班補匯預覽表');
+  // 全選作用於當前分頁 → 兩個分頁各按一次（同時驗證跨分頁勾選都會送出）
+  await page.locator('[data-roster-select="all"]').click();
+  await page.locator('#roster-preview .tab-bar [data-roster-tab]').nth(1).click();
+  await page.locator('#roster-preview-table').waitFor({ timeout: 5000 });
   await page.locator('[data-roster-select="all"]').click();
   // 不靠 toast 文字比對（4200ms 才自動移除，前一步 E 的 toast 可能還留在 DOM 造成誤判）——
   // 直接攔截這次 adminImportRoster 的真實回應體當事實依據。

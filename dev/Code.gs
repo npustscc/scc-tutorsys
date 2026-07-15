@@ -1042,6 +1042,9 @@ function applySetTopics_(record, topicsPatch, byEmail, actualBy, now) {
 // 家族→「系簡+家族(導師名)」（家族由呼叫端帶 tutorName，未帶則不含括號）；
 // 技優/產訓/產專/海青等已知但無法歸入上述規則的前綴→前綴保留、系簡插入其後；
 // 完全無法判別 → 直接「系簡+原名」。純字串規則，不查資料庫，僅供 UI 預填建議值。
+// 注意：dev/index.html 匯入解析器區有一份同邏輯前端複本 fuseClassDisplayNameFront（匯入預覽
+// 預填「簡稱」欄用），改動本規則時兩處同步（比照 CLASS_NAME_RE ↔ IMPORT_CLASS_NAME_RE_ 的先例；
+// test/import-parser.test.js 有 parity 測試抽出兩版比對輸出，漂移即紅燈）。
 function deptShortName_(deptName) {
   const n = String(deptName || '').trim();
   return (n.length > 1 && n.slice(-1) === '系') ? n.slice(0, -1) : n;
