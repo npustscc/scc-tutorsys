@@ -66,6 +66,8 @@ function createHost(opts) {
   const dataDir = opts.dataDir;
   if (!gsFile) throw new Error('createHost: gsFile required');
   if (!dataDir) throw new Error('createHost: dataDir required');
+  // 選配的真寄信函式（(msg)=>Promise，永不 reject）；未注入時 MailApp 只落地稽核。
+  const sendMail = typeof opts.sendMail === 'function' ? opts.sendMail : null;
 
   const storeDir = path.join(dataDir, 'store');
   const attachmentsDir = path.join(dataDir, 'attachments');
@@ -162,6 +164,14 @@ function createHost(opts) {
         const entry = { at: new Date().toISOString(), to: (msg && msg.to) || '', subject: (msg && msg.subject) || '', body: (msg && msg.body) || '' };
         try { fs.appendFileSync(mailsPath, JSON.stringify(entry) + '\n', { mode: 0o600 }); } catch (e) { console.error('[gas-host] mails.jsonl 寫入失敗：' + e.message); }
         console.log('[gas-host] MailApp.sendEmail to=' + entry.to + ' subject=' + entry.subject);
+        // 真寄信（選配）：opts.sendMail 由 index.js 注入（server/mailer.js 的 send）。
+        // fire-and-forget——Code.gs 的 doPost 全程同步，不能也不需要等 SMTP 完成；
+        // 寄送結果由 mailer 自己落 mails.jsonl（kind:'smtp-result'）。這裡任何例外
+        // 都不得外拋（寄信失敗不影響業務動作，與 GAS 版 MailApp 失敗不擋登入的語意一致）。
+        if (typeof sendMail === 'function') {
+          try { sendMail({ to: entry.to, subject: entry.subject, body: entry.body }); }
+          catch (e) { console.error('[gas-host] sendMail 呼叫失敗：' + e.message); }
+        }
       },
     },
     ScriptApp: { getOAuthToken: function () { return 'server-side-stub-oauth-token'; } },

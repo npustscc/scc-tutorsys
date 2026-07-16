@@ -17,6 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createHost } = require('./gas-host');
+const { createMailer } = require('./mailer');
 const { loadConfig } = require('./config');
 
 const MIME = {
@@ -94,7 +95,16 @@ function readUsersSync_(dataDir) {
 }
 
 function startServer(config) {
-  const host = createHost({ gsFile: config.gsFile, dataDir: config.dataDir });
+  const mailer = createMailer({
+    host: config.smtpHost, port: config.smtpPort,
+    user: config.smtpUser, pass: config.smtpPass,
+    fromName: config.mailFromName,
+    auditPath: path.join(config.dataDir, 'mails.jsonl'),
+  });
+  console.log('[server] 寄信模式：' + (mailer.enabled
+    ? 'SMTP 真寄（' + config.smtpHost + ':' + config.smtpPort + '，帳號 ' + config.smtpUser + '）'
+    : '僅落地稽核 mails.jsonl（未設定 SMTP_USER/SMTP_PASS）'));
+  const host = createHost({ gsFile: config.gsFile, dataDir: config.dataDir, sendMail: mailer.enabled ? mailer.send : null });
 
   // 登入節流：in-memory per (ip + email)，連續失敗達 FAIL_THRESHOLD 次後，
   // loginThrottleMs 內一律回節流訊息（不透露剩餘秒數、也不再嘗試驗證密碼）。

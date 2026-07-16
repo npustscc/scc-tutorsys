@@ -65,6 +65,13 @@ function loadConfig(opts) {
     dataDir: resolveMaybeRelative_(repoRoot, env.DATA_DIR || 'server/data'),
     publicDir: resolveMaybeRelative_(repoRoot, env.PUBLIC_DIR || 'server/public'),
     loginThrottleMs: env.LOGIN_THROTTLE_MS ? Number(env.LOGIN_THROTTLE_MS) : 60000,
+    // SMTP 寄信（全部選填）：SMTP_USER 與 SMTP_PASS 都有值才啟用真寄信，
+    // 否則維持「只落地 mails.jsonl 稽核」模式（見 server/mailer.js）。
+    smtpHost: env.SMTP_HOST || 'smtp.gmail.com',
+    smtpPort: env.SMTP_PORT ? Number(env.SMTP_PORT) : 465,
+    smtpUser: env.SMTP_USER || '',
+    smtpPass: env.SMTP_PASS || '',
+    mailFromName: env.MAIL_FROM_NAME || '',
     repoRoot: repoRoot,
   };
 }
