@@ -1,0 +1,113 @@
+<!doctype html>
+<!--
+  server/login-template.html — 本地登入頁模板。
+  由 server/scripts/build-public.js 注入 __ROOT_FOLDER_ID__ / __ENV_LABEL__ 後，
+  輸出為 server/public/login.html（不直接部署本檔）。
+
+  currentUser.picture 用法結論（已查 dev/index.html:270,293,529,743）：
+    - LS_USER_KEY 存 { email, name, picture }
+    - 唯一讀取點：`$('user-avatar').src = currentUser.picture || '';`
+  若這裡把 picture 存成空字串，`currentUser.picture || ''` 短路後 img.src 仍會被設成
+  空字串——多數瀏覽器把「顯式設定 src=''」解讀成「參照目前文件的 URL」，會多打一次
+  對當前頁面的請求，且顯示破圖圖示。改存 1x1 透明 PNG 的 data URI，讓 picture 永遠
+  是非空值，avatar 顯示空白但不破圖、不多打請求。
+-->
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>屏科大導師資訊系統——區網登入（__ENV_LABEL__）</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: -apple-system, "Segoe UI", "Microsoft JhengHei", sans-serif;
+    max-width: 420px; margin: 12vh auto; padding: 0 20px; line-height: 1.6;
+  }
+  h1 { font-size: 1.2rem; margin-bottom: .25rem; }
+  .env-badge {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    background: #2d6cdf; color: #fff; font-size: .8rem; vertical-align: middle;
+  }
+  .hint { font-size: .85rem; opacity: .75; margin: .5rem 0 1.5rem; }
+  form { display: flex; flex-direction: column; gap: .9rem; }
+  label { font-size: .9rem; display: block; }
+  input {
+    width: 100%; box-sizing: border-box; padding: .55rem .6rem; font-size: 1rem;
+    margin-top: .25rem; border: 1px solid #999; border-radius: 6px;
+  }
+  button {
+    padding: .65rem; font-size: 1rem; cursor: pointer; border: none; border-radius: 6px;
+    background: #2d6cdf; color: #fff;
+  }
+  button:disabled { opacity: .6; cursor: not-allowed; }
+  .error { color: #c0392b; font-size: .9rem; min-height: 1.3em; }
+</style>
+</head>
+<body>
+<h1>屏科大導師資訊系統 <span class="env-badge">__ENV_LABEL__</span></h1>
+<p class="hint">此為校內自架伺服器登入；憑證效期至當日 24:00（台北時間）。</p>
+<form id="login-form" autocomplete="on">
+  <label>電子郵件
+    <input type="email" id="email" required autocomplete="username">
+  </label>
+  <label>密碼
+    <input type="password" id="password" required autocomplete="current-password">
+  </label>
+  <div class="error" id="error" role="alert"></div>
+  <button type="submit" id="submit-btn">登入</button>
+</form>
+<script>
+(function () {
+  'use strict';
+  var ROOT_FOLDER_ID = '__ROOT_FOLDER_ID__';
+  var LS_USER_KEY    = 'tutor_user_' + ROOT_FOLDER_ID;
+  var LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;
+  // 1x1 透明 PNG（見檔頭註解）。
+  var BLANK_AVATAR = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  function readSession() {
+    try { return JSON.parse(localStorage.getItem(LS_SESSION_KEY) || 'null'); } catch (e) { return null; }
+  }
+  // 既有 session 未過期 → 直接跳過登入頁。
+  var existing = readSession();
+  if (existing && existing.token && Number(existing.exp) > Math.floor(Date.now() / 1000) + 30) {
+    location.href = './index.html';
+    return;
+  }
+
+  var form = document.getElementById('login-form');
+  var errorEl = document.getElementById('error');
+  var btn = document.getElementById('submit-btn');
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    errorEl.textContent = '';
+    btn.disabled = true;
+    var email = document.getElementById('email').value.trim();
+    var password = document.getElementById('password').value;
+
+    fetch('./login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: email, password: password }),
+    }).then(function (res) { return res.json(); }).then(function (json) {
+      if (!json || json.success !== true) {
+        errorEl.textContent = (json && json.error) || '登入失敗，請稍後再試';
+        btn.disabled = false;
+        return;
+      }
+      var data = json.data || {};
+      try {
+        localStorage.setItem(LS_SESSION_KEY, JSON.stringify({ token: data.sessionToken, exp: data.exp, email: data.email }));
+        localStorage.setItem(LS_USER_KEY, JSON.stringify({ email: data.email, name: data.name || data.email, picture: BLANK_AVATAR }));
+      } catch (e) { /* localStorage 寫入失敗（無痕模式等）：跳轉後前端會偵測到無 session 再導回登入頁 */ }
+      location.href = './index.html';
+    }).catch(function () {
+      errorEl.textContent = '連線失敗，請確認伺服器狀態';
+      btn.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

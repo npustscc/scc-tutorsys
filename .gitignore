@@ -17,3 +17,9 @@ creds.json
 roster*
 forsystems/
 bugreports/
+
+# 自架伺服器：機密與資料，絕不進 repo
+server/.env
+server/data/
+server/public/
+drive-export*/
