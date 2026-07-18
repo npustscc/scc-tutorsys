@@ -11,6 +11,8 @@ function makeSandbox() {
     'parseRequiredMeetingCountField_', 'buildImportTutors_', 'importRosterRow_',
     'isValidClassName_', 'isValidDeptName_', 'slugifyDeptId_', 'uniqueDeptId_', 'uniqueClassId_',
     'deptShortName_', 'fuseClassDisplayName_', 'tutorsDiffer_',  // importRosterRow_ 判斷導師異動（Ticket C）
+    'classDisplayNameDeptOverride_', 'isProtectedClassForDisplayNameNormalization_',
+    'normalizeClassDisplayName_',  // importRosterRow_ 匯入時的 displayName canonical 正規化
   ]);
 }
 

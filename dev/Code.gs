@@ -1070,6 +1070,86 @@ function fuseClassDisplayName_(className, deptName, systemId, tutorName) {
   return short + name;
 }
 
+// ── displayName 全校 canonical 簡稱正規化（2026-07 教務處簡稱對齊，使用者逐條裁決）────────
+// 與上面的 fuseClassDisplayName_（新班融合建議值）是兩件事：fuseClassDisplayName_ 只負責
+// 「從原始班名生出一個建議顯示名」；這裡是「把已存在（剛融合出的、或使用者填的、或既有資料庫
+// 裡本來就有）的 displayName 收斂到全校統一的系所簡稱／碩士班班別字母規則」，在
+// importRosterRow_ 匯入一列時對新班融合值與既有班沿用值/使用者填的 classDisplayName 一律
+// 過一次自動套用；scripts/migrate-display-name-canonical.mjs 對既有資料做一次性遷移時
+// 透過 test/harness.js 直接抽出這幾個函式共用同一份規則，不會與程式邏輯分岔。
+// 只動顯示字串——不動 deptId/name/systemId，班級身分（(deptId, name)）與 records 的 classId
+// 關聯完全不受影響。
+//
+// 系所簡稱覆寫表：只有以下 7 個系所的簡稱會變動，其餘系所簡稱維持現行不動；覆寫只替換
+// displayName 裡「該系所現行簡稱子字串」（= deptShortName_(dept.name) 的產出）本身，
+// 不影響其前後的學制前綴／年級／班別字母：
+//   動疫所→動疫科技、EMBA (進)→EMBA、智慧機電學程→智慧機電、財金學程→財金、
+//   科技農業→科農、材料工程系→材料、客研所→客家。
+function classDisplayNameDeptOverride_(deptName) {
+  const OVERRIDES = {
+    '動疫所': '動疫科技',
+    'EMBA (進)': 'EMBA',
+    '智慧機電學程': '智慧機電',
+    '財金學程': '財金',
+    '科技農業': '科農',
+    '材料工程系': '材料',
+    '客研所': '客家',
+  };
+  return OVERRIDES[String(deptName || '').trim()] || null;
+}
+
+// family（家族班）與 技優/產訓/產專/海青 前綴班（與 fuseClassDisplayName_ 的 otherPrefixes
+// 同一份清單）完全跳過本正規化——使用者明定家族班不動、技優/產訓/產專維持 tutorsys 現行的
+// infix 顯示樣式，兩者皆不套用系所簡稱覆寫、也不補碩士班班別字母。
+function isProtectedClassForDisplayNameNormalization_(rawClassName, systemId) {
+  if (systemId === 'family') return true;
+  const name = String(rawClassName || '').trim();
+  if (name.indexOf('家族') !== -1) return true;
+  const protectedPrefixes = ['技優', '產訓', '產專', '海青'];
+  for (let i = 0; i < protectedPrefixes.length; i++) {
+    if (name.indexOf(protectedPrefixes[i]) === 0) return true;
+  }
+  return false;
+}
+
+// 回傳 { value, changed, matched }：
+// - matched:false → 該系所理論上有簡稱覆寫規則，但在現有 displayName 裡既找不到預期的現行
+//   簡稱子字串、也不是已經套用過覆寫值的 canonical 狀態（多半是已被人工改成自訂顯示名的
+//   班級），本函式不猜測替換方式，原樣保留（value===displayName、changed:false），由呼叫端
+//   記錄下來供人工複核，不自行發明規則。
+// - 已經是 canonical 狀態（displayName 已含覆寫值）→ matched:true、changed:false，
+//   確保本函式對已收斂過的資料重複執行是 idempotent（不會誤判成「找不到、需人工複核」）。
+// - systemId==='master'（碩士班，不含碩專 master_inservice）：displayName 結尾若不是英文
+//   字母才補一個 'A'（碩農園一→碩農園一A）；結尾已經是字母（A-Z）者維持現狀不動。
+// - systemId==='master_inservice'（碩專）：只套用系所簡稱覆寫（若適用），前綴/班別字母不動
+//   （現行資料前綴皆已是「碩專」開頭、字母已依單班/多班現狀標示，使用者裁決維持現狀）。
+function normalizeClassDisplayName_(displayName, deptName, systemId, rawClassName) {
+  const current = String(displayName || '').trim();
+  if (!current) return { value: current, changed: false, matched: true };
+  if (isProtectedClassForDisplayNameNormalization_(rawClassName, systemId)) {
+    return { value: current, changed: false, matched: true };
+  }
+  let next = current;
+  let matched = true;
+  const override = classDisplayNameDeptOverride_(deptName);
+  if (override) {
+    const fromShort = deptShortName_(deptName);
+    if (fromShort && next.indexOf(fromShort) !== -1) {
+      next = next.split(fromShort).join(override);
+    } else if (next.indexOf(override) !== -1) {
+      // 已經是套用過覆寫值的 canonical 狀態（例如遷移腳本重複執行、或本來就已手動改好）——
+      // 沒有現行簡稱子字串可替換是正常狀況，不算「找不到」。
+      matched = true;
+    } else {
+      matched = false;
+    }
+  }
+  if (matched && systemId === 'master' && !/[A-Za-z]$/.test(next)) {
+    next = next + 'A';
+  }
+  return { value: next, changed: next !== current, matched: matched };
+}
+
 // 應繳班會份數解析：requiredMeetingOverride 為數字（含 0＝本學期免繳）時優先套用；
 // 否則查 class.systemId 對應的 tutorSystem.requiredMeetingCount（停用的制度不採用其值，
 // 視同查無制度）；都查不到則用保底預設 DEFAULT_REQUIRED_MEETING_COUNT_。
@@ -1673,15 +1753,19 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   let previousTutors = [];
 
   if (!cls) {
+    const newSystemId = systemRes.system ? systemRes.system.id : null;
     const fused = explicitDisplayName || fuseClassDisplayName_(
-      className, deptRes.dept.name, systemRes.system ? systemRes.system.id : null,
+      className, deptRes.dept.name, newSystemId,
       tutors.length ? tutors[0].name : undefined
     );
+    // 融合建議值（或使用者填的 classDisplayName）再過一次全校 canonical 簡稱正規化
+    // （見 normalizeClassDisplayName_ 上方註解）——匯入時自動套用，admin 事後仍可在後台改。
+    const normalized = normalizeClassDisplayName_(fused, deptRes.dept.name, newSystemId, className);
     cls = {
       id: uniqueClassId_(deptRes.dept.id + '_' + slugifyDeptId_(className), classes),
       name: className, deptId: deptRes.dept.id,
-      systemId: systemRes.system ? systemRes.system.id : null,
-      displayName: fused,
+      systemId: newSystemId,
+      displayName: normalized.value,
       requiredMeetingOverride: reqRes.value,
       tutors: tutors, suggestedTutors: [],
       dualApprovalMode: 'any', uploadWhitelist: [], active: true,
@@ -1691,10 +1775,14 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     tutorsChanged = tutors.length > 0;  // 新班且本列有導師 = 從無到有的異動
   } else {
     previousTutors = cls.tutors || [];
+    const updatedSystemId = systemRes.system ? systemRes.system.id : cls.systemId;
+    const normalized = normalizeClassDisplayName_(
+      explicitDisplayName || cls.displayName, deptRes.dept.name, updatedSystemId, className
+    );
     const updated = Object.assign({}, cls, {
       deptId: deptRes.dept.id,
-      systemId: systemRes.system ? systemRes.system.id : cls.systemId,
-      displayName: explicitDisplayName || cls.displayName,
+      systemId: updatedSystemId,
+      displayName: normalized.value,
       // 應繳份數（Ticket E bug fix）：本列未帶（Excel 空白/undefined/null → parse 出 null）
       // → 保留既有覆寫值不動；帶數字（含 0＝免繳）→ 設定。舊版空白會把既有覆寫洗回 null。
       requiredMeetingOverride: reqRes.value === null ? cls.requiredMeetingOverride : reqRes.value,
