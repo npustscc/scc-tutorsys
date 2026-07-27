@@ -42,7 +42,12 @@ const remoteScript = [
   'node server/scripts/build-public.js',
   'sudo systemctl restart ' + inst,
   'sleep 2',
-  'curl -sf http://127.0.0.1:' + port + '/healthz > /dev/null && echo HEALTHZ_OK',
+  // healthz 打該實例 .env 實際設定的 BIND 位址，不再寫死 127.0.0.1：實機的 BIND 已改為區網
+  // 位址（資安：服務不得出現在主機的對外介面上），寫死 loopback 會健檢不到而誤判部署失敗；
+  // 反過來若哪天 BIND 被改錯，這裡也會直接健檢失敗而中止，不會帶著錯誤設定回報成功。
+  'BIND_ADDR="$(grep -E "^BIND=" server/.env | cut -d= -f2- | tr -d "[:space:]")"',
+  'BIND_ADDR="${BIND_ADDR:-127.0.0.1}"',
+  'curl -sf "http://$BIND_ADDR:' + port + '/healthz" > /dev/null && echo HEALTHZ_OK',
   'echo REMOTE_HEAD=$(git rev-parse HEAD)',
 ].join('\n');
 
