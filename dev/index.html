@@ -2927,7 +2927,7 @@ function addFlagReason_(flags, reason) {
 // 確認匯入送出的是使用者看到/修改過的值（後端 importRosterRow_ 本來就接受 classDisplayName）。
 // 規則：系簡稱 = 系所名去尾字「系」；四技一A→「四+系簡+一A」、四技進一A→「進四+系簡+一A」、
 // 碩一→「碩+系簡+一」、碩專一B→「碩專+系簡+一B」、博一→「博+系簡+一」、
-// 家族→「系簡+家族(導師名)」（未帶導師名則不含括號）；技優/產訓/產專/海青前綴→前綴保留、
+// 家族→「系簡+導師名+家族」（導師名優先取呼叫端的 tutorName，未帶則從班名「家族+姓名」取）；技優/產訓/產專/海青前綴→前綴保留、
 // 系簡插入其後；完全無法判別→「系簡+原名」。純字串規則，不查資料庫。
 function deptShortNameFront(deptName) {
   const n = String(deptName || '').trim();
@@ -2939,7 +2939,9 @@ function fuseClassDisplayNameFront(className, deptName, systemId, tutorName) {
   const short = deptShortNameFront(deptName);
   if (!name) return short;
   if (name.indexOf('家族') !== -1) {
-    return tutorName ? (short + '家族(' + tutorName + ')') : (short + '家族');
+    // 見 dev/Code.gs 的 fuseClassDisplayName_ 同段註解（2026-08-07 起「系簡稱＋導師姓名＋家族」）。
+    const who = String(tutorName || '').trim() || name.split('家族').join('').trim();
+    return who ? (short + who + '家族') : (short + '家族');
   }
   if (name.indexOf('四技進') === 0) return '進四' + short + name.slice(3);
   if (name.indexOf('四技') === 0) return '四' + short + name.slice(2);

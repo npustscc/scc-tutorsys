@@ -47,10 +47,13 @@ test('fuseClassDisplayName_: 博一 → 博+系簡+一', () => {
   assert.equal(S.fuseClassDisplayName_('博一', '資訊管理系', null), '博資訊管理一');
 });
 
-test('fuseClassDisplayName_: 家族 → 系簡+家族(導師名)；未帶導師名則不含括號', () => {
+test('fuseClassDisplayName_: 家族 → 系簡+導師名+家族；姓名可從 tutorName 或班名取，皆無則不含姓名', () => {
   const S = makeSandbox();
-  assert.equal(S.fuseClassDisplayName_('家族', '資訊管理系', null, '王小明'), '資訊管理家族(王小明)');
-  assert.equal(S.fuseClassDisplayName_('家族', '資訊管理系', null), '資訊管理家族');
+  assert.equal(S.fuseClassDisplayName_('家族', '資訊管理系', null, '王小明'), '資訊管理王小明家族');
+  assert.equal(S.fuseClassDisplayName_('家族王小明', '資訊管理系', null), '資訊管理王小明家族',
+    '未帶 tutorName → 從班名「家族+姓名」取');
+  assert.equal(S.fuseClassDisplayName_('家族', '資訊管理系', null), '資訊管理家族',
+    '班名與 tutorName 都無姓名 → 退回不含姓名');
 });
 
 test('fuseClassDisplayName_: 技優/產訓/產專/海青等已知前綴 → 前綴保留、系簡插入其後', () => {
@@ -224,8 +227,10 @@ test('normalizeClassDisplayName_: 碩專（master_inservice）不補字母、非
 
 test('normalizeClassDisplayName_: family 班完全不動（即使 dept 有覆寫規則也不套用）', () => {
   const S = makeSandbox();
-  const r = S.normalizeClassDisplayName_('動疫所家族(張立鑫)', '動疫所', 'family', '家族');
-  assert.equal(r.value, '動疫所家族(張立鑫)');
+  // 輸入用 2026-08-07 起的家族顯示名格式（系簡稱＋導師姓名＋家族）；重點是 family 班不套用
+  // 動疫所→動疫科技 的簡稱覆寫，原樣保留。
+  const r = S.normalizeClassDisplayName_('動疫所張立鑫家族', '動疫所', 'family', '家族張立鑫');
+  assert.equal(r.value, '動疫所張立鑫家族');
   assert.equal(r.changed, false);
 });
 

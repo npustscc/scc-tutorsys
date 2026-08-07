@@ -329,8 +329,10 @@ test('fuseClassDisplayNameFront: 四技/四技進/碩/碩專/博/家族/海青/�
   assert.equal(f('碩一', '農園系'), '碩農園一');
   assert.equal(f('碩專一B', '農園系'), '碩專農園一B');
   assert.equal(f('博一', '農園系'), '博農園一');
-  assert.equal(f('家族陳美惠', '森林系', null, '陳美惠'), '森林家族(陳美惠)');
-  assert.equal(f('家族陳美惠', '森林系'), '森林家族', '未帶導師名 → 不含括號');
+  assert.equal(f('家族陳美惠', '森林系', null, '陳美惠'), '森林陳美惠家族');
+  assert.equal(f('家族陳美惠', '森林系'), '森林陳美惠家族', '未帶導師名 → 從班名「家族+姓名」取姓名');
+  assert.equal(f('家族', '森林系', null, '王志強'), '森林王志強家族', '班名無姓名 → 用呼叫端帶的導師名');
+  assert.equal(f('家族', '森林系'), '森林家族', '班名與導師名都無姓名 → 退回不含姓名');
   assert.equal(f('海青技術研習班', '農園系'), '海青農園技術研習班');
   assert.equal(f('技優一A', '農園系'), '技優農園一A');
   assert.equal(f('進修部一A', '農園系'), '農園進修部一A', '無學制關鍵字 → 系簡+原名 fallback');
@@ -350,6 +352,8 @@ test('fuseClassDisplayNameFront ↔ Code.gs fuseClassDisplayName_ parity（同�
     ['家族陳美惠', '森林系', 'family', '陳美惠'],
     ['家族陳美惠', '森林系', 'family', undefined],
     ['家族', '森林系', null, '王志強'],
+    ['家族', '森林系', 'family', undefined],   // 邊界：班名與導師名都無姓名可用
+    ['家族陳美惠', '森林系', 'family', '王志強'],  // 邊界：tutorName 與班名不一致，tutorName 優先
     ['技優一A', '農園系', null, undefined],
     ['產訓一A', '農園系', null, undefined],
     ['產專一A', '農園系', null, undefined],

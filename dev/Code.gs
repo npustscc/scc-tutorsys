@@ -1039,7 +1039,7 @@ function applySetTopics_(record, topicsPatch, byEmail, actualBy, now) {
 // ── displayName 自動融合（建議值，admin 可事後改）───────────────────────────────
 // 系簡稱 = 系所名去尾字「系」。四技一A→「四+系簡+一A」、四技進一A→「進四+系簡+一A」、
 // 碩一→「碩+系簡+一」、碩專一B→「碩專+系簡+一B」、博一→「博+系簡+一」、
-// 家族→「系簡+家族(導師名)」（家族由呼叫端帶 tutorName，未帶則不含括號）；
+// 家族→「系簡+導師名+家族」（導師名優先取呼叫端的 tutorName，未帶則從班名「家族+姓名」取）；
 // 技優/產訓/產專/海青等已知但無法歸入上述規則的前綴→前綴保留、系簡插入其後；
 // 完全無法判別 → 直接「系簡+原名」。純字串規則，不查資料庫，僅供 UI 預填建議值。
 // 注意：dev/index.html 匯入解析器區有一份同邏輯前端複本 fuseClassDisplayNameFront（匯入預覽
@@ -1055,7 +1055,13 @@ function fuseClassDisplayName_(className, deptName, systemId, tutorName) {
   const short = deptShortName_(deptName);
   if (!name) return short;
   if (name.indexOf('家族') !== -1) {
-    return tutorName ? (short + '家族(' + tutorName + ')') : (short + '家族');
+    // 家族班顯示名＝「系簡稱＋導師姓名＋家族」（2026-08-07 使用者指定，取代原本的
+    // 「系簡稱＋家族(導師姓名)」）。導師姓名優先用呼叫端帶的 tutorName；未帶則從班名取——
+    // 統計表解析器產出的家族班名本身就是「家族＋姓名」（如 家族陳美惠 → 陳美惠），
+    // 這也是家族班在 (deptId, 班名) 身分下能每位導師各自一班的原因。兩者皆無姓名可用時
+    // 才退回不含姓名的「系簡稱＋家族」。
+    const who = String(tutorName || '').trim() || name.split('家族').join('').trim();
+    return who ? (short + who + '家族') : (short + '家族');
   }
   if (name.indexOf('四技進') === 0) return '進四' + short + name.slice(3);
   if (name.indexOf('四技') === 0) return '四' + short + name.slice(2);
