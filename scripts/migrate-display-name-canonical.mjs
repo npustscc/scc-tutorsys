@@ -116,7 +116,16 @@ try {
   console.log('[migrate] 啟動 ' + INSTANCE + ' ...');
   sh('ssh', ['scc-server', 'sudo systemctl start ' + INSTANCE]);
   try {
-    const health = sh('ssh', ['scc-server', 'sleep 2; curl -sf http://127.0.0.1:' + HEALTHZ_PORT + '/healthz > /dev/null && echo HEALTHZ_OK']);
+    // healthz 打該實例 .env 實際設定的 BIND，不寫死 127.0.0.1——實機 BIND 已於 `635ee2e`
+    // 的資安修正改為區網位址（服務不得出現在主機對外介面上），寫死 loopback 會健檢不到而
+    // 誤判失敗：寫入其實成功、服務也起來了，卻在這裡 throw。2026-08-07 實測 127.0.0.1:8790
+    // 確實不通。同 scripts/deploy-onprem.mjs 的做法。
+    const health = sh('ssh', ['scc-server', [
+      'sleep 2',
+      'BIND_ADDR="$(grep -E "^BIND=" ~/' + INSTANCE + '/server/.env | cut -d= -f2- | tr -d "[:space:]")"',
+      'BIND_ADDR="${BIND_ADDR:-127.0.0.1}"',
+      'curl -sf "http://$BIND_ADDR:' + HEALTHZ_PORT + '/healthz" > /dev/null && echo HEALTHZ_OK',
+    ].join('\n')]);
     console.log('[migrate] ' + health.trim());
   } catch (e) {
     console.error('[migrate] healthz 檢查失敗——服務可能沒起來，上 scc-server 看 journalctl -u ' + INSTANCE);
