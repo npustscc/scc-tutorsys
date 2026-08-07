@@ -1727,6 +1727,32 @@ function buildImportTutors_(row) {
   return tutors;
 }
 
+// 家族班班名唯一化。家族班的班級身分是「每位家族導師各自一班」，但名冊常見寫法是整欄都填
+// 「家族」（`114-2導師名單上傳範例.xlsx` 即如此，61 列全叫「家族」）。若照原樣以
+// (deptId, '家族') 認班，同系所有家族導師會落進同一班，而且匯入是「Excel 視為權威、直接覆寫
+// tutors」，所以後一列會把前一列的導師蓋掉——2026-08-07 在 scc-tutor-dev 實查證實：61 列家族班
+// 塌成 8 班，每班只剩名冊最後一列那位導師，其餘 53 位從未進入系統。
+//
+// 統計表解析器（parseStatsWorkbook）產出的家族班名本來就帶姓名（家族陳美惠），所以只有標準
+// 範本那條路徑會中；這裡在後端統一補齊，兩條匯入路徑都經過 importRosterRow_。
+//
+// 只在「班名剛好就是『家族』兩字」且拿得到導師姓名時才動它，其餘一律原樣（含已經帶姓名的
+// 家族陳美惠、以及共同指導/海青這類非家族班）。拿不到姓名時保持「家族」不動——名冊確實有
+// 沒填導師姓名的家族列（材料工程系 114-2 就有一列），那種列本來就要人工補，
+// 不該在這裡發明一個班名。
+//
+// 判斷依據刻意只看**班名**，不看導師制度的 systemId：一個班名就叫「家族」的班，本質上就是
+// 家族班，制度欄填什麼都不改變這件事；反過來拿 systemId==='family' 當條件是脆的——
+// `family` 這個 id 只有 DEFAULT_TUTOR_SYSTEMS_ 種子才有，若制度是匯入時由
+// resolveOrCreateSystem_ 依名稱「家族」現場建立的，它的 id 就不是 'family'，
+// 用 systemId 當否決條件會把正確情況擋掉。
+function familyClassNameForImport_(className, firstTutorName) {
+  const name = String(className || '').trim();
+  if (name !== '家族') return name;
+  const who = String(firstTutorName || '').trim();
+  return who ? (name + who) : name;
+}
+
 // 匯入一列（學院/系所/導師制度/班級名稱(原始)/班級顯示名稱/應繳班會份數/導師1/導師2）。
 // 班級以 (deptId, classNameRaw) 比對既有（同 classResolveCore_ 語意）；找不到就建立，
 // 找到則更新 deptId/systemId/displayName（若本列有給）/requiredMeetingOverride/tutors
@@ -1744,11 +1770,16 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   const reqRes = parseRequiredMeetingCountField_(row.requiredMeetingCount);
   if (!reqRes.ok) return reqRes;
 
-  const className = String(row.classNameRaw).trim();
+  const tutorsForName_ = buildImportTutors_(row);
+  const className = familyClassNameForImport_(
+    String(row.classNameRaw).trim(),
+    tutorsForName_.length ? tutorsForName_[0].name : ''
+  );
+  if (!isValidClassName_(className)) return { ok: false, error: 'invalid classNameRaw: ' + className };
   let cls = (classes || []).filter(function (c) { return c && c.deptId === deptRes.dept.id && c.name === className; })[0];
   if (cls && (cls.active === false || cls.deleted === true)) return { ok: false, error: 'class disabled: ' + cls.id };
 
-  const tutors = buildImportTutors_(row);
+  const tutors = tutorsForName_;
   const explicitDisplayName = row.classDisplayName && String(row.classDisplayName).trim();
   let nextClasses = classes || [];
   let classCreated = false;
@@ -1758,9 +1789,19 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   let tutorsChanged = false;
   let previousTutors = [];
 
+  // 家族班顯示名是系統規則（系簡稱＋導師姓名＋家族），**不讓 Excel 的「班級顯示名稱」欄覆寫**，
+  // 也不沿用既有值：名冊檔那一欄留的是舊格式（森林家族(陳美惠)），若照一般班別的
+  // 「填了就以填的為準」語意，重匯一次就會把舊格式帶回來。其餘班別語意完全不變。
+  const isFamilyRow_ = (systemRes.system ? systemRes.system.id : null) === 'family'
+    || className.indexOf('家族') === 0;
+  const familyFused_ = isFamilyRow_
+    ? fuseClassDisplayName_(className, deptRes.dept.name, 'family',
+        tutors.length ? tutors[0].name : undefined)
+    : '';
+
   if (!cls) {
     const newSystemId = systemRes.system ? systemRes.system.id : null;
-    const fused = explicitDisplayName || fuseClassDisplayName_(
+    const fused = familyFused_ || explicitDisplayName || fuseClassDisplayName_(
       className, deptRes.dept.name, newSystemId,
       tutors.length ? tutors[0].name : undefined
     );
@@ -1783,7 +1824,7 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     previousTutors = cls.tutors || [];
     const updatedSystemId = systemRes.system ? systemRes.system.id : cls.systemId;
     const normalized = normalizeClassDisplayName_(
-      explicitDisplayName || cls.displayName, deptRes.dept.name, updatedSystemId, className
+      familyFused_ || explicitDisplayName || cls.displayName, deptRes.dept.name, updatedSystemId, className
     );
     const updated = Object.assign({}, cls, {
       deptId: deptRes.dept.id,

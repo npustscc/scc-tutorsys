@@ -13,6 +13,7 @@ function makeSandbox() {
     'deptShortName_', 'fuseClassDisplayName_', 'tutorsDiffer_',  // importRosterRow_ 判斷導師異動（Ticket C）
     'classDisplayNameDeptOverride_', 'isProtectedClassForDisplayNameNormalization_',
     'normalizeClassDisplayName_',  // importRosterRow_ 匯入時的 displayName canonical 正規化
+    'familyClassNameForImport_',   // 家族班班名唯一化（名冊整欄填「家族」時補上導師姓名）
   ]);
 }
 
@@ -98,6 +99,21 @@ test('parseRequiredMeetingCountField_: 空白/未填 → null；"0" → 0；數�
   assert.equal(S.parseRequiredMeetingCountField_('abc').ok, false);
 });
 
+// ── familyClassNameForImport_（家族班班名唯一化）──────────────────────────────
+
+test('familyClassNameForImport_: 班名剛好是「家族」且拿得到導師姓名 → 補姓名；其餘一律原樣', () => {
+  const S = makeSandbox();
+  const f = S.familyClassNameForImport_;
+  assert.equal(f('家族', '陳美惠'), '家族陳美惠');
+  assert.equal(f('家族', ''), '家族', '拿不到導師姓名 → 不發明班名，留給人工補');
+  assert.equal(f('家族', '   '), '家族', '姓名只有空白 → 同上');
+  assert.equal(f('家族', undefined), '家族');
+  assert.equal(f('家族陳美惠', '陳美惠'), '家族陳美惠', '已帶姓名 → 不重複加');
+  assert.equal(f('四技一A', '王老師'), '四技一A', '非家族班 → 不動');
+  assert.equal(f('三A四A共同指導', '林宜賢'), '三A四A共同指導', '共同指導班 → 不動');
+  assert.equal(f('', '王老師'), '', '空班名 → 不動（由 isValidClassName_ 擋）');
+});
+
 // ── importRosterRow_（整合）───────────────────────────────────────────────────
 
 function baseRow(overrides) {
@@ -128,6 +144,55 @@ test('importRosterRow_: classDisplayName 有填 → 覆蓋自動融合值', () =
   const S = makeSandbox();
   const r = S.importRosterRow_(baseRow({ classDisplayName: '自訂顯示名' }), [], [], [], [], NOW);
   assert.equal(r.cls.displayName, '自訂顯示名');
+});
+
+// 迴歸測試：2026-08-07 在 scc-tutor-dev 實查發現 114-2 名冊的 61 列家族班塌成 8 班
+// （班名整欄都是「家族」→ 以 (deptId, 班名) 認班全部撞在一起，且匯入直接覆寫 tutors，
+//  所以每班只剩名冊最後一列那位導師，其餘 53 位從未進入系統）。
+test('importRosterRow_: 同系所多列家族班（班名皆為「家族」、導師不同）→ 每位導師各自一班，不互相覆蓋', () => {
+  const S = makeSandbox();
+  const famRow = function (name, email) {
+    return baseRow({ systemName: '家族', classNameRaw: '家族', requiredMeetingCount: '2',
+      tutor1Name: name, tutor1Email: email });
+  };
+  const r1 = S.importRosterRow_(famRow('陳美惠', 'a@x.com'), [], [], [], [], NOW);
+  assert.equal(r1.ok, true);
+  assert.equal(r1.cls.name, '家族陳美惠');
+  assert.equal(r1.classCreated, true);
+
+  const r2 = S.importRosterRow_(
+    famRow('王志強', 'b@x.com'), r1.colleges, r1.departments, r1.tutorSystems, r1.classes, NOW);
+  assert.equal(r2.ok, true);
+  assert.equal(r2.cls.name, '家族王志強');
+  assert.equal(r2.classCreated, true, '第二位家族導師必須是新建，不是覆蓋第一位');
+  assert.equal(r2.classes.length, 2, '兩位家族導師 → 兩班');
+  const names = r2.classes.map(function (c) { return c.name; }).sort();
+  assert.deepEqual(names, ['家族王志強', '家族陳美惠']);
+  const first = r2.classes.filter(function (c) { return c.name === '家族陳美惠'; })[0];
+  assert.deepEqual(first.tutors, [{ name: '陳美惠', email: 'a@x.com' }], '第一班的導師沒被蓋掉');
+});
+
+test('importRosterRow_: 家族班顯示名由系統規則決定，Excel 的 classDisplayName（舊格式）不得覆寫', () => {
+  const S = makeSandbox();
+  const r = S.importRosterRow_(baseRow({
+    systemName: '家族', classNameRaw: '家族', tutor1Name: '陳美惠',
+    classDisplayName: '資訊管理家族(陳美惠)',   // 名冊檔留的舊格式
+  }), [], [], [], [], NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.cls.displayName, '資訊管理陳美惠家族', '系統規則（系簡稱＋導師姓名＋家族）勝出');
+});
+
+test('importRosterRow_: 家族班重匯既有班 → 顯示名也收斂成新格式（不沿用舊值）', () => {
+  const S = makeSandbox();
+  const r1 = S.importRosterRow_(baseRow({
+    systemName: '家族', classNameRaw: '家族陳美惠', tutor1Name: '陳美惠',
+    classDisplayName: '資訊管理家族(陳美惠)',
+  }), [], [], [], [], NOW);
+  const r2 = S.importRosterRow_(baseRow({
+    systemName: '家族', classNameRaw: '家族陳美惠', tutor1Name: '陳美惠',
+  }), r1.colleges, r1.departments, r1.tutorSystems, r1.classes, NOW);
+  assert.equal(r2.classCreated, false, '同班名 → 更新既有班');
+  assert.equal(r2.cls.displayName, '資訊管理陳美惠家族');
 });
 
 test('importRosterRow_: 應繳份數 "0" → 免繳（requiredMeetingOverride:0）', () => {
