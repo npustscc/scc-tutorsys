@@ -87,32 +87,37 @@ Drive 資料夾 ID）。兩個環境專屬常數（`ROOT_FOLDER_ID` 與 `APPS_SC
 
 **推行到正式版（使用者明確說「推行到正式版」或「promote」）：**
 
-```powershell
-Copy-Item dev\Code.gs Code.gs
-Copy-Item dev\index.html index.html
-# 把兩個環境常數換回正式版的值（見下方注意事項）
-node scripts/check-env-constants.mjs   # 綠燈（exit 0）才能 push
-git add Code.gs index.html dev\Code.gs dev\index.html
+```bash
+node scripts/promote.mjs            # 預演：印出會改哪 13 處，不寫檔
+node scripts/promote.mjs --apply    # 實際推行；內含環境常數守門員，紅燈就不要 push
+git diff                            # 複核：應只有環境差異，不該有非預期的功能變動
+node --test test/*.test.js
+git add Code.gs index.html dev/Code.gs dev/index.html
 git commit -m "推行到正式版：[功能說明]"
 git push origin master
-node scripts/deploy-onprem.mjs prod    # 部署到自架正式實例（GAS 軌凍結，不 clasp push）
+node scripts/deploy-onprem.mjs prod  # 部署到自架正式實例（GAS 軌凍結，不 clasp push）
 ```
 
-注意：`Copy-Item` 會把 dev 版的兩個環境專屬常數一起帶進來，兩個都必須改回正式版的值，缺一都會讓
-正式版整個無法登入（**自架軌同樣中招**——前端 `ROOT_FOLDER_ID` 與後端 `ALLOWED_ROOTS` 白名單
-在自架環境照常成對比對）：
+**不要再用手動 `Copy-Item`／`cp` 複製 dev→prod**（原本的 PowerShell 流程在 Linux 端也照抄不動）。
+推行的本質是「複製 dev 到 prod，再把所有環境專屬差異換回 prod 的樣子」，而這份差異一共 **13 處**，
+人工比對做不對：
 
-- `ROOT_FOLDER_ID`（`Code.gs` 內）→ 正式版 Drive 根資料夾 ID
-- `APPS_SCRIPT_URL`（`index.html` 內）→ 正式版部署網址（自架軌 build-public 會替換掉這個值，
-  但 GAS 凍結軌與守門員腳本仍要求它是對的）
+- 2 處是**環境常數**（`ROOT_FOLDER_ID`、`APPS_SCRIPT_URL`），帶錯任一個都會讓正式版整個無法登入
+  （**自架軌同樣中招**——前端 `ROOT_FOLDER_ID` 與後端 `ALLOWED_ROOTS` 白名單在自架環境照常成對比對）。
+  這是 scc-infosys 2026-07-03 事故的形狀：只改了其中一個、漏改另一個，正式版打到測試版後端，
+  `Unauthorized rootFolderId` 讓正式版完全無法登入，直到下次 hotfix 才修復。
+- 另外 11 處是**環境字樣與標記**：`Code.gs` 檔首註記與警語、`ALLOWED_ROOTS` 的 label 與註解、
+  `doGet` 的 `(PROD)`/`(DEV)` 診斷標記、登入通知信的 subject 與內文「環境」欄、頁面 `<title>`、
+  兩處「測試版」badge、前端檔首註記。2026-07-18 的 `a14d5b7` 就是常數改對、這 11 處被 dev 版
+  整批蓋掉，而守門員只驗常數所以全綠放行——正式版對外自稱「測試版」、登入通知信也寫測試版，
+  在線上掛了三週才發現（2026-08-07 以 `promote.mjs` 修復）。更早的 `a91cb04` 也犯過同一類錯
+  （當時只漏 `doGet` 標記一項）。
 
-推行後（`Copy-Item` 完、`git push` 前）**必跑環境常數守門員**：
-`node scripts/check-env-constants.mjs`，綠燈（exit 0）才能 push。它機械比對 prod/dev 兩邊的
-`ROOT_FOLDER_ID`（`Code.gs` 與 `index.html` 各檢查一次）、`APPS_SCRIPT_URL`、GAS `scriptId`
-（`.clasp.json`）是否為對的那組——這是為了避免 scc-infosys 曾發生過的事故重演
-（2026-07-03：只改了其中一個環境常數、漏改另一個，導致正式版打到測試版後端，
-`Unauthorized rootFolderId` 讓正式版完全無法登入，直到下次 hotfix 才修復）。
-在 placeholder 尚未填入真實值前，此腳本只會警告（不阻擋 CI）；填入後才會真正比對 dev ≠ prod。
+`scripts/promote.mjs` 把這 13 處寫成規則表一次套用，**任一條沒命中預期次數就中止、一個字都不寫**——
+dev 端改了措辭導致規則失配時，寧可擋下推行，也不要推出一個「看起來成功、其實漏改」的正式版；
+遇到時同步更新該檔的 `FILES` 規則表再重跑。`--apply` 內含 `check-env-constants.mjs`（常數比對，
+placeholder 未填時只警告不阻擋）。CI 另跑 `node scripts/promote.mjs --check`，正式版檔案殘留
+任何 dev 標記即紅燈，防止同類漏改再次進 master。
 
 ## Git 設定
 

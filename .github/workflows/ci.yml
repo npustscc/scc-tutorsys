@@ -1,7 +1,9 @@
 name: CI
 
-# 每次 push 到 master 與每個 PR 都跑：純函式測試 + 環境常數守門員。
-# 後者會在「promote 時漏改 prod 環境常數」時直接讓 CI 紅燈（比照 scc-infosys 2026-07-03 事故教訓）。
+# 每次 push 到 master 與每個 PR 都跑：純函式測試 + 環境常數守門員 + 正式版殘留 dev 標記檢查。
+# 環境常數守門員會在「promote 時漏改 prod 環境常數」時直接讓 CI 紅燈（比照 scc-infosys 2026-07-03 事故教訓）。
+# promote --check 補的是它的盲區：它只驗 4 個常數，2026-07-18 的 a14d5b7 就是常數改對、
+# 另外 10 處環境字樣（badge/<title>/通知信/doGet 標記）整批被 dev 版蓋掉而全綠放行，帶到線上三週。
 # 注意：GitHub Pages 由內建 deploy-from-branch 服務，與本 workflow 互不干擾。
 
 on:
@@ -21,3 +23,5 @@ jobs:
         run: node --test test/*.test.js
       - name: 環境常數守門員（prod/dev 常數比對）
         run: node scripts/check-env-constants.mjs
+      - name: 正式版不得殘留 dev 標記（badge／<title>／通知信文案／doGet 標記）
+        run: node scripts/promote.mjs --check

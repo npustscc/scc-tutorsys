@@ -1,6 +1,6 @@
-// Code.gs — 導師資訊系統 SCC Drive Proxy（測試版）
+// Code.gs — 導師資訊系統 SCC Drive Proxy（正式版）
 // 執行身份：Me（USER_DEPLOYING）；存取：任何擁有 Google 帳戶（ANYONE_ANONYMOUS）
-// ⚠️ 此為測試版專用 GAS，只能存取 dev 資料夾，不可存取正式版資料。
+// ⚠️ 此為正式版專用 GAS，只能存取正式版資料夾，不可存取 dev 資料。
 //
 // 架構比照 scc-infosys 的 Code.gs：doPost dispatcher + verifyIdToken_ + Drive REST API
 // 讀寫 JSON + LockService read-modify-write。與 infosys 的關鍵差異：
@@ -16,7 +16,7 @@
 const CLIENT_ID      = '68582831293-fecbka17adht886tm6oh18vrdsdg1hbj.apps.googleusercontent.com';
 const ROOT_FOLDER_ID = '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik';  // 正式版 Drive 根資料夾
 
-// 白名單：只允許 dev 資料夾（前端可傳 rootFolderId 指定要打哪個環境的資料夾，
+// 白名單：只允許正式版資料夾（前端可傳 rootFolderId 指定要打哪個環境的資料夾，
 // 但後端只承認自己環境的白名單，其餘一律 Unauthorized rootFolderId）。
 const ALLOWED_ROOTS = {};
 ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'prod' };
@@ -133,7 +133,7 @@ function doGet(e) {
   // via/hasPayload 為診斷欄位：前端 loadBootstrap 的形狀防衛若回報收到本回應，
   // 即證明瀏覽器的 POST 在途中被降級成 GET（doPost 從未執行），且可看出 query 是否還帶著 payload。
   return jsonResp_({
-    ok: true, service: 'SCC Tutor System Drive Proxy (DEV)', via: 'doGet',
+    ok: true, service: 'SCC Tutor System Drive Proxy (PROD)', via: 'doGet',
     hasPayload: !!(e && e.parameter && e.parameter.payload),
   });
 }
@@ -1919,7 +1919,7 @@ function sessionStartAction_(params, ctx, userEmail) {
       const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
       const lines = [
         '您的帳號剛剛登入導師資訊系統。', '',
-        '環境：測試版',
+        '環境：正式版',
         '時間：' + timeStr + '（台北時間）',
         '瀏覽器：' + (ua || '（未知）'),
       ];
@@ -1929,7 +1929,7 @@ function sessionStartAction_(params, ctx, userEmail) {
         '若非本人操作，請立即聯繫系統管理者停用帳號，並可於系統「登入紀錄」按「登出所有裝置」使所有憑證即時失效。');
       MailApp.sendEmail({
         to: userEmail,
-        subject: '【屏科大導師資訊系統】登入通知（測試版）',
+        subject: '【屏科大導師資訊系統】登入通知（正式版）',
         body: lines.join('\n'),
       });
       mailSent = true;
