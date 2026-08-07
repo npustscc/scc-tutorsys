@@ -1104,13 +1104,19 @@ function classDisplayNameDeptOverride_(deptName) {
   return OVERRIDES[String(deptName || '').trim()] || null;
 }
 
-// family（家族班）與 技優/產訓/產專/海青 前綴班（與 fuseClassDisplayName_ 的 otherPrefixes
-// 同一份清單）完全跳過本正規化——使用者明定家族班不動、技優/產訓/產專維持 tutorsys 現行的
-// infix 顯示樣式，兩者皆不套用系所簡稱覆寫、也不補碩士班班別字母。
+// 技優/產訓/產專/海青 前綴班（與 fuseClassDisplayName_ 的 otherPrefixes 同一份清單）完全跳過
+// 本正規化——使用者明定維持 tutorsys 現行的 infix 顯示樣式，不套用系所簡稱覆寫、也不補碩士班
+// 班別字母。
+//
+// **家族班自 2026-08-07 起不再受保護**（使用者裁決改案）。原本 7/18 的裁決把家族班一起列入
+// 保護，但那次的上下文是「家族班沒有年級班別可言，前綴/班別字母不要亂動」，系所簡稱覆寫是被
+// 連帶包進來的，不是刻意。簡稱覆寫的用意是對齊教務處的全校統一簡稱，那是**系所層級的事實**，
+// 與班級是不是家族班無關；留著保護會產生同一系所內不一致的怪現象（`四材料一A` 用新簡稱、
+// `材料工程X家族` 用舊簡稱）。家族班本來就不是 systemId==='master'，所以放行後也不會被補上
+// 班別字母，只會套用簡稱覆寫。影響 61 個家族班裡的 9 個（動疫所 7、材料工程系 2），
+// 其餘系所無覆寫規則、結果不變。
 function isProtectedClassForDisplayNameNormalization_(rawClassName, systemId) {
-  if (systemId === 'family') return true;
   const name = String(rawClassName || '').trim();
-  if (name.indexOf('家族') !== -1) return true;
   const protectedPrefixes = ['技優', '產訓', '產專', '海青'];
   for (let i = 0; i < protectedPrefixes.length; i++) {
     if (name.indexOf(protectedPrefixes[i]) === 0) return true;

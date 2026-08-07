@@ -54,7 +54,14 @@ function ssh(script, opts = {}) {
   return sh('ssh', ['scc-server', script], opts);
 }
 
-const S = load(['deptShortName_', 'fuseClassDisplayName_']);
+// 顯示名走與 importRosterRow_ 完全相同的兩段路徑：fuseClassDisplayName_（融合建議值）
+// → normalizeClassDisplayName_（全校 canonical 系所簡稱覆寫）。家族班自 2026-08-07 起
+// 也套用簡稱覆寫（動疫所→動疫科技、材料工程系→材料），所以第二段不能省。
+const S = load([
+  'deptShortName_', 'fuseClassDisplayName_',
+  'classDisplayNameDeptOverride_', 'isProtectedClassForDisplayNameNormalization_',
+  'normalizeClassDisplayName_',
+]);
 
 // ── 讀取現況 ───────────────────────────────────────────────────────────────────
 console.log('[migrate] 讀取 ' + INSTANCE + ' 的 store ...');
@@ -86,6 +93,7 @@ if (!targets.length) {
 const plan = [];
 const skipped = [];
 const collisions = [];
+const unmatched = [];
 
 targets.forEach((c) => {
   const dept = deptById[c.deptId];
@@ -97,7 +105,14 @@ targets.forEach((c) => {
     return;
   }
   const newName = '家族' + tutorName;
-  const newDisplayName = S.fuseClassDisplayName_(newName, deptName, 'family', tutorName);
+  const fused = S.fuseClassDisplayName_(newName, deptName, 'family', tutorName);
+  const norm = S.normalizeClassDisplayName_(fused, deptName, 'family', newName);
+  const newDisplayName = norm.value;
+  if (!norm.matched) {
+    // 該系所有簡稱覆寫規則，但融合值裡找不到預期的現行簡稱子字串——不猜測替換方式，
+    // 原樣保留並列出來供人工複核（同 normalizeClassDisplayName_ 的既有語意）。
+    unmatched.push({ id: c.id, deptName: deptName, displayName: fused });
+  }
   const clash = classes.filter(function (o) {
     return o && o.id !== c.id && o.deptId === c.deptId && o.name === newName;
   })[0];
@@ -119,6 +134,10 @@ plan.forEach((p) => {
 if (skipped.length) {
   console.log('\n[migrate] --- 略過、需人工處理（' + skipped.length + ' 筆）---');
   skipped.forEach((s) => console.log('  ' + s.id + '　displayName=' + s.displayName + '　' + s.reason));
+}
+if (unmatched.length) {
+  console.log('\n[migrate] --- 簡稱覆寫對不上、原樣保留供人工複核（' + unmatched.length + ' 筆）---');
+  unmatched.forEach((u) => console.log('  ' + u.id + '　dept=' + u.deptName + '　displayName=' + u.displayName));
 }
 if (collisions.length) {
   console.error('\n[migrate] ✗ 改名後會與同系所既有班級撞名（' + collisions.length + ' 筆）：');

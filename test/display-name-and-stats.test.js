@@ -180,9 +180,11 @@ test('classDisplayNameDeptOverride_: 僅列出的 7 個系所有覆寫，其餘�
   assert.equal(S.classDisplayNameDeptOverride_('景憩所'), null, '未列出的所字尾系所維持現行不動');
 });
 
-test('isProtectedClassForDisplayNameNormalization_: family/技優/產訓/產專/海青 一律保護不動', () => {
+test('isProtectedClassForDisplayNameNormalization_: 技優/產訓/產專/海青 保護不動；family 自 2026-08-07 起不再保護', () => {
   const S = makeSandbox();
-  assert.equal(S.isProtectedClassForDisplayNameNormalization_('家族', 'family'), true);
+  // 家族班改為放行：簡稱覆寫是系所層級的事實，與班級是不是家族班無關（2026-08-07 使用者改案）。
+  assert.equal(S.isProtectedClassForDisplayNameNormalization_('家族', 'family'), false);
+  assert.equal(S.isProtectedClassForDisplayNameNormalization_('家族張立鑫', 'family'), false);
   assert.equal(S.isProtectedClassForDisplayNameNormalization_('技優一C', 'day_college'), true);
   assert.equal(S.isProtectedClassForDisplayNameNormalization_('產訓一B', 'day_college'), true);
   assert.equal(S.isProtectedClassForDisplayNameNormalization_('產專一A', 'day_college'), true);
@@ -225,13 +227,29 @@ test('normalizeClassDisplayName_: 碩專（master_inservice）不補字母、非
   assert.equal(r.changed, false);
 });
 
-test('normalizeClassDisplayName_: family 班完全不動（即使 dept 有覆寫規則也不套用）', () => {
+test('normalizeClassDisplayName_: family 班套用系所簡稱覆寫，但不補碩士班班別字母', () => {
   const S = makeSandbox();
-  // 輸入用 2026-08-07 起的家族顯示名格式（系簡稱＋導師姓名＋家族）；重點是 family 班不套用
-  // 動疫所→動疫科技 的簡稱覆寫，原樣保留。
+  // 2026-08-07 改案：家族班改為套用簡稱覆寫（動疫所→動疫科技、材料工程系→材料）。
   const r = S.normalizeClassDisplayName_('動疫所張立鑫家族', '動疫所', 'family', '家族張立鑫');
-  assert.equal(r.value, '動疫所張立鑫家族');
+  assert.equal(r.value, '動疫科技張立鑫家族');
+  assert.equal(r.changed, true);
+  assert.equal(r.matched, true);
+
+  const r2 = S.normalizeClassDisplayName_('材料工程盧威華家族', '材料工程系', 'family', '家族盧威華');
+  assert.equal(r2.value, '材料盧威華家族');
+
+  // 沒有覆寫規則的系所 → 不動；且 family 不是 master，絕不會被補上班別字母。
+  const r3 = S.normalizeClassDisplayName_('森林賴宜鈴家族', '森林系', 'family', '家族賴宜鈴');
+  assert.equal(r3.value, '森林賴宜鈴家族');
+  assert.equal(r3.changed, false);
+});
+
+test('normalizeClassDisplayName_: family 班的簡稱覆寫是 idempotent（已收斂過不再判為需人工複核）', () => {
+  const S = makeSandbox();
+  const r = S.normalizeClassDisplayName_('動疫科技張立鑫家族', '動疫所', 'family', '家族張立鑫');
+  assert.equal(r.value, '動疫科技張立鑫家族');
   assert.equal(r.changed, false);
+  assert.equal(r.matched, true);
 });
 
 test('normalizeClassDisplayName_: 技優/產訓/產專 前綴班維持 tutorsys 現行樣式（即使系所有覆寫也不套用）', () => {
