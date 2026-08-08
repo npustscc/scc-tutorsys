@@ -119,6 +119,24 @@
     border:1px solid var(--color-border); border-radius:5px; font-size:.84rem; background:#fff;
   }
   #roster-preview-table input[type="text"].roster-warn{background:var(--color-warning-bg);}
+  /* 班名不合法列：比「待人工確認」的黃底更強烈——整列紅底＋左側粗紅槓＋班名欄紅框粗體。
+     原本只在按下確認匯入時以 inline style 塗一次極淡的 --color-danger-bg（#fff5f5），
+     使用者反映看不出來，且切換學院分頁重繪後就被沖掉。改成渲染時依班名白名單即時判定
+     （renderRosterPreview 與編輯 input 事件兩處都會套），狀態跟著資料走、不會被重繪弄丟。 */
+  #roster-preview-table tr.roster-row-invalid{background:#ffdede;}
+  #roster-preview-table tr.roster-row-invalid > td:first-child{box-shadow:inset 4px 0 0 var(--color-danger);}
+  #roster-preview-table tr.roster-row-invalid input[type="text"][data-roster-field="classNameRaw"]{
+    border:2px solid var(--color-danger); background:#fff; font-weight:700; color:var(--color-danger);
+  }
+  #roster-preview-table tr.roster-row-invalid .roster-notes{color:var(--color-danger); font-weight:600;}
+  /* 匯入結果的失敗清單：紅字改成紅框紅底區塊，和成功狀態一眼可分 */
+  .import-error-box{
+    background:var(--color-danger-bg); border:1px solid var(--color-danger);
+    border-left:5px solid var(--color-danger); border-radius:8px; padding:10px 14px; margin-bottom:10px;
+  }
+  .import-error-box > .import-error-title{color:var(--color-danger); font-weight:700; margin-bottom:6px;}
+  .import-error-box ul{margin:0; padding-left:20px;}
+  .import-error-box li{color:var(--color-danger);}
   #roster-preview-table th:nth-child(1){width:30px;}
   #roster-preview-table th:nth-child(2),#roster-preview-table th:nth-child(3){width:118px;}
   #roster-preview-table th:nth-child(4),#roster-preview-table th:nth-child(6){width:88px;}
@@ -2744,8 +2762,8 @@ function renderRolloverPreview() {
         let html = '<div class="empty-hint" style="color:var(--color-success);">套用完成：改名 ' + (a.advanced || 0) +
           ' 班、畢業 ' + (a.graduated || 0) + ' 班、原樣保留 ' + (a.kept || 0) + ' 班。</div>';
         if (res.errors && res.errors.length) {
-          html += '<div class="empty-hint" style="color:var(--color-danger);">失敗 ' + res.errors.length + ' 列：</div><ul>' +
-            res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列（' + escapeHtml(er.classId || '') + '）：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>';
+          html += '<div class="import-error-box"><div class="import-error-title">失敗 ' + res.errors.length + ' 列：</div><ul>' +
+            res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列（' + escapeHtml(er.classId || '') + '）：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul></div>';
         }
         html += '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">關閉</button></div>';
         el.innerHTML = html;
@@ -3232,7 +3250,15 @@ function rosterStatusBadge(r) {
 
 function rosterNotesText(r) {
   const notes = [];
-  if (r.flags.reason) notes.push(r.flags.reason);
+  // 班名不合法即時判定（不寫進 flags.reason——改回合法就要立刻消失，寫進 flags 會黏著）。
+  // 解析階段對同一件事寫過一句較短的 reason，兩句並存會重複，故此時把那句濾掉。
+  const nameInvalid = !CLASS_NAME_RE.test(String(r.classNameRaw || '').trim());
+  const PARSE_INVALID_NOTE = '班名含空白/符號等非法字元，請修改';
+  if (nameInvalid) notes.push('班名不合法：限 1–20 字中英數字，不可含空白、頓號、括號等符號，請改寫後再匯入');
+  const reason = (r.flags.reason || '').split('；').filter(function (s) {
+    return s && !(nameInvalid && s === PARSE_INVALID_NOTE);
+  }).join('；');
+  if (reason) notes.push(reason);
   if (r.diff.status === 'tutor_changed' || r.diff.status === 'tutor2_added') {
     const imp = [];
     if (String(r.tutor1Name || '').trim()) imp.push({ name: String(r.tutor1Name).trim(), email: r.tutor1Email });
@@ -3294,7 +3320,11 @@ function renderRosterPreview() {
       '<span class="field-hint" style="display:inline; margin-left:8px;">（修改套用到本群組 ' + g.idx.length + ' 列）</span></td></tr>';
     g.idx.forEach(function (i) {
       const r = rosterRows[i];
-      html += '<tr data-roster-row="' + i + '"' + (r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
+      // 班名不合法＝送出必被擋（前端 CLASS_NAME_RE 與後端 isValidClassName_ 同一份白名單），
+      // 比一般「待人工確認」嚴重，故紅底優先於黃底。
+      const nameInvalid = !CLASS_NAME_RE.test(String(r.classNameRaw || '').trim());
+      html += '<tr data-roster-row="' + i + '"' + (nameInvalid ? ' class="roster-row-invalid"' : '') +
+        (!nameInvalid && r.flags.uncertain ? ' style="background:var(--color-warning-bg);"' : '') + '>' +
         '<td><input type="checkbox" data-roster-check="' + i + '"' + (r.checked ? ' checked' : '') + '></td>' +
         '<td data-label="班級名稱(原始)">' + rosterTextInput(i, 'classNameRaw', r.classNameRaw, ' maxlength="20"') +
           (r.flags.type === 'family' ? ' <span class="badge badge-type">家族</span>' : '') + '</td>' +
@@ -3317,10 +3347,23 @@ function renderRosterPreview() {
   $('roster-preview').innerHTML = html;
 }
 
+// 班名不合法的紅底標記：邊打字邊套用/移除（不整表重繪，避免打斷正在輸入的 input）。
+// 黃底（待人工確認）是 inline style，會蓋過 stylesheet 的紅底，所以標紅時要把 inline 背景
+// 清掉、解除時再依 uncertain 補回去。
+function updateRosterRowInvalidMark(i) {
+  const tr = document.querySelector('[data-roster-row="' + i + '"]');
+  if (!tr) return;
+  const r = rosterRows[i];
+  const invalid = !CLASS_NAME_RE.test(String(r.classNameRaw || '').trim());
+  tr.classList.toggle('roster-row-invalid', invalid);
+  tr.style.background = invalid ? '' : (r.flags.uncertain ? 'var(--color-warning-bg)' : '');
+}
+
 // 單列差異重算＋DOM 局部更新（badge/提示欄），不整表重繪（避免打斷正在輸入的 input）
 function refreshRosterRowDiff(i) {
   const r = rosterRows[i];
   r.diff = classifyImportRow(r, bootstrapData.departments || [], bootstrapData.classes || []);
+  updateRosterRowInvalidMark(i);
   const st = document.querySelector('[data-roster-status="' + i + '"]');
   if (st) st.innerHTML = rosterStatusBadge(r);
   const nt = document.querySelector('[data-roster-notes="' + i + '"]');
@@ -3423,11 +3466,9 @@ document.body.addEventListener('click', async function (e) {
       byCollege[b.college]++;
     });
     rosterTab = bad[0].college;
-    renderRosterPreview();
-    bad.forEach(function (b) {
-      const tr = document.querySelector('[data-roster-row="' + b.i + '"]');
-      if (tr) tr.style.background = 'var(--color-danger-bg)';
-    });
+    renderRosterPreview();  // 紅底由 renderRosterPreview 依班名白名單自行套上（.roster-row-invalid）
+    const firstBad = document.querySelector('[data-roster-row="' + bad[0].i + '"]');
+    if (firstBad && firstBad.scrollIntoView) firstBad.scrollIntoView({ block: 'center' });
     showToast('班名不合法（已標紅）：' + order.map(function (k) { return rosterTabLabel(k) + ' ' + byCollege[k] + ' 列'; }).join('、') +
       '，請修正後再匯入', 'error');
     return;
@@ -3445,8 +3486,8 @@ document.body.addEventListener('click', async function (e) {
         showToast('匯入完成：成功 ' + res.successCount + ' 列，失敗 ' + res.errors.length + ' 列（詳見下方）', 'info');
         const hasDisabledClassError = res.errors.some(function (er) { return /class disabled:/.test(er.error || ''); });
         $('roster-preview').innerHTML =
-          '<div class="empty-hint" style="color:var(--color-danger);">失敗列：</div>' +
-          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul>' +
+          '<div class="import-error-box"><div class="import-error-title">失敗 ' + res.errors.length + ' 列：</div>' +
+          '<ul>' + res.errors.map(function (er) { return '<li>第 ' + (er.row + 1) + ' 列：' + escapeHtml(er.error) + '</li>'; }).join('') + '</ul></div>' +
           (hasDisabledClassError ? '<p class="field-hint">「class disabled」＝該班級已畢業／已停用，匯入被拒絕（設計如此）。' +
             '如需補匯：先到「班級」頁籤編輯該班、勾選「啟用」並儲存，重新上傳匯入；完成後再取消勾選「啟用」還原狀態。</p>' : '');
       } else {

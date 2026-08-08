@@ -422,6 +422,39 @@ await check('E', '修改導師姓名 → 單列 email 自動比對＋狀態 badg
   expect(st1 === '無變動', '修改後狀態=' + st1);
 });
 await shot(page, 'E-即時重算差異');
+// 班名不合法的紅底標記：打字即套用、切分頁重繪後仍在（原本只在按下確認匯入時 inline 塗一次，
+// 顏色極淡且一重繪就沒了——使用者回報「紅色太淡」的那件事）。
+await check('E', '班名打成不合法（含「、」）→ 該列即時上紅底標記', async () => {
+  const row = page.locator('#roster-preview-table [data-roster-row]').first();
+  await row.locator('input[data-roster-field="classNameRaw"]').fill('3A、4A共同指導');
+  await row.evaluate((el) => el.offsetHeight);  // 等一次 layout，確保 class 已套上
+  const cls = await row.getAttribute('class');
+  expect(/roster-row-invalid/.test(cls || ''), 'tr class=' + cls);
+  const bg = await row.evaluate((el) => getComputedStyle(el).backgroundColor);
+  evid['E-invalid-name-row-bg'] = bg;
+  expect(bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent', '紅底未生效：' + bg);
+  const note = (await row.locator('[data-roster-notes]').textContent() || '').trim();
+  evid['E-invalid-name-note'] = note;
+  expect(note.indexOf('班名不合法') === 0, '提示欄未說明原因：' + note);
+});
+await shot(page, 'E-班名不合法紅底標記');
+await check('E', '紅底標記切換學院分頁重繪後仍在（依資料判定而非 inline style）', async () => {
+  const row = page.locator('#roster-preview-table [data-roster-row]').first();
+  const idx = await row.getAttribute('data-roster-row');
+  const tabs = page.locator('#roster-preview .tab-bar [data-roster-tab]');
+  await tabs.nth(1).click();
+  await page.locator('#roster-preview-table').waitFor({ timeout: 5000 });
+  await tabs.nth(0).click();
+  const cls = await page.locator('[data-roster-row="' + idx + '"]').getAttribute('class');
+  expect(/roster-row-invalid/.test(cls || ''), '重繪後 tr class=' + cls);
+});
+await check('E', '班名改回合法 → 紅底標記即時解除', async () => {
+  const row = page.locator('#roster-preview-table [data-roster-row]').first();
+  await row.locator('input[data-roster-field="classNameRaw"]').fill('四技一A');
+  await row.evaluate((el) => el.offsetHeight);
+  const cls = await row.getAttribute('class');
+  expect(!/roster-row-invalid/.test(cls || ''), '仍留著紅底 class=' + cls);
+});
 await check('E', '切換分頁後編輯值與勾選狀態保留（狀態存 rosterRows 非 DOM）', async () => {
   const row = page.locator('#roster-preview-table [data-roster-row]').first();
   const idx = await row.getAttribute('data-roster-row');
