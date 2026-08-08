@@ -97,10 +97,13 @@ function startServers(opts) {
     });
   });
 
-  api.listen(8788, '127.0.0.1');
-  statics.listen(8787, '127.0.0.1');
-  console.log('[verify] api    http://127.0.0.1:8788  (POST /exec, GET /mint /mails /state)');
-  console.log('[verify] static http://127.0.0.1:8787/dev/index.html');
+  // 埠號可用環境變數覆寫（本機已被其他服務佔用時）；drive.mjs 讀同一組變數。
+  const apiPort = Number(process.env.VERIFY_API_PORT || 8788);
+  const staticPort = Number(process.env.VERIFY_STATIC_PORT || 8787);
+  api.listen(apiPort, '127.0.0.1');
+  statics.listen(staticPort, '127.0.0.1');
+  console.log('[verify] api    http://127.0.0.1:' + apiPort + '  (POST /exec, GET /mint /mails /state)');
+  console.log('[verify] static http://127.0.0.1:' + staticPort + '/dev/index.html');
 
   return {
     em: em,

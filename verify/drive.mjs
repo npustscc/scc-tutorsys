@@ -11,10 +11,13 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.join(__dirname, '..');
+const API_PORT = Number(process.env.VERIFY_API_PORT || 8788);
+const STATIC_PORT = Number(process.env.VERIFY_STATIC_PORT || 8787);
 const SCRATCH = process.env.VERIFY_SCRATCH ||
   'C:/Users/user/AppData/Local/Temp/claude/G---------00Claude-Working-Directory-scc-tutorsys/a7e8c1dd-bdc7-4338-a667-938ec780236c/scratchpad';
 const SHOTS = path.join(SCRATCH, 'verify-shots');
-const XLSX_REAL = 'G:/我的雲端硬碟/00Claude_Working_Directory/forsystems/114-2 班級、家族會議記錄暨班級業務統計.xlsx';
+const XLSX_REAL = process.env.VERIFY_XLSX ||
+  'G:/我的雲端硬碟/00Claude_Working_Directory/forsystems/114-2 班級、家族會議記錄暨班級業務統計.xlsx';
 
 const requireScratch = createRequire(path.join(SCRATCH, 'noop.js'));
 const requireRepo = createRequire(path.join(REPO, 'noop.js'));
@@ -66,7 +69,7 @@ async function flow(name, fn) {
 // ── 直打 API 探針 helper ──
 async function apiCall(action, params, token) {
   const payload = JSON.stringify(Object.assign({ action, rootFolderId: ROOT_FOLDER_ID, sessionToken: token }, params || {}));
-  const res = await fetch('http://127.0.0.1:8788/exec', { method: 'POST', body: new URLSearchParams({ payload }) });
+  const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: new URLSearchParams({ payload }) });
   return res.json();
 }
 
@@ -80,7 +83,7 @@ const context = await browser.newContext({ viewport: { width: 1280, height: 900 
 // 路由攔截：GAS → 本機 emulator；gsi → stub；SheetJS CDN → 本機 node_modules；ipapi → 空
 await context.route(u => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
   const req = route.request();
-  const res = await fetch('http://127.0.0.1:8788/exec', { method: 'POST', body: req.postData() || '' });
+  const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: req.postData() || '' });
   await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
 });
 await context.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
@@ -107,7 +110,7 @@ page.on('dialog', async (d) => { dialogs.push(d.type() + ': ' + d.message().spli
 const evid = {}; // API 探針回應體存證
 
 // ══ 開場：免登入直接進主畫面 ═══════════════════════════════════════════════════
-await page.goto('http://127.0.0.1:8787/dev/index.html');
+await page.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
 await check('boot', '載入後直接進主畫面（session 免登入）', async () => {
   await page.locator('#app').waitFor({ state: 'visible', timeout: 15000 });
   await page.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 10000 });

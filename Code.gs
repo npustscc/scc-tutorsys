@@ -1039,7 +1039,7 @@ function applySetTopics_(record, topicsPatch, byEmail, actualBy, now) {
 // ── displayName 自動融合（建議值，admin 可事後改）───────────────────────────────
 // 系簡稱 = 系所名去尾字「系」。四技一A→「四+系簡+一A」、四技進一A→「進四+系簡+一A」、
 // 碩一→「碩+系簡+一」、碩專一B→「碩專+系簡+一B」、博一→「博+系簡+一」、
-// 家族→「系簡+家族(導師名)」（家族由呼叫端帶 tutorName，未帶則不含括號）；
+// 家族→「系簡+導師名+家族」（導師名優先取呼叫端的 tutorName，未帶則從班名「家族+姓名」取）；
 // 技優/產訓/產專/海青等已知但無法歸入上述規則的前綴→前綴保留、系簡插入其後；
 // 完全無法判別 → 直接「系簡+原名」。純字串規則，不查資料庫，僅供 UI 預填建議值。
 // 注意：dev/index.html 匯入解析器區有一份同邏輯前端複本 fuseClassDisplayNameFront（匯入預覽
@@ -1055,7 +1055,13 @@ function fuseClassDisplayName_(className, deptName, systemId, tutorName) {
   const short = deptShortName_(deptName);
   if (!name) return short;
   if (name.indexOf('家族') !== -1) {
-    return tutorName ? (short + '家族(' + tutorName + ')') : (short + '家族');
+    // 家族班顯示名＝「系簡稱＋導師姓名＋家族」（2026-08-07 使用者指定，取代原本的
+    // 「系簡稱＋家族(導師姓名)」）。導師姓名優先用呼叫端帶的 tutorName；未帶則從班名取——
+    // 統計表解析器產出的家族班名本身就是「家族＋姓名」（如 家族陳美惠 → 陳美惠），
+    // 這也是家族班在 (deptId, 班名) 身分下能每位導師各自一班的原因。兩者皆無姓名可用時
+    // 才退回不含姓名的「系簡稱＋家族」。
+    const who = String(tutorName || '').trim() || name.split('家族').join('').trim();
+    return who ? (short + who + '家族') : (short + '家族');
   }
   if (name.indexOf('四技進') === 0) return '進四' + short + name.slice(3);
   if (name.indexOf('四技') === 0) return '四' + short + name.slice(2);
@@ -1098,13 +1104,19 @@ function classDisplayNameDeptOverride_(deptName) {
   return OVERRIDES[String(deptName || '').trim()] || null;
 }
 
-// family（家族班）與 技優/產訓/產專/海青 前綴班（與 fuseClassDisplayName_ 的 otherPrefixes
-// 同一份清單）完全跳過本正規化——使用者明定家族班不動、技優/產訓/產專維持 tutorsys 現行的
-// infix 顯示樣式，兩者皆不套用系所簡稱覆寫、也不補碩士班班別字母。
+// 技優/產訓/產專/海青 前綴班（與 fuseClassDisplayName_ 的 otherPrefixes 同一份清單）完全跳過
+// 本正規化——使用者明定維持 tutorsys 現行的 infix 顯示樣式，不套用系所簡稱覆寫、也不補碩士班
+// 班別字母。
+//
+// **家族班自 2026-08-07 起不再受保護**（使用者裁決改案）。原本 7/18 的裁決把家族班一起列入
+// 保護，但那次的上下文是「家族班沒有年級班別可言，前綴/班別字母不要亂動」，系所簡稱覆寫是被
+// 連帶包進來的，不是刻意。簡稱覆寫的用意是對齊教務處的全校統一簡稱，那是**系所層級的事實**，
+// 與班級是不是家族班無關；留著保護會產生同一系所內不一致的怪現象（`四材料一A` 用新簡稱、
+// `材料工程X家族` 用舊簡稱）。家族班本來就不是 systemId==='master'，所以放行後也不會被補上
+// 班別字母，只會套用簡稱覆寫。影響 61 個家族班裡的 9 個（動疫所 7、材料工程系 2），
+// 其餘系所無覆寫規則、結果不變。
 function isProtectedClassForDisplayNameNormalization_(rawClassName, systemId) {
-  if (systemId === 'family') return true;
   const name = String(rawClassName || '').trim();
-  if (name.indexOf('家族') !== -1) return true;
   const protectedPrefixes = ['技優', '產訓', '產專', '海青'];
   for (let i = 0; i < protectedPrefixes.length; i++) {
     if (name.indexOf(protectedPrefixes[i]) === 0) return true;
@@ -1721,6 +1733,32 @@ function buildImportTutors_(row) {
   return tutors;
 }
 
+// 家族班班名唯一化。家族班的班級身分是「每位家族導師各自一班」，但名冊常見寫法是整欄都填
+// 「家族」（`114-2導師名單上傳範例.xlsx` 即如此，61 列全叫「家族」）。若照原樣以
+// (deptId, '家族') 認班，同系所有家族導師會落進同一班，而且匯入是「Excel 視為權威、直接覆寫
+// tutors」，所以後一列會把前一列的導師蓋掉——2026-08-07 在 scc-tutor-dev 實查證實：61 列家族班
+// 塌成 8 班，每班只剩名冊最後一列那位導師，其餘 53 位從未進入系統。
+//
+// 統計表解析器（parseStatsWorkbook）產出的家族班名本來就帶姓名（家族陳美惠），所以只有標準
+// 範本那條路徑會中；這裡在後端統一補齊，兩條匯入路徑都經過 importRosterRow_。
+//
+// 只在「班名剛好就是『家族』兩字」且拿得到導師姓名時才動它，其餘一律原樣（含已經帶姓名的
+// 家族陳美惠、以及共同指導/海青這類非家族班）。拿不到姓名時保持「家族」不動——名冊確實有
+// 沒填導師姓名的家族列（材料工程系 114-2 就有一列），那種列本來就要人工補，
+// 不該在這裡發明一個班名。
+//
+// 判斷依據刻意只看**班名**，不看導師制度的 systemId：一個班名就叫「家族」的班，本質上就是
+// 家族班，制度欄填什麼都不改變這件事；反過來拿 systemId==='family' 當條件是脆的——
+// `family` 這個 id 只有 DEFAULT_TUTOR_SYSTEMS_ 種子才有，若制度是匯入時由
+// resolveOrCreateSystem_ 依名稱「家族」現場建立的，它的 id 就不是 'family'，
+// 用 systemId 當否決條件會把正確情況擋掉。
+function familyClassNameForImport_(className, firstTutorName) {
+  const name = String(className || '').trim();
+  if (name !== '家族') return name;
+  const who = String(firstTutorName || '').trim();
+  return who ? (name + who) : name;
+}
+
 // 匯入一列（學院/系所/導師制度/班級名稱(原始)/班級顯示名稱/應繳班會份數/導師1/導師2）。
 // 班級以 (deptId, classNameRaw) 比對既有（同 classResolveCore_ 語意）；找不到就建立，
 // 找到則更新 deptId/systemId/displayName（若本列有給）/requiredMeetingOverride/tutors
@@ -1738,11 +1776,16 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   const reqRes = parseRequiredMeetingCountField_(row.requiredMeetingCount);
   if (!reqRes.ok) return reqRes;
 
-  const className = String(row.classNameRaw).trim();
+  const tutorsForName_ = buildImportTutors_(row);
+  const className = familyClassNameForImport_(
+    String(row.classNameRaw).trim(),
+    tutorsForName_.length ? tutorsForName_[0].name : ''
+  );
+  if (!isValidClassName_(className)) return { ok: false, error: 'invalid classNameRaw: ' + className };
   let cls = (classes || []).filter(function (c) { return c && c.deptId === deptRes.dept.id && c.name === className; })[0];
   if (cls && (cls.active === false || cls.deleted === true)) return { ok: false, error: 'class disabled: ' + cls.id };
 
-  const tutors = buildImportTutors_(row);
+  const tutors = tutorsForName_;
   const explicitDisplayName = row.classDisplayName && String(row.classDisplayName).trim();
   let nextClasses = classes || [];
   let classCreated = false;
@@ -1752,9 +1795,19 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
   let tutorsChanged = false;
   let previousTutors = [];
 
+  // 家族班顯示名是系統規則（系簡稱＋導師姓名＋家族），**不讓 Excel 的「班級顯示名稱」欄覆寫**，
+  // 也不沿用既有值：名冊檔那一欄留的是舊格式（森林家族(陳美惠)），若照一般班別的
+  // 「填了就以填的為準」語意，重匯一次就會把舊格式帶回來。其餘班別語意完全不變。
+  const isFamilyRow_ = (systemRes.system ? systemRes.system.id : null) === 'family'
+    || className.indexOf('家族') === 0;
+  const familyFused_ = isFamilyRow_
+    ? fuseClassDisplayName_(className, deptRes.dept.name, 'family',
+        tutors.length ? tutors[0].name : undefined)
+    : '';
+
   if (!cls) {
     const newSystemId = systemRes.system ? systemRes.system.id : null;
-    const fused = explicitDisplayName || fuseClassDisplayName_(
+    const fused = familyFused_ || explicitDisplayName || fuseClassDisplayName_(
       className, deptRes.dept.name, newSystemId,
       tutors.length ? tutors[0].name : undefined
     );
@@ -1777,7 +1830,7 @@ function importRosterRow_(row, colleges, departments, tutorSystems, classes, now
     previousTutors = cls.tutors || [];
     const updatedSystemId = systemRes.system ? systemRes.system.id : cls.systemId;
     const normalized = normalizeClassDisplayName_(
-      explicitDisplayName || cls.displayName, deptRes.dept.name, updatedSystemId, className
+      familyFused_ || explicitDisplayName || cls.displayName, deptRes.dept.name, updatedSystemId, className
     );
     const updated = Object.assign({}, cls, {
       deptId: deptRes.dept.id,
