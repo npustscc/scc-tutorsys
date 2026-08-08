@@ -113,6 +113,8 @@ function doPost(e) {
       case 'adminUpsertTutorSystem': result = adminUpsertTutorSystemAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
+      case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
+      case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -581,11 +583,16 @@ function isClassTutor_(classInfo, email) {
 // isStaffLead / isStaffAssistant：config.staffLeads / config.staffAssistants 陣列命中且未停用
 // （disabled!==true）。assistantLead：助理綁定的主責 {email,name}——只有當該主責也存在且未停用
 // 才算綁定成功，否則 null（fail-closed：綁定失效的助理不能代為核章，見 resolveActionableStage_）。
+// - deptAssistantOf：config.deptAssistants（**系辦助理**，與學諮中心的 staffAssistant 是兩回事）
+//   陣列命中且未停用/未刪除時，回該筆的 deptIds **交集現存且啟用的系所**——名單裡掛著的系所
+//   若被停用或軟刪除，就地從授權集合消失（fail-closed，比照 deptHeadOf 的既有判斷）。
+//   一人可掛多系（技職所/師培中心有跨單位的情況）。這個集合是「系辦助理看得到哪些系」的
+//   **唯一事實來源**：所有 deptRoster* action 一律拿它重新驗證前端送來的 deptId，不信任前端。
 function resolveRoles_(email, config, departments, classes) {
   const roles = {
     email: email, isAdmin: false, isDirector: false,
     isStaffLead: false, isStaffAssistant: false, assistantLead: null,
-    deptHeadOf: [], tutorOf: [],
+    deptHeadOf: [], tutorOf: [], deptAssistantOf: [],
   };
   if (!email) return roles;
 
@@ -610,6 +617,19 @@ function resolveRoles_(email, config, departments, classes) {
     roles.isStaffAssistant = true;
     const boundLead = staffLeads.filter(function (s) { return s && s.email === assistant.leadEmail && s.disabled !== true && s.deleted !== true; })[0];
     roles.assistantLead = boundLead ? { email: boundLead.email, name: boundLead.name } : null;
+  }
+
+  // 系辦助理白名單：帳號那筆要未停用/未刪除，掛的系所也要現存且啟用，兩層都通過才進集合。
+  const deptAssistants = (config && config.deptAssistants) || [];
+  const da = deptAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
+  if (da) {
+    const ids = Array.isArray(da.deptIds) ? da.deptIds : [];
+    ids.forEach(function (id) {
+      const d = (departments || []).filter(function (x) { return x && x.id === id; })[0];
+      if (d && d.active !== false && d.deleted !== true && roles.deptAssistantOf.indexOf(id) === -1) {
+        roles.deptAssistantOf.push(id);
+      }
+    });
   }
 
   (departments || []).forEach(function (d) {
@@ -1944,6 +1964,9 @@ function bootstrapAction_(params, ctx, userEmail) {
     // 「自己是不是」，roles 已算好（isStaffLead/isStaffAssistant/assistantLead），不需整份名單。
     staffLeads: roles.isAdmin ? (config.staffLeads || []) : undefined,
     staffAssistants: roles.isAdmin ? (config.staffAssistants || []) : undefined,
+    // 系辦助理白名單同理：整份名單（含各系助理 email）只給 admin；助理自己只需要知道
+    // 「我管哪幾系」，roles.deptAssistantOf 已經算好了。
+    deptAssistants: roles.isAdmin ? (config.deptAssistants || []) : undefined,
   };
 }
 
@@ -1967,7 +1990,8 @@ function sessionStartAction_(params, ctx, userEmail) {
     const classes = readJsonSafe_('classes.json', ctx, []);
     const roles = resolveRoles_(userEmail, config, departments, classes);
     const hasRole = roles.isAdmin || roles.isDirector || roles.isStaffLead ||
-      roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0;
+      roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0 ||
+      roles.deptAssistantOf.length > 0;
     if (hasRole) {
       const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
       const lines = [
@@ -2547,6 +2571,111 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteStaffAssistant' : 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: now });
     return { staffAssistants: config.staffAssistants };
   });
+}
+
+// ── 系辦助理（Phase 1：角色＋白名單＋唯讀自己系）─────────────────────────────────
+// 這一組是「導師資料填報平台」的安全邊界。與學諮中心的 staffLead/staffAssistant 完全無關，
+// 不共用名單也不共用權限——同名容易混淆，命名一律用 deptAssistant / deptAssistantOf。
+//
+// 白名單形狀（config.deptAssistants，比照 staffLeads 的既有模式）：
+//   { email, name, deptIds: ['農園系','森林系'], disabled?, deleted?, ... }
+// deptIds 允許多系（技職所/師培中心那種跨單位的助理）。
+
+// deptIds 白名單：陣列、最多 37*2 筆保險上限、每個 id 都要是現存且啟用的系所。
+// 不存在/已停用的 id 直接**拒絕整筆**而不是靜默丟掉——admin 打錯字時要看得到錯誤，
+// 不能存進一份看起來成功、實際少掛一個系的名單。
+function normalizeDeptAssistantDeptIds_(deptIds, departments) {
+  if (!Array.isArray(deptIds)) return { ok: false, error: 'deptIds must be an array' };
+  if (deptIds.length > 80) return { ok: false, error: 'too many deptIds' };
+  const out = [];
+  for (let i = 0; i < deptIds.length; i++) {
+    const id = String(deptIds[i] == null ? '' : deptIds[i]).trim();
+    if (!id) return { ok: false, error: 'empty deptId' };
+    const d = (departments || []).filter(function (x) { return x && x.id === id; })[0];
+    if (!d || d.active === false || d.deleted === true) return { ok: false, error: 'department not found: ' + id };
+    if (out.indexOf(id) === -1) out.push(id);
+  }
+  return { ok: true, deptIds: out };
+}
+
+// adminUpsertDeptAssistant：admin only，upsert-by-email。deptIds 於鎖內拿最新 departments 驗，
+// 避免「驗的時候系所還在、寫進去時已被刪」的競態。
+function adminUpsertDeptAssistantAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.deptAssistant;
+  if (!entry || !entry.email) throw new Error('deptAssistant.email required');
+  const isDelete = entry.deleted === true;
+
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    let next = entry;
+    if (!isDelete) {
+      const chk = normalizeDeptAssistantDeptIds_(entry.deptIds, departments);
+      if (!chk.ok) throw new Error(chk.error);
+      next = Object.assign({}, entry, { deptIds: chk.deptIds });
+    }
+    config.deptAssistants = config.deptAssistants || [];
+    const idx = config.deptAssistants.findIndex(function (s) { return s && s.email === entry.email; });
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : config.deptAssistants[idx], next, userEmail, now);
+    if (idx === -1) config.deptAssistants.push(merged); else config.deptAssistants[idx] = merged;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDeptAssistant' : 'adminUpsertDeptAssistant', by: userEmail, targetId: entry.email, at: now });
+    return { deptAssistants: config.deptAssistants };
+  });
+}
+
+// 系辦助理可存取的系所集合（純函式）。admin 看全部；系辦助理只看白名單解出來的那幾系。
+// **前端送來的 deptId 一律丟進這裡重驗**，回 ok:false 就是拒絕，不做部分放行。
+function resolveDeptRosterScope_(roles, deptId, departments) {
+  if (!roles) return { ok: false, error: 'forbidden' };
+  const allowed = roles.isAdmin
+    ? (departments || []).filter(function (d) { return d && d.active !== false && d.deleted !== true; })
+        .map(function (d) { return d.id; })
+    : (roles.deptAssistantOf || []).slice();
+  if (!allowed.length) return { ok: false, error: 'forbidden' };
+  if (deptId === undefined || deptId === null || deptId === '') return { ok: true, deptIds: allowed };
+  const want = String(deptId).trim();
+  if (allowed.indexOf(want) === -1) return { ok: false, error: 'forbidden' };
+  return { ok: true, deptIds: [want] };
+}
+
+// 系辦助理看到的班級投影（純函式）。Phase 1 是唯讀，欄位刻意只給名冊需要的那幾個：
+// 不帶 uploadWhitelist（學生 gmail）、不帶 suggestedTutors（學生自填的建議，含 by/email）、
+// 不帶紀錄與核章狀態——那些不是名冊維護要用的資料，少給一個欄位就少一條外洩路徑。
+// Phase 2 要加的手機欄位也只會出現在這條通道，**永遠不進 bootstrap 的 classes**。
+function projectClassForDeptRoster_(cls) {
+  return {
+    id: cls.id, name: cls.name, displayName: cls.displayName || cls.name,
+    deptId: cls.deptId, systemId: cls.systemId || null,
+    requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
+    graduatedSemester: cls.graduatedSemester || null,
+    active: cls.active !== false,
+    tutors: (cls.tutors || []).map(function (t) { return { name: (t && t.name) || '', email: (t && t.email) || '' }; }),
+  };
+}
+
+// deptRosterGet：系辦助理（或 admin）讀自己系的名冊。唯讀，Phase 1 的全部功能。
+// 軟刪除的班級不回（比照系統其他地方對 deleted 的處理），停用的班級照回但帶 active:false——
+// 助理要看得到「這班被停用了」才知道為什麼統計沒算它。
+function deptRosterGetAction_(params, ctx, userEmail) {
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const roles = resolveRoles_(userEmail, config, departments, classes);
+  const scope = resolveDeptRosterScope_(roles, params.deptId, departments);
+  if (!scope.ok) throw new Error(scope.error);
+
+  const rows = classes.filter(function (c) {
+    return c && c.deleted !== true && scope.deptIds.indexOf(c.deptId) !== -1;
+  }).map(projectClassForDeptRoster_);
+
+  const depts = departments.filter(function (d) {
+    return d && scope.deptIds.indexOf(d.id) !== -1;
+  }).map(function (d) { return { id: d.id, name: d.name, collegeId: d.collegeId || null }; });
+
+  return { deptIds: scope.deptIds, departments: depts, classes: rows };
 }
 
 // adminChangeTutorMidterm：期中更換導師（admin only；Ticket C）。與 adminUpsertClass 改名單

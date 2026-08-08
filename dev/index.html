@@ -794,6 +794,9 @@ const NAV_PAGES = [
   { id: 'queue',  label: '核章匣', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant; } },
   { id: 'stats',  label: '班級統計', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin; } },
   { id: 'overview', label: '全校總表', show: function (r) { return r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0; } },
+  // 系辦助理的導師名冊頁（Phase 1 唯讀）。roles.deptAssistantOf 是後端算好的授權集合，
+  // 前端只拿它決定「顯不顯示這個頁籤」；能不能真的讀到資料由後端 deptRosterGet 再驗一次。
+  { id: 'deptroster', label: '導師資料', show: function (r) { return (r.deptAssistantOf || []).length > 0 || r.isAdmin; } },
   { id: 'admin',  label: '後台管理', show: function (r) { return r.isAdmin; } },
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
@@ -1856,6 +1859,81 @@ async function deleteEntity(opts) {
   } catch (err) { showToast('刪除失敗：' + err.message, 'error'); }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 導師資料（系辦助理，Phase 1：唯讀自己系）─────────────────────────────────
+// 資料**不從 bootstrap 拿**，一律走 deptRosterGet——那是這個功能專屬的通道，
+// 後端在那裡重驗 deptId、也只投影名冊需要的欄位（Phase 2 的手機欄位只會出現在這條通道）。
+// ══════════════════════════════════════════════════════════════════════════════
+let deptRosterDeptId = null;
+
+PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>導師資料</h2>' +
+      '<p class="field-hint">本頁顯示您負責系所的班級與導師名單。目前為<b>唯讀</b>——增刪班級／導師與填寫手機是下一期的功能。' +
+      '資料有誤請先告知學諮中心。</p>' +
+      '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
+      '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
+    '</div>';
+  await loadDeptRoster(null);
+  $('deptroster-dept').addEventListener('change', function () {
+    deptRosterDeptId = $('deptroster-dept').value;
+    loadDeptRoster(deptRosterDeptId);
+  });
+};
+
+async function loadDeptRoster(deptId) {
+  $('deptroster-content').innerHTML = '<div class="empty-hint">載入中…</div>';
+  try {
+    // deptId 為 null＝不指定，後端回「我管的全部系所」；選單就是用這一趟的回傳建的。
+    const res = await proxyCall('deptRosterGet', deptId ? { deptId: deptId } : {});
+    const depts = res.departments || [];
+    const sel = $('deptroster-dept');
+    if (sel && !sel.options.length) {
+      sel.innerHTML = depts.map(function (d) {
+        return '<option value="' + escapeHtml(d.id) + '">' + escapeHtml(d.name || d.id) + '</option>';
+      }).join('');
+      // 只有一個系所時選單沒有選擇餘地，收起來少一個干擾
+      sel.parentElement.style.display = depts.length > 1 ? '' : 'none';
+      if (depts.length) { deptRosterDeptId = depts[0].id; sel.value = deptRosterDeptId; }
+    }
+    renderDeptRosterTable(res.classes || [], deptId || (depts[0] && depts[0].id) || null, depts);
+  } catch (e) {
+    $('deptroster-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderDeptRosterTable(classes, deptId, depts) {
+  // 未指定 deptId 的第一趟會拿到多系的班級；選單有值時只顯示該系，避免與選單所示不一致。
+  const rows = deptId ? classes.filter(function (c) { return c.deptId === deptId; }) : classes;
+  if (!rows.length) {
+    $('deptroster-content').innerHTML = '<div class="empty-hint">這個系所目前沒有班級。</div>';
+    return;
+  }
+  const sorted = rows.slice().sort(function (a, b) {
+    return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
+  });
+  const tutorCount = sorted.reduce(function (n, c) { return n + (c.tutors || []).length; }, 0);
+  $('deptroster-content').innerHTML =
+    '<p class="field-hint">共 ' + sorted.length + ' 班、' + tutorCount + ' 位導師。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>Email</th><th>狀態</th></tr></thead><tbody>' +
+    sorted.map(function (c) {
+      const tutors = c.tutors || [];
+      const names = tutors.length ? tutors.map(function (t) { return escapeHtml(t.name || '（未填姓名）'); }).join('、') : '<span class="field-hint">（尚無導師）</span>';
+      const emails = tutors.length
+        ? tutors.map(function (t) { return t.email ? escapeHtml(t.email) : '<span class="field-hint">（未填）</span>'; }).join('<br>')
+        : '<span class="field-hint">—</span>';
+      const state = [];
+      if (c.active === false) state.push('停用');
+      if (c.graduatedSemester) state.push('已畢業（' + escapeHtml(c.graduatedSemester) + '）');
+      return '<tr><td data-label="班級">' + escapeHtml(c.displayName || c.name) + '</td>' +
+        '<td data-label="班級名稱(原始)">' + escapeHtml(c.name) + '</td>' +
+        '<td data-label="導師">' + names + '</td>' +
+        '<td data-label="Email">' + emails + '</td>' +
+        '<td data-label="狀態">' + (state.length ? state.join('／') : '啟用') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
 let adminTab = 'departments';
 const ADMIN_TABS = [
   { id: 'colleges', label: '學院' },
@@ -1865,6 +1943,7 @@ const ADMIN_TABS = [
   { id: 'semesters', label: '學期' },
   { id: 'users', label: '職員帳號' },
   { id: 'staffTeam', label: '學諮主責／助理' },
+  { id: 'deptAssistants', label: '系辦助理' },
   { id: 'keywords', label: '宣導關鍵字' },
   { id: 'roster', label: 'Excel 匯入導師名單' },
 ];
@@ -1887,7 +1966,8 @@ function renderAdminTab() {
   const fns = {
     colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
     classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
-    staffTeam: renderAdminStaffTeam, keywords: renderAdminKeywords, roster: renderAdminRoster,
+    staffTeam: renderAdminStaffTeam, deptAssistants: renderAdminDeptAssistants,
+    keywords: renderAdminKeywords, roster: renderAdminRoster,
   };
   (fns[adminTab] || function () {})();
 }
@@ -2045,6 +2125,98 @@ function renderAdminStaffTeam() {
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="assistant-new" style="margin-top:12px;">新增助理</button></div>';
 }
+
+// ── 系辦助理白名單（Phase 1）──────────────────────────────────────────────────
+// 與上面的「學諮中心助理」是兩回事：這裡是各系系辦的助理，用來維護本系導師名冊。
+// 一人可掛多系；deptIds 是授權範圍的唯一來源，後端每個 action 都會拿它重驗。
+function deptNameById(id) {
+  const d = (bootstrapData.departments || []).find(function (x) { return x.id === id; });
+  return d ? (d.name || d.id) : id;
+}
+
+function renderAdminDeptAssistants() {
+  const rows = (bootstrapData.deptAssistants || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>系辦助理</h3>' +
+    '<p class="field-hint">各系系辦助理維護本系導師名冊用。<b>只看得到自己掛的系所</b>，看不到他系；' +
+    '一人可掛多個系所（例如同時兼任兩個單位）。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    (rows.length ? rows.map(function (s) {
+      const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
+      return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td>' +
+        '<td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="負責系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="deptasst-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
+    }).join('') : '<tr><td colspan="5"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
+    '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button></div>';
+}
+
+function openDeptAssistantForm(email) {
+  const list = bootstrapData.deptAssistants || [];
+  const s = list.find(function (x) { return x.email === email; }) || {};
+  const selected = Array.isArray(s.deptIds) ? s.deptIds : [];
+  const depts = (bootstrapData.departments || []).filter(function (d) {
+    return d && d.active !== false && d.deleted !== true;
+  }).slice().sort(function (a, b) { return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-Hant'); });
+
+  const bodyHtml = '<form id="deptasst-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="deptasst-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="deptasst-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>負責系所（可複選）</label>' +
+      '<div id="deptasst-depts" style="max-height:240px; overflow-y:auto; border:1px solid var(--color-border); border-radius:8px; padding:8px;">' +
+      depts.map(function (d) {
+        return '<label style="display:block; padding:2px 0;"><input type="checkbox" data-deptasst-dept="' + escapeHtml(d.id) + '"' +
+          (selected.indexOf(d.id) !== -1 ? ' checked' : '') + '> ' + escapeHtml(d.name || d.id) + '</label>';
+      }).join('') +
+      '</div><span class="field-hint">未勾選任何系所＝這個帳號什麼都看不到（等同停用）。</span></div>' +
+    '<div class="field"><label><input type="checkbox" id="deptasst-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(email ? '編輯系辦助理' : '新增系辦助理', bodyHtml);
+  $('deptasst-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const targetEmail = $('deptasst-email').value.trim().toLowerCase();
+    if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const deptIds = Array.prototype.slice.call(document.querySelectorAll('[data-deptasst-dept]'))
+      .filter(function (cb) { return cb.checked; })
+      .map(function (cb) { return cb.dataset.deptasstDept; });
+    const entry = {
+      email: targetEmail, name: $('deptasst-name').value.trim(),
+      deptIds: deptIds, disabled: $('deptasst-disabled').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertDeptAssistant', { deptAssistant: entry });
+        bootstrapData.deptAssistants = res.deptAssistants;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminDeptAssistants();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="deptasst-new"]')) { openDeptAssistantForm(null); return; }
+  const edit = e.target.closest('[data-action="deptasst-edit"]');
+  if (edit) { openDeptAssistantForm(edit.dataset.email); return; }
+  const del = e.target.closest('[data-action="deptasst-delete"]');
+  if (del) {
+    const email = del.dataset.email;
+    const s = (bootstrapData.deptAssistants || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: del, name: s.name || s.email, action: 'adminUpsertDeptAssistant',
+      payload: { deptAssistant: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.deptAssistants = res.deptAssistants; renderAdminDeptAssistants(); },
+    });
+    return;
+  }
+});
 
 function openStaffLeadForm(email) {
   const leads = bootstrapData.staffLeads || [];

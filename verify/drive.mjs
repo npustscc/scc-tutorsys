@@ -558,6 +558,106 @@ await flow('F', async () => {
   await shot(page, 'F-畢業班補匯被拒＋補救提示');
 });
 
+// ══ G：系辦助理（Phase 1：白名單＋唯讀自己系）═══════════════════════════════
+// 這一段的重點全在授權邊界：白名單建好之後，該帳號只能讀到自己掛的系，
+// 別系的 deptId 要被 forbidden 擋下，沒掛白名單的帳號一律拒絕。
+const deptAsstToken = servers.em.mint('deptasst@test.local');
+await flow('G', async () => {
+  await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+  await page.locator('[data-admin-tab="deptAssistants"]').click();
+  await check('G', '系辦助理分頁初始為空清單', async () => {
+    await page.locator('#admin-tab-content', { hasText: '尚未建立任何系辦助理' }).waitFor({ timeout: 5000 });
+  });
+  await page.locator('[data-action="deptasst-new"]').click();
+  await page.locator('#deptasst-form').waitFor();
+  await page.fill('#deptasst-email', 'deptasst@test.local');
+  await page.fill('#deptasst-name', '森林系助理');
+  await page.locator('[data-deptasst-dept="森林系"]').check();
+  await shot(page, 'G-新增系辦助理表單（複選系所）');
+  await page.locator('#deptasst-form button[type=submit]').click();
+  await check('G', '儲存後清單出現該助理，負責系所欄顯示「森林系」', async () => {
+    const row = page.locator('#admin-tab-content tr', { hasText: 'deptasst@test.local' });
+    await row.waitFor({ timeout: 5000 });
+    const txt = (await row.textContent() || '').trim();
+    evid['G-deptasst-row'] = txt;
+    expect(txt.includes('森林系'), '列內容=' + txt);
+  });
+  await shot(page, 'G-系辦助理清單');
+
+  await check('G', '系辦助理不帶 deptId → 只拿到自己那一系的班級', async () => {
+    const r = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    evid['G-roster-own'] = JSON.stringify(r).slice(0, 600);
+    const d = r.data || {};
+    expect(r.success === true && !d.error, '回應=' + JSON.stringify(r).slice(0, 300));
+    expect(JSON.stringify(d.deptIds) === JSON.stringify(['森林系']), 'deptIds=' + JSON.stringify(d.deptIds));
+    expect((d.classes || []).every((c) => c.deptId === '森林系'), '混進他系班級');
+    expect((d.classes || []).length > 0, '森林系應該有班級');
+  });
+  await check('G', '🔍 回傳的班級不含 uploadWhitelist / suggestedTutors（欄位投影）', async () => {
+    const r = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const c = ((r.data || {}).classes || [])[0] || {};
+    expect(!('uploadWhitelist' in c) && !('suggestedTutors' in c), '外洩欄位：' + Object.keys(c).join(','));
+  });
+  await check('G', '🔍 系辦助理指定「別系」的 deptId → forbidden', async () => {
+    const r = await apiCall('deptRosterGet', { deptId: '農園系' }, deptAsstToken.token);
+    evid['G-roster-other-dept'] = JSON.stringify(r);
+    expect(/forbidden/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G', '🔍 沒掛白名單的帳號（學諮助理）打 deptRosterGet → forbidden', async () => {
+    const r = await apiCall('deptRosterGet', {}, assistantToken.token);
+    evid['G-roster-nonassistant'] = JSON.stringify(r);
+    expect(/forbidden/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G', '🔍 系辦助理打 admin action（adminUpsertDeptAssistant）→ admin only 拒絕', async () => {
+    const r = await apiCall('adminUpsertDeptAssistant', { deptAssistant: { email: 'x@y.z', deptIds: ['農園系'] } }, deptAsstToken.token);
+    evid['G-deptasst-admin-action'] = JSON.stringify(r);
+    expect(/admin only/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G', '🔍 白名單掛不存在的系所 → 整筆被拒（不靜默丟掉）', async () => {
+    const r = await apiCall('adminUpsertDeptAssistant', { deptAssistant: { email: 'bad@test.local', deptIds: ['沒這個系'] } }, adminToken.token);
+    evid['G-deptasst-bad-dept'] = JSON.stringify(r);
+    expect(/department not found/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+
+  // 以系辦助理身分開新分頁看「導師資料」——驗證頁籤可見、後台管理不可見（前端閘門）
+  const ctx2 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx2.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+    const rq = route.request();
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: rq.postData() || '' });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+  });
+  await ctx2.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript',
+    body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+  }));
+  await ctx2.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+  await ctx2.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+  await ctx2.addInitScript(({ rootId, token, exp }) => {
+    localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email: 'deptasst@test.local', name: '森林系助理', picture: '' }));
+    localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email: 'deptasst@test.local' }));
+  }, { rootId: ROOT_FOLDER_ID, token: deptAsstToken.token, exp: deptAsstToken.exp });
+  const page2 = await ctx2.newPage();
+  page2.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[G/page2] ' + m.text()); });
+  page2.on('pageerror', (e) => consoleErrors.push('[G/page2] pageerror: ' + e.message));
+  await page2.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await check('G', '系辦助理登入後看得到「導師資料」頁籤、看不到「後台管理」', async () => {
+    await page2.locator('.nav-btn', { hasText: '導師資料' }).waitFor({ timeout: 15000 });
+    expect(await page2.locator('.nav-btn', { hasText: '後台管理' }).count() === 0, '不該看到後台管理頁籤');
+  });
+  await check('G', '導師資料頁列出森林系班級與導師，且系所選單只有一個系（自動收起）', async () => {
+    await page2.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page2.locator('#deptroster-content table', { hasText: '陳美惠' }).waitFor({ timeout: 15000 });
+    const txt = await page2.locator('#deptroster-content').textContent();
+    evid['G-deptroster-page'] = (txt || '').trim().slice(0, 300);
+    expect(!/四農園/.test(txt || ''), '頁面出現他系班級');
+    const selHidden = await page2.locator('#deptroster-dept').evaluate((el) => getComputedStyle(el.parentElement).display);
+    expect(selHidden === 'none', '單一系所時選單應收起，display=' + selHidden);
+  });
+  await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G-系辦助理看到的導師資料頁.png') });
+  console.log('   📸 G-系辦助理看到的導師資料頁');
+  await ctx2.close();
+});
+
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════
 await check('probe', '🔍 竄改 session token 一字元 → 拒絕', async () => {
   const bad = adminToken.token.slice(0, -2) + (adminToken.token.slice(-2) === 'aa' ? 'bb' : 'aa');
