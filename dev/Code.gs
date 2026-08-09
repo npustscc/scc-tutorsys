@@ -268,7 +268,16 @@ function bytesToHex_(bytes) {
   return out;
 }
 
-const PASSWORD_ITERATIONS_ = 2000;
+// 迭代次數：**實測值決定的**，不是拍腦袋。2026-08-09 在 GAS dev 量到
+// 2000 次要 2.9 秒（總耗時 4.2 秒 − doGet 基準 1.39 秒），登入太慢、而且會把
+// withLock_ 的 15 秒鎖佔住導致 Lock timeout。降到 200 次約 0.3 秒。
+//
+// 安全性取捨要講清楚：迭代次數只在「資料庫**和** pepper 同時外洩」時才有意義——
+// pepper 存在 Script Properties、不在 Drive 的 localAccounts.json 裡，所以單純資料外洩
+// 根本無法離線嘗試。而初始密碼是 4 碼分機（10^4 空間），再多迭代也擋不住。
+// 在 GAS 這個「每次 HMAC 都是一次服務呼叫」的環境裡，200 次是可用性與強度的折衷。
+// 次數存在雜湊字串裡，之後調整不會讓既有密碼失效。
+const PASSWORD_ITERATIONS_ = 200;
 
 // 迭代 HMAC。第一輪把 salt 與密碼綁進去，之後對前一輪輸出反覆 HMAC。
 //
@@ -416,11 +425,12 @@ function localChangePasswordAction_(params, ctx) {
   if (current === next) return { error: '新密碼不能與目前密碼相同' };
 
   clearLoginFail_(email);
+  const newHash = hashPasswordGas_(next);   // 同上：慢的一步留在鎖外
   return withLock_(function () {
     const fresh = readJsonSafe_('localAccounts.json', ctx, {});
     const now = new Date().toISOString();
     fresh[email] = Object.assign({}, fresh[email] || entry, {
-      hash: hashPasswordGas_(next), mustChangePassword: false,
+      hash: newHash, mustChangePassword: false,
       activationExpiresAt: null, passwordChangedAt: now,
     });
     writeJsonPath_('localAccounts.json', fresh, ctx);
@@ -464,11 +474,14 @@ function adminLocalAccountsAction_(params, ctx, userEmail) {
     if (!assistant) throw new Error('這個 email 不在系辦助理白名單內');
     const pw = String(params.password || initialPasswordFromExtGas_(assistant.ext) || '').trim();
     if (!pw) throw new Error('沒有可用的初始密碼（白名單沒填分機），請手動指定');
+    // 雜湊在鎖**外面**算：它是這裡最慢的一步，放進臨界區會讓別的請求等到 waitLock 逾時
+    // （2026-08-09 使用者實際踩到 Lock timeout）。鎖裡只留讀檔→改一筆→寫檔。
+    const newHash = hashPasswordGas_(pw);
     return withLock_(function () {
       const fresh = readJsonSafe_('localAccounts.json', ctx, {});
       const now = new Date();
       fresh[targetEmail] = Object.assign({}, fresh[targetEmail] || {}, {
-        name: assistant.name || '', hash: hashPasswordGas_(pw), disabled: false,
+        name: assistant.name || '', hash: newHash, disabled: false,
         mustChangePassword: true,
         activationExpiresAt: new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString(),
       });
