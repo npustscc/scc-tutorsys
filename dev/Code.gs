@@ -576,6 +576,35 @@ function maintenanceUpsertDeptAssistants(json) {
   return out;
 }
 
+// 幫管理員本人開一個**帳密**登入帳號。
+// 為什麼需要：登入頁把 Google 登入收起來之後（它只剩中心人員在用，擺前面會誤導系辦助理），
+// 管理員仍要有一條不依賴 Google 的路進後台——尤其 Google 那條路若哪天出狀況，
+// 這就是 break-glass 入口。密碼隨機產生並 log 出來，只此一次，請立刻自行更改。
+function maintenanceCreateAdminAccount() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  // 24 字元隨機密碼（含大小寫與數字，符合「至少 8 字、不得全數字」的政策）
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 24; i++) pw += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  const hash = hashPasswordGas_(pw);   // 慢的一步留在鎖外
+  withLock_(function () {
+    const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+    accounts[who] = Object.assign({}, accounts[who] || {}, {
+      name: '系統管理員', hash: hash, disabled: false,
+      mustChangePassword: false,   // 隨機長密碼，不必強迫改；要改可用登入頁的改密碼流程
+    });
+    writeJsonPath_('localAccounts.json', accounts, ctx);
+  });
+  appendAuditLog_(ctx, { action: 'maintenanceCreateAdminAccount', by: who, targetId: who, at: new Date().toISOString() });
+  const out = JSON.stringify({
+    帳號: who, 密碼: pw,
+    提醒: '這個密碼只顯示這一次，請立刻存到密碼管理器。它是不依賴 Google 的後台入口。',
+  });
+  Logger.log(out);
+  return out;
+}
+
 // ── 名冊搬運：自架版 → GAS Drive ─────────────────────────────────────────────
 // 為什麼是「上傳檔案 + 零參數函式」這種形狀：
 //   - GAS 編輯器只能執行**零參數**函式，所以資料不能用參數傳。

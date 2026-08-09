@@ -236,17 +236,11 @@
   <div class="login-card">
     <h1>導師資訊系統<span class="env-badge">測試版</span></h1>
     <p class="login-sub">國立屏東科技大學學生諮商中心</p>
-    <div id="g-signin-btn"></div>
-    <p id="login-fallback" class="login-fallback" style="display:none;">
-      若登入按鈕未顯示，可能是瀏覽器封鎖了第三方登入視窗，請
-      <a href="javascript:location.reload()">重新整理頁面</a>後再試一次。
-    </p>
-    <p id="login-error" class="login-error" style="display:none;"></p>
-
-    <!-- 系辦助理用的帳密登入：他們的校內信箱 @mail.npust.edu.tw 不是 Google 帳號
-         （MX 指向學校自架主機），沒辦法用上面的 Google 登入。導師與中心同仁照舊用 Google。 -->
-    <div id="local-login-box" style="margin-top:18px; border-top:1px solid var(--color-border); padding-top:14px;">
-      <p class="login-sub" style="margin-bottom:10px;">系辦助理請用校內信箱與分機登入</p>
+    <!-- 帳密登入（主要入口）。Google 登入預設隱藏在下方連結後面——這個平台目前的使用者
+         是各系系辦助理，而他們的校內信箱不是 Google 帳號；Google 那條路只剩中心人員在用，
+         擺在最前面只會讓多數人以為自己該按它。是「隱藏」不是移除，隨時可以恢復。 -->
+    <div id="local-login-box">
+      <p class="login-sub" style="margin-bottom:10px;">請用校內信箱與分機登入</p>
       <form id="local-login-form" autocomplete="on" style="display:flex; flex-direction:column; gap:8px;">
         <input type="text" id="local-email" placeholder="校內信箱（可只打 @ 前面那段）" autocomplete="username" required>
         <input type="password" id="local-password" placeholder="密碼（初次為校內分機）" autocomplete="current-password" required>
@@ -254,6 +248,18 @@
       </form>
       <p id="local-login-error" class="login-error" style="display:none;"></p>
     </div>
+
+    <div style="margin-top:16px; border-top:1px solid var(--color-border); padding-top:12px;">
+      <a href="javascript:void(0)" id="show-google-login" class="field-hint" style="text-decoration:underline; cursor:pointer;">中心人員以 Google 帳號登入</a>
+      <div id="google-login-box" style="display:none; margin-top:10px;">
+        <div id="g-signin-btn"></div>
+        <p id="login-fallback" class="login-fallback" style="display:none;">
+          若登入按鈕未顯示，可能是瀏覽器封鎖了第三方登入視窗，請
+          <a href="javascript:location.reload()">重新整理頁面</a>後再試一次。
+        </p>
+      </div>
+    </div>
+    <p id="login-error" class="login-error" style="display:none;"></p>
   </div>
 </div>
 
@@ -493,6 +499,7 @@ function formatDateTime(iso) {
 // ── Google Identity Services 登入 ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
+  applyTrackBranding();
   // 帳密登入不依賴 Google，先接起來——即使 GIS 掛掉（被擋、離線）系辦助理仍能登入。
   wireLocalLogin();
 
@@ -671,9 +678,33 @@ async function doLocalLogin(email, password) {
   return res;
 }
 
+// GAS 軌的品牌名：這個平台目前只做一件事——讓各系系辦助理上傳導師電話，
+// 叫「導師資訊系統」會讓人以為班會紀錄/核章也在這裡（那套在校內自架站）。
+// 只改 GAS 軌：自架站仍是完整的導師資訊系統，名稱不動。
+// 靜態 <title>／badge 保持原樣不動，改在執行時覆蓋——promote.mjs 的 13 條規則比對的是
+// 原始字串，改動它們會讓推行流程失配。
+const GAS_APP_TITLE_ = '各系導師電話上傳表單';
+function applyTrackBranding() {
+  if (isSelfHosted()) return;
+  const isDev = /（測試版）/.test(document.title) || !!document.querySelector('.env-badge');
+  document.title = GAS_APP_TITLE_ + (isDev ? '（測試版）' : '');
+  document.querySelectorAll('#login-page h1, .app-title').forEach(function (el) {
+    const badge = el.querySelector('.env-badge');
+    el.textContent = GAS_APP_TITLE_;
+    if (badge) el.appendChild(badge);
+  });
+}
+
 function wireLocalLogin() {
   const form = $('local-login-form');
   if (!form) return;
+  const gLink = $('show-google-login');
+  if (gLink) {
+    gLink.addEventListener('click', function () {
+      $('google-login-box').style.display = '';
+      gLink.style.display = 'none';
+    });
+  }
   // 自架軌不顯示這一區：那邊的登入在 login.html，index.html 根本不該停在登入畫面。
   if (isSelfHosted()) { $('local-login-box').style.display = 'none'; return; }
   form.addEventListener('submit', async function (e) {
@@ -955,9 +986,24 @@ function pendingSuggestionCount() {
   }, 0);
 }
 
+// GAS 軌上只有系辦助理身分的人（沒有導師/系主任/中心任何角色）只需要「導師資料」一頁——
+// 班會紀錄那套跑在校內自架站，在這裡給他們「上傳/我的上傳」只會造成誤會。
+// admin 與其他角色不受影響，仍看得到全部頁籤。
+function navPagesForRoles(roles) {
+  const onlyDeptAssistant = !isSelfHosted() && roles &&
+    (roles.deptAssistantOf || []).length > 0 &&
+    !roles.isAdmin && !roles.isDirector && !roles.isStaffLead && !roles.isStaffAssistant &&
+    (roles.deptHeadOf || []).length === 0 && (roles.tutorOf || []).length === 0;
+  return NAV_PAGES.filter(function (p) {
+    if (onlyDeptAssistant && p.id !== 'deptroster') return false;
+    return p.show(roles);
+  });
+}
+
 function renderNav() {
   const roles = bootstrapData.roles;
-  $('main-nav').innerHTML = NAV_PAGES.filter(function (p) { return p.show(roles); })
+  applyTrackBranding();
+  $('main-nav').innerHTML = navPagesForRoles(roles)
     .map(function (p) {
       let label = p.label;
       // 後台管理頁籤旁顯示待確認導師建議數 badge（admin 才看得到此頁籤）
