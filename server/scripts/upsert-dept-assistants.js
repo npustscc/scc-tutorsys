@@ -2,9 +2,13 @@
 // server/scripts/upsert-dept-assistants.js — 從 JSON 批次建立/更新系辦助理白名單。
 //
 // 用法：
-//   node server/scripts/upsert-dept-assistants.js --file <名單.json>          # 預演（不寫檔）
-//   node server/scripts/upsert-dept-assistants.js --file <名單.json> --apply   # 實際寫入
-//   （可加 --as <adminEmail> 指定以誰的身分寫，預設用 Code.gs 的 BOOTSTRAP_ADMINS[0]）
+//   node server/scripts/upsert-dept-assistants.js --file <名單.json> --as <adminEmail>          # 預演
+//   node server/scripts/upsert-dept-assistants.js --file <名單.json> --as <adminEmail> --apply  # 實際寫入
+//
+// **`--as` 實務上是必填**：本來想預設用 Code.gs 的 BOOTSTRAP_ADMINS[0]，但那是頂層 `const`，
+// node:vm 不會把它掛到 sandbox 物件上（同一個坑見 verify/README.md：儲存 seam 只能蓋 function、
+// 蓋不了頂層 const），所以讀不到、會直接報錯要你指定。這個 email 只用來當稽核紀錄的 by 欄位
+// 與 requireAdmin_ 的判斷依據，必須是真的 admin（BOOTSTRAP_ADMINS 或 config.users 裡 role=admin）。
 //
 // 為什麼要有這支：白名單的正式入口是 adminUpsertDeptAssistant，而那個 action 需要 admin
 // **登入後的 session token**。要在伺服器上批次灌 37 個系所的名單，若走 HTTP 就得把管理員
