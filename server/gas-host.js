@@ -112,6 +112,20 @@ function createHost(opts) {
   const Utilities = {
     getUuid: function () { return crypto.randomUUID(); },
     computeHmacSha256Signature: function (value, key) {
+      // GAS 只接受 (String, String) 或 (Byte[], Byte[])，兩個參數型別必須一致，混用會丟例外。
+      // 這裡刻意照抄那個限制——原本兩種都收，導致 (Byte[], String) 在本機一路綠燈、
+      // 推上 GAS 才炸（2026-08-09 實際事故：derivePasswordKey_ 的迭代迴圈）。
+      // 模擬器對「GAS 會拒絕的輸入」也必須拒絕，否則它保護不了任何東西。
+      const kindOf = function (v) {
+        if (Array.isArray(v)) return 'number[]';
+        if (typeof v === 'string') return 'String';
+        return typeof v;
+      };
+      const kv = kindOf(value), kk = kindOf(key);
+      if (kv !== kk || (kv !== 'String' && kv !== 'number[]')) {
+        throw new Error('The parameters (' + kv + ',' + kk +
+          ") don't match the method signature for Utilities.computeHmacSha256Signature.");
+      }
       return toSignedBytes(crypto.createHmac('sha256', toBuffer(key)).update(toBuffer(value)).digest());
     },
     base64Encode: function (v) { return toBuffer(v).toString('base64'); },

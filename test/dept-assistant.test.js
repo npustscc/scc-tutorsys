@@ -282,3 +282,37 @@ test('bytesToHex_：處理 GAS byte array 的負數（signed byte）', () => {
   assert.equal(S.bytesToHex_([0, 15, 16, 127]), '000f107f');
   assert.equal(S.bytesToHex_([-1, -128]), 'ff80');   // -1 → 255、-128 → 128
 });
+
+// ── 迴歸：密碼雜湊必須真的能在 GAS 上跑 ───────────────────────────────────────
+// 2026-08-09 的事故：derivePasswordKey_ 的迴圈傳 (Byte[], String) 給
+// Utilities.computeHmacSha256Signature，本機模擬器兩種都收所以全綠，推上 GAS 才炸。
+// 模擬器已改成照抄 GAS 的型別限制，這個測試就會在同樣的錯誤重現時紅燈。
+test('derivePasswordKey_ 全程走 (Byte[],Byte[]) overload，且輸出穩定可重現', () => {
+  const crypto = require('node:crypto');
+  const toSignedBytes = function (buf) {
+    const out = [];
+    for (let i = 0; i < buf.length; i++) out.push(buf[i] > 127 ? buf[i] - 256 : buf[i]);
+    return out;
+  };
+  const toBuffer = function (v) { return Array.isArray(v) ? Buffer.from(v.map(function (b) { return b < 0 ? b + 256 : b; })) : Buffer.from(String(v), 'utf8'); };
+  const Utilities = {
+    // 與 server/gas-host.js 同一份守門邏輯：型別不一致就丟例外（GAS 的真實行為）
+    computeHmacSha256Signature: function (value, key) {
+      const kindOf = function (v) { return Array.isArray(v) ? 'number[]' : typeof v === 'string' ? 'String' : typeof v; };
+      const kv = kindOf(value), kk = kindOf(key);
+      if (kv !== kk || (kv !== 'String' && kv !== 'number[]')) {
+        throw new Error('The parameters (' + kv + ',' + kk + ") don't match the method signature for Utilities.computeHmacSha256Signature.");
+      }
+      return toSignedBytes(crypto.createHmac('sha256', toBuffer(key)).update(toBuffer(value)).digest());
+    },
+    newBlob: function (s) { return { getBytes: function () { return toSignedBytes(Buffer.from(String(s), 'utf8')); } }; },
+  };
+  const S = load(['derivePasswordKey_', 'bytesToHex_'], { Utilities: Utilities });
+  const a = S.derivePasswordKey_('9999', 'aabb', 50, 'pepper-value');
+  const b = S.derivePasswordKey_('9999', 'aabb', 50, 'pepper-value');
+  assert.equal(a, b, '同輸入必須同輸出');
+  assert.match(a, /^[0-9a-f]{64}$/, '應為 64 字元 hex：' + a);
+  assert.notEqual(a, S.derivePasswordKey_('9998', 'aabb', 50, 'pepper-value'), '不同密碼要不同雜湊');
+  assert.notEqual(a, S.derivePasswordKey_('9999', 'aabb', 50, 'other-pepper'), 'pepper 不同要不同雜湊');
+  assert.notEqual(a, S.derivePasswordKey_('9999', 'ccdd', 50, 'pepper-value'), 'salt 不同要不同雜湊');
+});

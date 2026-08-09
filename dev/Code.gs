@@ -271,10 +271,18 @@ function bytesToHex_(bytes) {
 const PASSWORD_ITERATIONS_ = 2000;
 
 // 迭代 HMAC。第一輪把 salt 與密碼綁進去，之後對前一輪輸出反覆 HMAC。
+//
+// ⚠️ `Utilities.computeHmacSha256Signature` 只接受 **(String, String)** 或 **(Byte[], Byte[])**，
+// 兩個參數的型別必須一致。第一輪的 value 是字串、之後幾輪的 value 是前一輪產出的 byte array，
+// 所以 key 不能直接用字串 pepper——2026-08-09 實際踩到：本機模擬器兩種都收，一路綠燈，
+// 推上 GAS 才炸 "The parameters (number[],String) don't match the method signature"。
+// 修法是把 pepper 一次轉成 bytes，全程走 (Byte[], Byte[]) 這個 overload。
 function derivePasswordKey_(password, saltHex, iterations, pepper) {
-  let acc = Utilities.computeHmacSha256Signature(saltHex + ':' + String(password), pepper);
+  const keyBytes = Utilities.newBlob(String(pepper)).getBytes();
+  let acc = Utilities.computeHmacSha256Signature(
+    Utilities.newBlob(saltHex + ':' + String(password)).getBytes(), keyBytes);
   for (let i = 1; i < iterations; i++) {
-    acc = Utilities.computeHmacSha256Signature(acc, pepper);
+    acc = Utilities.computeHmacSha256Signature(acc, keyBytes);
   }
   return bytesToHex_(acc);
 }
