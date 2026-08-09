@@ -2140,16 +2140,17 @@ function renderAdminDeptAssistants() {
     '<div class="card"><h3>系辦助理</h3>' +
     '<p class="field-hint">各系系辦助理維護本系導師名冊用。<b>只看得到自己掛的系所</b>，看不到他系；' +
     '一人可掛多個系所（例如同時兼任兩個單位）。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     (rows.length ? rows.map(function (s) {
       const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
       return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td>' +
         '<td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="分機">' + escapeHtml(s.ext || '') + '</td>' +
         '<td data-label="負責系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="deptasst-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
-    }).join('') : '<tr><td colspan="5"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
+    }).join('') : '<tr><td colspan="6"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
     '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button></div>';
 }
@@ -2165,6 +2166,7 @@ function openDeptAssistantForm(email) {
   const bodyHtml = '<form id="deptasst-form">' +
     '<div class="field"><label>Email</label><input type="email" id="deptasst-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
     '<div class="field"><label>姓名</label><input type="text" id="deptasst-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>校內分機</label><input type="text" id="deptasst-ext" maxlength="20" value="' + escapeHtml(s.ext || '') + '" placeholder="例：7903（純聯絡用，不影響權限）"></div>' +
     '<div class="field"><label>負責系所（可複選）</label>' +
       '<div id="deptasst-depts" style="max-height:240px; overflow-y:auto; border:1px solid var(--color-border); border-radius:8px; padding:8px;">' +
       depts.map(function (d) {
@@ -2185,6 +2187,7 @@ function openDeptAssistantForm(email) {
       .map(function (cb) { return cb.dataset.deptasstDept; });
     const entry = {
       email: targetEmail, name: $('deptasst-name').value.trim(),
+      ext: $('deptasst-ext').value.trim(),
       deptIds: deptIds, disabled: $('deptasst-disabled').checked,
     };
     const submitBtn = e.target.querySelector('button[type=submit]');

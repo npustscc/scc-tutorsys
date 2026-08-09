@@ -2578,8 +2578,10 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
 // 不共用名單也不共用權限——同名容易混淆，命名一律用 deptAssistant / deptAssistantOf。
 //
 // 白名單形狀（config.deptAssistants，比照 staffLeads 的既有模式）：
-//   { email, name, deptIds: ['農園系','森林系'], disabled?, deleted?, ... }
+//   { email, name, deptIds: ['農園系','森林系'], ext?, disabled?, deleted?, ... }
 // deptIds 允許多系（技職所/師培中心那種跨單位的助理）。
+// ext＝校內分機，純聯絡備註（中心要打電話找人用），不參與任何授權判斷；
+// 自由文字但長度上限 20（名冊上有「7829/7803」「7759或7752」這種一人多分機的寫法）。
 
 // deptIds 白名單：陣列、最多 37*2 筆保險上限、每個 id 都要是現存且啟用的系所。
 // 不存在/已停用的 id 直接**拒絕整筆**而不是靜默丟掉——admin 打錯字時要看得到錯誤，
@@ -2614,7 +2616,7 @@ function adminUpsertDeptAssistantAction_(params, ctx, userEmail) {
     if (!isDelete) {
       const chk = normalizeDeptAssistantDeptIds_(entry.deptIds, departments);
       if (!chk.ok) throw new Error(chk.error);
-      next = Object.assign({}, entry, { deptIds: chk.deptIds });
+      next = Object.assign({}, entry, { deptIds: chk.deptIds, ext: String(entry.ext || '').trim().slice(0, 20) });
     }
     config.deptAssistants = config.deptAssistants || [];
     const idx = config.deptAssistants.findIndex(function (s) { return s && s.email === entry.email; });
