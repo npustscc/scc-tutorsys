@@ -502,12 +502,15 @@ function requireMaintenanceOwner_() {
 }
 
 // 狀態總覽：確認密鑰有沒有設好、各資料表有幾筆。**不回傳任何密鑰內容**，只回布林。
+// 注意：GAS 編輯器的「執行紀錄」只顯示 Logger.log 的輸出，**不顯示回傳值**，
+// 所以這幾支維運函式一律「log 一份、也回傳一份」——從編輯器點執行的人看得到，
+// 用 API 呼叫的人也拿得到。
 function maintenanceStatus() {
   requireMaintenanceOwner_();
   const ctx = { root: ROOT_FOLDER_ID };
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const accounts = readJsonSafe_('localAccounts.json', ctx, {});
-  return JSON.stringify({
+  const out = JSON.stringify({
     root: ROOT_FOLDER_ID,
     hasSessionSecret: !!getSessionSecret_(),
     hasPasswordPepper: !!getPasswordPepper_(),
@@ -518,6 +521,8 @@ function maintenanceStatus() {
     deptAssistants: (config.deptAssistants || []).length,
     localAccounts: Object.keys(accounts).length,
   });
+  Logger.log(out);
+  return out;
 }
 
 // 批次寫入系辦助理白名單。輸入 JSON 陣列字串 [{email,name,ext,deptIds:[]}...]，
@@ -535,7 +540,9 @@ function maintenanceUpsertDeptAssistants(json) {
       result.failed.push({ email: r && r.email, error: e.message });
     }
   });
-  return JSON.stringify(result);
+  const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
 }
 
 // 依白名單的分機建立/重設本機登入帳號（同 adminLocalAccounts 的 createOrReset）。
@@ -561,7 +568,9 @@ function maintenanceResetLocalAccounts(emailsCsv) {
       result.failed.push({ email: a.email, error: e.message });
     }
   });
-  return JSON.stringify(result);
+  const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
 }
 
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
