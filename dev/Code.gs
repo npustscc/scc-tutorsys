@@ -599,9 +599,38 @@ function maintenanceImportFromDriveJson() {
   const who = requireMaintenanceOwner_();
   const ctx = { root: ROOT_FOLDER_ID };
   let payload;
+  let sourceNote = '根資料夾';
   try {
     payload = readJson_({ path: 'migration.json' }, ctx);
-  } catch (e) {
+  } catch (eRoot) {
+    // 不在根資料夾 → 搜尋整個雲端硬碟。實務上最常見的原因是上傳時用了另一個 Google 帳號、
+    // 或拖到別的資料夾；檔案還是同一份，沒必要為了位置讓人重來一次。
+    // 找到多份就取最後修改的那份，並把來源位置與時間一起 log 出來（免得默默吃到舊檔）。
+    try {
+      const found = driveGet_('files', {
+        q: "name='migration.json' and trashed=false",
+        fields: 'files(id,name,modifiedTime,parents)', orderBy: 'modifiedTime desc', pageSize: '10',
+      });
+      if (found.files && found.files.length) {
+        const f = found.files[0];
+        let parentName = '(未知)';
+        try {
+          const p = driveGet_('files/' + (f.parents && f.parents[0]), { fields: 'name' });
+          parentName = p.name || parentName;
+        } catch (e3) { /* 取不到父資料夾名稱不影響匯入 */ }
+        const resDl = UrlFetchApp.fetch(
+          'https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media&supportsAllDrives=true',
+          { headers: { Authorization: 'Bearer ' + tok_() }, muteHttpExceptions: true }
+        );
+        if (resDl.getResponseCode() >= 400) throw new Error('下載 migration.json 失敗');
+        payload = JSON.parse(resDl.getContentText());
+        sourceNote = '雲端硬碟其他位置：資料夾「' + parentName + '」，最後修改 ' + f.modifiedTime +
+          (found.files.length > 1 ? '（共找到 ' + found.files.length + ' 份，取最新）' : '');
+        Logger.log('注意：migration.json 不在根資料夾，改用 ' + sourceNote);
+      }
+    } catch (eSearch) { /* 落到下面的錯誤回報 */ }
+  }
+  if (!payload) {
     // 找不到就**直接列出根資料夾實際有什麼**——「找不到」這種錯誤最沒用的形式就是
     // 只說找不到，讓人去猜是傳錯資料夾還是名字不對。一次執行就把真相印出來。
     let listing = [];
@@ -625,7 +654,11 @@ function maintenanceImportFromDriveJson() {
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const result = { source: payload.source || '(未標示)', generatedAt: payload.generatedAt || '(未標示)', wrote: [], skipped: [], backups: [] };
+  const result = {
+    讀取來源: sourceNote,
+    source: payload.source || '(未標示)', generatedAt: payload.generatedAt || '(未標示)',
+    wrote: [], skipped: [], backups: [],
+  };
   const files = payload.files || {};
 
   MIGRATION_ALLOWED_FILES_.forEach(function (name) {
