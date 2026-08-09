@@ -576,6 +576,69 @@ function maintenanceUpsertDeptAssistants(json) {
   return out;
 }
 
+// ── 名冊搬運：自架版 → GAS Drive ─────────────────────────────────────────────
+// 為什麼是「上傳檔案 + 零參數函式」這種形狀：
+//   - GAS 編輯器只能執行**零參數**函式，所以資料不能用參數傳。
+//   - 走 Drive REST 直接寫需要另一組 OAuth 憑證（comanage 上沒有 creds.json），
+//     等於要使用者再做一次授權；而把資料檔丟進 Drive 資料夾是拖放就完成的事。
+//   - 刻意**不做成 doPost 的 action**：整份覆寫名冊是維運動作，不該有網路端點常駐。
+//
+// 用法：把 migration.json 上傳到本環境的 Drive 根資料夾，再執行本函式。
+// 檔案格式：{ generatedAt, source, files: { "colleges.json": [...], ... }, deptAssistants: [...] }
+//
+// 安全與資料保全：
+//   - 只接受白名單內的檔名（名冊類），**不碰** records_*／sessions／props／audit_log。
+//   - 每個被覆寫的檔案先存一份 <name>.bak-migrate-<時間戳>，出事可回。
+//   - deptAssistants 併進現有 config.json（只換這個欄位），不整檔覆寫——
+//     config 裡還有 users/settings/staffLeads，整檔蓋掉會把它們一起清空。
+const MIGRATION_ALLOWED_FILES_ = [
+  'colleges.json', 'departments.json', 'tutorSystems.json', 'semesters.json', 'classes.json',
+];
+
+function maintenanceImportFromDriveJson() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  let payload;
+  try {
+    payload = readJson_({ path: 'migration.json' }, ctx);
+  } catch (e) {
+    const err = JSON.stringify({ error: '找不到 migration.json（請先把它上傳到本環境的 Drive 根資料夾）' });
+    Logger.log(err);
+    return err;
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const result = { source: payload.source || '(未標示)', generatedAt: payload.generatedAt || '(未標示)', wrote: [], skipped: [], backups: [] };
+  const files = payload.files || {};
+
+  MIGRATION_ALLOWED_FILES_.forEach(function (name) {
+    if (!Object.prototype.hasOwnProperty.call(files, name)) { result.skipped.push(name + '（檔案裡沒有）'); return; }
+    const content = files[name];
+    if (!Array.isArray(content)) { result.skipped.push(name + '（內容不是陣列，跳過）'); return; }
+    const before = readJsonSafe_(name, ctx, null);
+    if (before !== null) {
+      writeJsonPath_(name + '.bak-migrate-' + stamp, before, ctx);
+      result.backups.push(name + '.bak-migrate-' + stamp);
+    }
+    writeJsonPath_(name, content, ctx);
+    result.wrote.push(name + '（' + content.length + ' 筆）');
+  });
+
+  if (Array.isArray(payload.deptAssistants)) {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    writeJsonPath_('config.json.bak-migrate-' + stamp, config, ctx);
+    result.backups.push('config.json.bak-migrate-' + stamp);
+    config.deptAssistants = payload.deptAssistants;
+    writeJsonPath_('config.json', config, ctx);
+    result.wrote.push('config.deptAssistants（' + payload.deptAssistants.length + ' 筆）');
+  }
+
+  appendAuditLog_(ctx, { action: 'maintenanceImportFromDriveJson', by: who, targetId: 'migration.json', at: new Date().toISOString() });
+  const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
+}
+
 // 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
 // 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
 // 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。
