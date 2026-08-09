@@ -977,7 +977,17 @@ const NAV_PAGES = [
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
 
-function defaultPageId() { return 'upload'; }
+// 登入後的第一頁。GAS 軌＝各系導師電話上傳表單，第一眼就該是導師名冊；
+// 落在「班會紀錄上傳」不只是不對題，對只有系辦助理身分的人更是一個導覽列上根本沒有的頁面
+// （navPagesForRoles 已把其餘頁籤收掉），等於一進來就看到自己點不回去的畫面。
+// 自架站是完整的導師資訊系統，維持原本的「上傳」。
+function defaultPageId() {
+  if (!isSelfHosted()) {
+    const roles = bootstrapData && bootstrapData.roles;
+    if (roles && ((roles.deptAssistantOf || []).length > 0 || roles.isAdmin)) return 'deptroster';
+  }
+  return 'upload';
+}
 
 // 全校待確認導師建議總數（admin 後台導覽 badge 用）。
 function pendingSuggestionCount() {
