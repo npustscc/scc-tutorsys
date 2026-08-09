@@ -602,7 +602,24 @@ function maintenanceImportFromDriveJson() {
   try {
     payload = readJson_({ path: 'migration.json' }, ctx);
   } catch (e) {
-    const err = JSON.stringify({ error: '找不到 migration.json（請先把它上傳到本環境的 Drive 根資料夾）' });
+    // 找不到就**直接列出根資料夾實際有什麼**——「找不到」這種錯誤最沒用的形式就是
+    // 只說找不到，讓人去猜是傳錯資料夾還是名字不對。一次執行就把真相印出來。
+    let listing = [];
+    try {
+      const res = driveGet_('files', {
+        q: "'" + ctx.root + "' in parents and trashed=false",
+        fields: 'files(name,mimeType)', pageSize: '100', orderBy: 'name',
+      });
+      listing = (res.files || []).map(function (f) {
+        return f.name + (f.mimeType === 'application/vnd.google-apps.folder' ? '/' : '');
+      });
+    } catch (e2) { listing = ['(列出根資料夾也失敗：' + e2.message + ')']; }
+    const err = JSON.stringify({
+      error: '找不到 migration.json',
+      rootFolderId: ROOT_FOLDER_ID,
+      根資料夾實際內容: listing,
+      提示: '請確認檔案是上傳到上面這個 ID 的資料夾，且檔名正好是 migration.json（結尾有 / 的是子資料夾）',
+    });
     Logger.log(err);
     return err;
   }
