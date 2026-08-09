@@ -5,8 +5,9 @@
 //   node server/scripts/create-dept-assistant-accounts.js                # 預演（不寫檔）
 //   node server/scripts/create-dept-assistant-accounts.js --apply        # 實際建立
 //   node server/scripts/create-dept-assistant-accounts.js --apply --reset # 連已存在的帳號一起重設
+//   node server/scripts/create-dept-assistant-accounts.js --apply --only a@x.tw,b@x.tw  # 只處理這幾筆
 //
-// 帳號＝白名單的 email，**初始密碼＝白名單的校內分機**，並標記 mustChangePassword
+// 帳號＝白名單的 email，**初始密碼＝白名單的校內分機（多支時取第一支）**，並標記 mustChangePassword
 // （登入頁會邀請改密碼，使用者可選「稍後再做」）。沒填分機的略過——不替人發明密碼。
 //
 // ⚠️ 初始密碼是 4 碼分機、而且全校查得到，等於「先讓人進得來」而不是安全機制。
@@ -21,6 +22,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { loadConfig } = require('../config');
 const { createHost } = require('../gas-host');
+const { initialPasswordFromExt_ } = require('../index');
 
 function hashPassword(password) {
   const N = 16384, r = 8, p = 1, keylen = 32;
@@ -38,6 +40,9 @@ function atomicWriteFileSync(filePath, content) {
 function run(argv) {
   const apply = argv.indexOf('--apply') !== -1;
   const reset = argv.indexOf('--reset') !== -1;
+  const onlyIdx = argv.indexOf('--only');
+  const only = onlyIdx === -1 ? null : String(argv[onlyIdx + 1] || '').split(',')
+    .map(function (e) { return e.trim().toLowerCase(); }).filter(Boolean);
   const config = loadConfig({});
   const host = createHost({ gsFile: config.gsFile, dataDir: config.dataDir, sendMail: null });
   const ctx = { root: host.rootFolderId };
@@ -53,8 +58,10 @@ function run(argv) {
     const email = String(a.email || '').trim().toLowerCase();
     const ext = String(a.ext || '').trim();
     if (!email) return;
-    if (!ext) { plan.skipNoExt.push(email); return; }
-    if (users[email]) { (reset ? plan.reset : plan.skipExisting).push(email); return; }
+    if (only && only.indexOf(email) === -1) return;
+    if (!initialPasswordFromExt_(ext)) { plan.skipNoExt.push(email); return; }
+    // --only 指名的就是要處理，視同 reset（不然已存在的會被當成「略過」而什麼都沒做）
+    if (users[email]) { ((reset || only) ? plan.reset : plan.skipExisting).push(email); return; }
     plan.create.push(email);
   });
 
@@ -71,7 +78,7 @@ function run(argv) {
   targets.forEach(function (email) {
     const a = assistants.filter(function (x) { return String(x.email || '').toLowerCase() === email; })[0];
     users[email] = Object.assign({}, users[email] || {}, {
-      name: a.name || '', hash: hashPassword(String(a.ext).trim()),
+      name: a.name || '', hash: hashPassword(initialPasswordFromExt_(a.ext)),
       disabled: false, mustChangePassword: true,
     });
   });

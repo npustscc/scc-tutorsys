@@ -509,6 +509,13 @@ window.addEventListener('load', () => {
     storedUser = JSON.parse(localStorage.getItem(LS_USER_KEY) || 'null');
     storedSession = JSON.parse(localStorage.getItem(LS_SESSION_KEY) || 'null');
   } catch (e) {}
+  if (!(storedUser && storedUser.email) && isSelfHosted()) {
+    // 沒有使用者資料就進不了主畫面 → 回 login.html。**先把 session 鍵一起清掉**：
+    // login.html 看到「session 還有效」會立刻把人送回 index.html，兩邊互踢就是無窮迴圈。
+    try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+    location.href = './login.html';
+    return;
+  }
   if (storedUser && storedUser.email) {
     currentUser = storedUser;
     const valid = storedSession && storedSession.token &&
@@ -519,6 +526,11 @@ window.addEventListener('load', () => {
       sessionExp = Number(storedSession.exp);
       showLoading('自動登入中…');
       afterLogin();
+    } else if (isSelfHosted()) {
+      // 自架軌：昨天登入過但今天的 session 已過期 → 回 login.html 重打帳密。
+      clearSession();
+      location.href = './login.html';
+      return;
     } else {
       clearSession();
       showLoading('驗證身分中…');
@@ -576,6 +588,13 @@ async function handleCredentialResponse(response) {
 // 成功時 handleCredentialResponse 會自動打 sessionStart 換發新 session，
 // 之後才 resolve——await 本函式回來時新 session 已就緒，可直接重試原請求。
 function refreshIdToken() {
+  // 自架軌沒有 Google 登入可走：憑證到期就直接回 login.html 本地帳密重登。
+  // （原本會跳出一個掛著 Google 按鈕的「登入已到期」視窗，在這裡按下去必然失敗。）
+  if (isSelfHosted()) {
+    try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+    location.href = './login.html';
+    return new Promise(function () {});  // 永不 resolve：頁面正在跳轉，呼叫端不該繼續重試
+  }
   if (refreshPromise) return refreshPromise;
   refreshPromise = new Promise((resolve) => { refreshResolve = resolve; });
   const timer = setTimeout(() => { if (refreshResolve) showReloginModal(); }, 8000);
@@ -598,10 +617,21 @@ function hideReloginModal() {
   if ($('modal-box').querySelector('#relogin-btn-slot')) closeModal();
 }
 
-// 本機登出（清鍵＋重載）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+// 自架伺服器版？——build-public.js 會把 APPS_SCRIPT_URL 換成本機 origin，所以「不是
+// script.google.com」就是自架軌。自架軌**沒有 Google 登入**（區網 IP 不是 Google OAuth 的
+// 合法 origin），登入一律走 server 提供的 login.html 本地帳密。
+function isSelfHosted() {
+  return !/^https:\/\/script\.google\.com\//.test(APPS_SCRIPT_URL);
+}
+
+// 本機登出（清鍵）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+// 自架軌要導回 login.html——原本一律 location.reload()，重載 index.html 後會落到內建的
+// Google 登入畫面，而那個畫面在自架環境按下去必然失敗（使用者得手動把網址的 index.html
+// 刪掉才回得了登入頁）。GAS 軌維持原本的 reload（那邊的登入畫面就是對的）。
 function localSignOut() {
   try { localStorage.removeItem(LS_USER_KEY); localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
+  if (isSelfHosted()) { location.href = './login.html'; return; }
   location.reload();
 }
 $('logout-btn').addEventListener('click', async (e) => {

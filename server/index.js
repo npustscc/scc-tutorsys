@@ -124,6 +124,14 @@ function writeUsersSync_(dataDir, users) {
   fs.renameSync(tmp, p);
 }
 
+// 初始密碼＝分機。名冊上有「7829/7803」「7759或7752」這種一人多分機的寫法，
+// 整串當密碼沒人打得出來（使用者 2026-08-09 實際卡在這裡），所以取**第一支數字**。
+// ext 欄位本身保留原文（兩支都是有用的聯絡資訊），只有密碼取第一支。
+function initialPasswordFromExt_(ext) {
+  const m = String(ext == null ? '' : ext).match(/\d+/);
+  return m ? m[0] : '';
+}
+
 // 新密碼規則：至少 8 字，且不能與初始密碼（分機）同形——初始密碼是 4 碼分機，
 // 全校可查，等於沒有密碼，所以改密碼時一定要離開那個形狀。
 const MIN_PASSWORD_LEN = 8;
@@ -316,7 +324,7 @@ function startServer(config) {
         return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
       })[0];
       if (!assistant) return sendJson(res, 200, { success: false, error: '這個 email 不在系辦助理白名單內' });
-      const pw = String((body && body.password) || assistant.ext || '').trim();
+      const pw = String((body && body.password) || initialPasswordFromExt_(assistant.ext) || '').trim();
       if (!pw) return sendJson(res, 200, { success: false, error: '沒有可用的初始密碼（白名單沒填分機），請手動指定' });
       const fresh = readUsersSync_(config.dataDir);
       fresh[targetEmail] = Object.assign({}, fresh[targetEmail] || {}, {
@@ -479,7 +487,7 @@ function startServer(config) {
   });
 }
 
-module.exports = { startServer };
+module.exports = { startServer, initialPasswordFromExt_, resolveLoginEmail_, validateNewPassword_ };
 
 if (require.main === module) {
   let config;
