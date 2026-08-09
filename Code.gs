@@ -71,6 +71,21 @@ function doPost(e) {
     //     純本地驗證、零外部 HTTP。失效回 'Session expired'（前端據此靜默重登＋重試）。
     //   - idToken：Google ID token。sessionStart 只收 idToken——帶 sessionToken 打
     //     sessionStart 一律拒絕，不允許「以舊 session 換新 session」無限續命。
+    // ctx（Drive 根資料夾）先解析：免認證的 localLogin 也需要它，而白名單比對本身
+    // 不依賴使用者身分。帶不在白名單的 rootFolderId 一律拒絕（跨環境 fail-closed）。
+    let ctx = { root: ROOT_FOLDER_ID };
+    if (rootFolderId) {
+      if (!ALLOWED_ROOTS[rootFolderId]) return jsonResp_({ error: 'Unauthorized rootFolderId' });
+      ctx = { root: rootFolderId };
+    }
+
+    // **本 dispatcher 唯一免認證的兩個 action**：帳密登入與帳密改密碼——它們自己就是認證
+    // （驗完帳密才簽發／才改），要求先有憑證等於雞生蛋。兩者都在函式內部自行節流，
+    // 且回應形狀只有 {error} 或簽發結果，不洩漏帳號是否存在。
+    // 新增任何 action 時預設「需要認證」，不要往這個分支加東西。
+    if (action === 'localLogin') return jsonResp_(localLoginAction_(params, ctx));
+    if (action === 'localChangePassword') return jsonResp_(localChangePasswordAction_(params, ctx));
+
     let userEmail;
     if (sessionToken) {
       if (action === 'sessionStart') return jsonResp_({ error: 'sessionStart requires idToken' });
@@ -79,12 +94,6 @@ function doPost(e) {
     } else {
       userEmail = idToken ? verifyIdToken_(idToken) : null;
       if (!userEmail) return jsonResp_({ error: 'Unauthorized' });
-    }
-
-    let ctx = { root: ROOT_FOLDER_ID };
-    if (rootFolderId) {
-      if (!ALLOWED_ROOTS[rootFolderId]) return jsonResp_({ error: 'Unauthorized rootFolderId' });
-      ctx = { root: rootFolderId };
     }
 
     let result;
@@ -113,6 +122,11 @@ function doPost(e) {
       case 'adminUpsertTutorSystem': result = adminUpsertTutorSystemAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
+      case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
+      case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
+      case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
+      case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
+      case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -208,6 +222,408 @@ function issueSessionToken_(email) {
     Utilities.computeHmacSha256Signature(payloadB64, secret)
   );
   return { token: payloadB64 + '.' + sigB64, exp: exp, jti: jti, iat: iat };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 本機帳密（系辦助理用；GAS 軌也要有）────────────────────────────────────────
+// 為什麼 GAS 軌需要帳密：系辦助理的校內信箱 @mail.npust.edu.tw **不是 Google 帳號**
+// （MX 指向學校自架的 spamalumni.npust.edu.tw，不是 Google），所以他們沒辦法用 Google 登入。
+// 導師與中心同仁走 Google 登入不變，這一套只是多一條路。
+//
+// 密碼保護：HMAC-SHA256 迭代（PBKDF2 精神；GAS 沒有 scrypt/bcrypt）＋ Script Property 的
+// **pepper**。pepper 不在資料庫裡，所以就算 Drive 上的 localAccounts.json 整份外流，
+// 沒有 pepper 也無法離線暴力破解。格式：hmac$<iterations>$<saltHex>$<keyHex>。
+//
+// ⚠️ 初始密碼＝校內分機，而分機在各系所官網上公開查得到。這在區網自架版還算堪用，
+// 搬到公開網際網路的 GAS 軌就等於「任何人都能拿到的密碼」。因此這裡加了兩道限制：
+//   1. mustChangePassword 的帳號有 **activationExpiresAt 啟用期限**（預設 14 天），
+//      過期即拒絕登入，要由中心重新啟用——公開的分機只在啟用窗口內有效。
+//   2. 前端在非自架軌不提供「稍後再做」，首次登入必須改密碼。
+// 這兩道都不是「安全」，是把暴露窗口從無限縮到有限。真正的解是接學校 SSO。
+function getPasswordPepper_() {
+  return PropertiesService.getScriptProperties().getProperty('PASSWORD_PEPPER');
+}
+
+// 在 GAS 編輯器手動執行一次（每個環境各跑一次，dev/prod 的 pepper 互不相同）。
+// 刻意不自動產生：pepper 一旦改變，所有既存密碼全部失效，不能讓它在請求路徑上被偷偷重建。
+function setupPasswordPepper() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('PASSWORD_PEPPER')) {
+    Logger.log('PASSWORD_PEPPER 已存在，不覆寫。');
+    return;
+  }
+  const bytes = [];
+  for (let i = 0; i < 32; i++) bytes.push(Math.floor(Math.random() * 256));
+  const secret = Utilities.base64Encode(bytes);
+  props.setProperty('PASSWORD_PEPPER', secret);
+  Logger.log('PASSWORD_PEPPER 已產生並存入 Script Properties（長度 ' + secret.length + '）。');
+}
+
+function bytesToHex_(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i] < 0 ? bytes[i] + 256 : bytes[i];
+    out += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return out;
+}
+
+// 迭代次數：**實測值決定的**，不是拍腦袋。2026-08-09 在 GAS dev 量到
+// 2000 次要 2.9 秒（總耗時 4.2 秒 − doGet 基準 1.39 秒），登入太慢、而且會把
+// withLock_ 的 15 秒鎖佔住導致 Lock timeout。降到 200 次約 0.3 秒。
+//
+// 安全性取捨要講清楚：迭代次數只在「資料庫**和** pepper 同時外洩」時才有意義——
+// pepper 存在 Script Properties、不在 Drive 的 localAccounts.json 裡，所以單純資料外洩
+// 根本無法離線嘗試。而初始密碼是 4 碼分機（10^4 空間），再多迭代也擋不住。
+// 在 GAS 這個「每次 HMAC 都是一次服務呼叫」的環境裡，200 次是可用性與強度的折衷。
+// 次數存在雜湊字串裡，之後調整不會讓既有密碼失效。
+const PASSWORD_ITERATIONS_ = 200;
+
+// 迭代 HMAC。第一輪把 salt 與密碼綁進去，之後對前一輪輸出反覆 HMAC。
+//
+// ⚠️ `Utilities.computeHmacSha256Signature` 只接受 **(String, String)** 或 **(Byte[], Byte[])**，
+// 兩個參數的型別必須一致。第一輪的 value 是字串、之後幾輪的 value 是前一輪產出的 byte array，
+// 所以 key 不能直接用字串 pepper——2026-08-09 實際踩到：本機模擬器兩種都收，一路綠燈，
+// 推上 GAS 才炸 "The parameters (number[],String) don't match the method signature"。
+// 修法是把 pepper 一次轉成 bytes，全程走 (Byte[], Byte[]) 這個 overload。
+function derivePasswordKey_(password, saltHex, iterations, pepper) {
+  const keyBytes = Utilities.newBlob(String(pepper)).getBytes();
+  let acc = Utilities.computeHmacSha256Signature(
+    Utilities.newBlob(saltHex + ':' + String(password)).getBytes(), keyBytes);
+  for (let i = 1; i < iterations; i++) {
+    acc = Utilities.computeHmacSha256Signature(acc, keyBytes);
+  }
+  return bytesToHex_(acc);
+}
+
+function hashPasswordGas_(password) {
+  const pepper = getPasswordPepper_();
+  if (!pepper) throw new Error('PASSWORD_PEPPER not configured（請在 GAS 編輯器執行一次 setupPasswordPepper）');
+  const saltBytes = [];
+  for (let i = 0; i < 16; i++) saltBytes.push(Math.floor(Math.random() * 256));
+  const saltHex = bytesToHex_(saltBytes);
+  const key = derivePasswordKey_(password, saltHex, PASSWORD_ITERATIONS_, pepper);
+  return 'hmac$' + PASSWORD_ITERATIONS_ + '$' + saltHex + '$' + key;
+}
+
+// 長度先比、再逐字元 XOR 累加——避免早退造成的時間差。
+function constantTimeEqual_(a, b) {
+  const x = String(a), y = String(b);
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= (x.charCodeAt(i) ^ y.charCodeAt(i));
+  return diff === 0;
+}
+
+function verifyPasswordGas_(password, hashStr) {
+  const pepper = getPasswordPepper_();
+  if (!pepper) return false;
+  const parts = String(hashStr || '').split('$');
+  if (parts.length !== 4 || parts[0] !== 'hmac') return false;
+  const iterations = Number(parts[1]);
+  if (!iterations || iterations > 20000) return false;
+  const derived = derivePasswordKey_(password, parts[2], iterations, pepper);
+  return constantTimeEqual_(derived, parts[3]);
+}
+
+// 新密碼規則與自架版一致（server/index.js validateNewPassword_）：至少 8 字、不得全數字。
+function validateNewPasswordGas_(pw) {
+  const s = String(pw == null ? '' : pw);
+  if (s.length < 8) return '新密碼至少 8 個字元';
+  if (s.length > 200) return '新密碼過長';
+  if (/^\d+$/.test(s)) return '新密碼不能只有數字（分機那種形式全校查得到）';
+  return null;
+}
+
+// 初始密碼取分機的第一段數字（名冊有「7829/7803」這種一格兩支的寫法）。
+// 與 server/index.js 的 initialPasswordFromExt_ 同規則，改動要兩邊同步。
+function initialPasswordFromExtGas_(ext) {
+  const m = String(ext == null ? '' : ext).match(/\d+/);
+  return m ? m[0] : '';
+}
+
+const ACTIVATION_WINDOW_DAYS_ = 14;
+
+// 登入失敗節流：CacheService 記 (email) 的連續失敗次數，達 5 次鎖 60 秒。
+// CacheService 是 best-effort（可能被清空），所以這是「提高成本」而不是硬保證。
+function loginFailKey_(email) { return 'lgf:' + String(email || '').toLowerCase(); }
+function loginFailCount_(email) {
+  const v = CacheService.getScriptCache().get(loginFailKey_(email));
+  return v ? Number(v) : 0;
+}
+function bumpLoginFail_(email) {
+  const n = loginFailCount_(email) + 1;
+  CacheService.getScriptCache().put(loginFailKey_(email), String(n), 60);
+  return n;
+}
+function clearLoginFail_(email) {
+  CacheService.getScriptCache().remove(loginFailKey_(email));
+}
+
+// 帳號解析：允許只打 @ 之前那段（規則同 server/index.js 的 resolveLoginEmail_——
+// local-part 剛好命中一個帳號才算數，多個一律當查無）。
+function resolveLocalLoginEmail_(accounts, input) {
+  const raw = String(input == null ? '' : input).trim().toLowerCase();
+  if (!raw || raw.indexOf('@') !== -1) return raw;
+  const hits = Object.keys(accounts || {}).filter(function (e) {
+    return String(e).toLowerCase().split('@')[0] === raw;
+  });
+  return hits.length === 1 ? hits[0] : raw;
+}
+
+// localLogin：**這個 dispatcher 唯一免認證的 action**——它自己就是認證。
+// 驗完帳密才簽發 session token，形狀與 sessionStart 一致（前端共用同一套 session 流程）。
+function localLoginAction_(params, ctx) {
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const email = resolveLocalLoginEmail_(accounts, params.email);
+  const password = String(params.password == null ? '' : params.password);
+
+  if (loginFailCount_(email) >= 5) return { error: '嘗試次數過多，請稍後再試' };
+
+  const entry = email ? accounts[email] : null;
+  // 查無帳號也照跑一次同樣迭代次數的雜湊，拉平時間差（同 server/index.js 的 DUMMY_HASH 手法）。
+  const hashToCheck = (entry && entry.hash) ? entry.hash
+    : ('hmac$' + PASSWORD_ITERATIONS_ + '$' + '00'.repeat(16) + '$' + 'ff'.repeat(32));
+  const passwordOk = verifyPasswordGas_(password, hashToCheck);
+  const accountOk = !!entry && entry.disabled !== true && entry.deleted !== true;
+  if (!accountOk || !passwordOk) {
+    bumpLoginFail_(email);
+    return { error: '帳號或密碼錯誤' };
+  }
+  // 啟用期限：仍在用初始密碼（分機，公開查得到）且已過期 → 拒絕，要中心重新啟用。
+  if (entry.mustChangePassword === true && entry.activationExpiresAt &&
+      new Date().toISOString() > entry.activationExpiresAt) {
+    bumpLoginFail_(email);
+    return { error: '初次登入啟用期限已過，請聯絡學諮中心重新啟用帳號' };
+  }
+
+  clearLoginFail_(email);
+  const issued = issueSessionToken_(email);
+  return {
+    sessionToken: issued.token, exp: issued.exp, email: email,
+    name: entry.name || '', mustChangePassword: entry.mustChangePassword === true,
+  };
+}
+
+// localChangePassword：要帶目前密碼（不只認 session token——token 存 localStorage，
+// 撿到 token 的人不該就能改密碼把本人鎖在外面）。同 server/index.js 的判斷。
+function localChangePasswordAction_(params, ctx) {
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const email = resolveLocalLoginEmail_(accounts, params.email);
+  const current = String(params.currentPassword == null ? '' : params.currentPassword);
+  const next = String(params.newPassword == null ? '' : params.newPassword);
+
+  if (loginFailCount_(email) >= 5) return { error: '嘗試次數過多，請稍後再試' };
+  const policyErr = validateNewPasswordGas_(next);
+  if (policyErr) return { error: policyErr };
+
+  const entry = accounts[email];
+  const hashToCheck = (entry && entry.hash) ? entry.hash
+    : ('hmac$' + PASSWORD_ITERATIONS_ + '$' + '00'.repeat(16) + '$' + 'ff'.repeat(32));
+  const ok = verifyPasswordGas_(current, hashToCheck) && !!entry && entry.disabled !== true;
+  if (!ok) {
+    // 冪等：目前密碼對不上，但「新密碼」已經是現行密碼 → 代表這次請求其實已經成功過一次
+    // （GAS 偶發 404/503 讓前端重試時就會這樣，使用者 2026-08-09 實際踩到：
+    //  第一次改成功但畫面報錯，第二次送出被判「目前密碼錯誤」）。
+    // 回成功而不改動任何東西——呼叫端證明了自己知道新密碼，且狀態已經是它要的樣子。
+    if (entry && entry.disabled !== true && verifyPasswordGas_(next, entry.hash)) {
+      clearLoginFail_(email);
+      return { changed: false, alreadyChanged: true };
+    }
+    bumpLoginFail_(email); return { error: '帳號或目前密碼錯誤' };
+  }
+  if (current === next) return { error: '新密碼不能與目前密碼相同' };
+
+  clearLoginFail_(email);
+  const newHash = hashPasswordGas_(next);   // 同上：慢的一步留在鎖外
+  return withLock_(function () {
+    const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+    const now = new Date().toISOString();
+    fresh[email] = Object.assign({}, fresh[email] || entry, {
+      hash: newHash, mustChangePassword: false,
+      activationExpiresAt: null, passwordChangedAt: now,
+    });
+    writeJsonPath_('localAccounts.json', fresh, ctx);
+    return { changed: true };
+  });
+}
+
+// adminLocalAccounts：admin only，操作與自架版 /admin/accounts 完全對應
+// （list / createOrReset / setDisabled），前端同一套 UI 依環境切換傳輸方式。
+function adminLocalAccountsAction_(params, ctx, userEmail) {
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  requireAdmin_(roles);
+  const op = String(params.op || 'list');
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+
+  if (op === 'list') {
+    const assistants = (config.deptAssistants || []).filter(function (a) { return a && a.deleted !== true; });
+    return {
+      accounts: assistants.map(function (a) {
+        const u = accounts[String(a.email || '').toLowerCase()];
+        return {
+          email: a.email, name: a.name || '', ext: a.ext || '', deptIds: a.deptIds || [],
+          assistantDisabled: a.disabled === true,
+          hasAccount: !!u, accountDisabled: !!u && u.disabled === true,
+          mustChangePassword: !!u && u.mustChangePassword === true,
+          activationExpiresAt: (u && u.activationExpiresAt) || null,
+          passwordChangedAt: (u && u.passwordChangedAt) || null,
+        };
+      }),
+    };
+  }
+
+  const targetEmail = String(params.email || '').trim().toLowerCase();
+  if (!targetEmail) throw new Error('email required');
+
+  if (op === 'createOrReset') {
+    const assistant = (config.deptAssistants || []).filter(function (a) {
+      return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
+    })[0];
+    if (!assistant) throw new Error('這個 email 不在系辦助理白名單內');
+    const pw = String(params.password || initialPasswordFromExtGas_(assistant.ext) || '').trim();
+    if (!pw) throw new Error('沒有可用的初始密碼（白名單沒填分機），請手動指定');
+    // 雜湊在鎖**外面**算：它是這裡最慢的一步，放進臨界區會讓別的請求等到 waitLock 逾時
+    // （2026-08-09 使用者實際踩到 Lock timeout）。鎖裡只留讀檔→改一筆→寫檔。
+    const newHash = hashPasswordGas_(pw);
+    return withLock_(function () {
+      const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+      const now = new Date();
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail] || {}, {
+        name: assistant.name || '', hash: newHash, disabled: false,
+        mustChangePassword: true,
+        activationExpiresAt: new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString(),
+      });
+      writeJsonPath_('localAccounts.json', fresh, ctx);
+      appendAuditLog_(ctx, { action: 'adminResetLocalAccount', by: userEmail, targetId: targetEmail, at: now.toISOString() });
+      return { email: targetEmail, activationDays: ACTIVATION_WINDOW_DAYS_ };
+    });
+  }
+
+  if (op === 'setDisabled') {
+    return withLock_(function () {
+      const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+      if (!fresh[targetEmail]) throw new Error('這個 email 沒有本機帳號');
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail], { disabled: params.disabled === true });
+      writeJsonPath_('localAccounts.json', fresh, ctx);
+      appendAuditLog_(ctx, { action: 'adminSetLocalAccountDisabled', by: userEmail, targetId: targetEmail, at: new Date().toISOString() });
+      return { email: targetEmail, disabled: params.disabled === true };
+    });
+  }
+
+  throw new Error('unknown op: ' + op);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 維運函式（只能由專案擁有者經 Apps Script API／編輯器呼叫）─────────────────
+// 這幾支**不在 doPost 的 switch 裡**，網頁請求打不到；它們的用途是讓維護者從 comanage
+// 用 `clasp run` 做灌資料、對帳這類一次性工作，不必手動點編輯器。
+//
+// 安全性：呼叫者必須是 BOOTSTRAP_ADMINS 之一（Apps Script API 以呼叫者身分執行，
+// manifest 的 executionApi.access 是 MYSELF）。能呼叫這些的人本來就能直接改這份程式碼，
+// 所以這不是新的攻擊面；但仍然明確擋一道，避免哪天 manifest 被改寬。
+function requireMaintenanceOwner_() {
+  let who = '';
+  try { who = Session.getEffectiveUser().getEmail() || ''; } catch (e) { who = ''; }
+  if (typeof BOOTSTRAP_ADMINS === 'undefined' || BOOTSTRAP_ADMINS.indexOf(who) === -1) {
+    throw new Error('maintenance: 僅限專案擁有者（目前身分：' + (who || '(未知)') + '）');
+  }
+  return who;
+}
+
+// 狀態總覽：確認密鑰有沒有設好、各資料表有幾筆。**不回傳任何密鑰內容**，只回布林。
+// 注意：GAS 編輯器的「執行紀錄」只顯示 Logger.log 的輸出，**不顯示回傳值**，
+// 所以這幾支維運函式一律「log 一份、也回傳一份」——從編輯器點執行的人看得到，
+// 用 API 呼叫的人也拿得到。
+function maintenanceStatus() {
+  requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const out = JSON.stringify({
+    root: ROOT_FOLDER_ID,
+    hasSessionSecret: !!getSessionSecret_(),
+    hasPasswordPepper: !!getPasswordPepper_(),
+    passwordIterations: PASSWORD_ITERATIONS_,
+    colleges: readJsonSafe_('colleges.json', ctx, []).length,
+    departments: readJsonSafe_('departments.json', ctx, []).length,
+    classes: readJsonSafe_('classes.json', ctx, []).length,
+    deptAssistants: (config.deptAssistants || []).length,
+    localAccounts: Object.keys(accounts).length,
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 批次寫入系辦助理白名單。輸入 JSON 陣列字串 [{email,name,ext,deptIds:[]}...]，
+// 走與 adminUpsertDeptAssistant 相同的驗證（deptIds 必須是現存且啟用的系所，錯一個整筆拒絕）。
+function maintenanceUpsertDeptAssistants(json) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const rows = JSON.parse(json || '[]');
+  const result = { ok: 0, failed: [] };
+  rows.forEach(function (r) {
+    try {
+      adminUpsertDeptAssistantAction_({ deptAssistant: r }, ctx, who);
+      result.ok++;
+    } catch (e) {
+      result.failed.push({ email: r && r.email, error: e.message });
+    }
+  });
+  const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
+}
+
+// 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
+// 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
+// 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。
+function maintenanceSeedTestAssistant() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const dept = departments.filter(function (d) { return d && d.active !== false && d.deleted !== true; })[0];
+  if (!dept) { const e = JSON.stringify({ error: '這個環境沒有任何啟用的系所' }); Logger.log(e); return e; }
+  adminUpsertDeptAssistantAction_({
+    deptAssistant: { email: 'test-assistant@example.com', name: '測試系辦助理', ext: '9999', deptIds: [dept.id] },
+  }, ctx, who);
+  adminLocalAccountsAction_({ op: 'createOrReset', email: 'test-assistant@example.com' }, ctx, who);
+  const out = JSON.stringify({
+    seeded: 'test-assistant@example.com', dept: dept.id,
+    帳號: 'test-assistant（或完整 email）', 初始密碼: '9999',
+    note: '首次登入會強制改密碼；啟用期限 ' + ACTIVATION_WINDOW_DAYS_ + ' 天',
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 依白名單的分機建立/重設本機登入帳號（同 adminLocalAccounts 的 createOrReset）。
+// 不帶 email 就是「全部還沒有帳號的都建」。
+function maintenanceResetLocalAccounts(emailsCsv) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const only = String(emailsCsv || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  const targets = (config.deptAssistants || []).filter(function (a) {
+    if (!a || a.deleted === true) return false;
+    const e = String(a.email || '').toLowerCase();
+    if (only.length) return only.indexOf(e) !== -1;
+    return !accounts[e] && !!initialPasswordFromExtGas_(a.ext);
+  });
+  const result = { ok: 0, failed: [] };
+  targets.forEach(function (a) {
+    try {
+      adminLocalAccountsAction_({ op: 'createOrReset', email: a.email }, ctx, who);
+      result.ok++;
+    } catch (e) {
+      result.failed.push({ email: a.email, error: e.message });
+    }
+  });
+  const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
 }
 
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
@@ -581,11 +997,16 @@ function isClassTutor_(classInfo, email) {
 // isStaffLead / isStaffAssistant：config.staffLeads / config.staffAssistants 陣列命中且未停用
 // （disabled!==true）。assistantLead：助理綁定的主責 {email,name}——只有當該主責也存在且未停用
 // 才算綁定成功，否則 null（fail-closed：綁定失效的助理不能代為核章，見 resolveActionableStage_）。
+// - deptAssistantOf：config.deptAssistants（**系辦助理**，與學諮中心的 staffAssistant 是兩回事）
+//   陣列命中且未停用/未刪除時，回該筆的 deptIds **交集現存且啟用的系所**——名單裡掛著的系所
+//   若被停用或軟刪除，就地從授權集合消失（fail-closed，比照 deptHeadOf 的既有判斷）。
+//   一人可掛多系（技職所/師培中心有跨單位的情況）。這個集合是「系辦助理看得到哪些系」的
+//   **唯一事實來源**：所有 deptRoster* action 一律拿它重新驗證前端送來的 deptId，不信任前端。
 function resolveRoles_(email, config, departments, classes) {
   const roles = {
     email: email, isAdmin: false, isDirector: false,
     isStaffLead: false, isStaffAssistant: false, assistantLead: null,
-    deptHeadOf: [], tutorOf: [],
+    deptHeadOf: [], tutorOf: [], deptAssistantOf: [],
   };
   if (!email) return roles;
 
@@ -610,6 +1031,19 @@ function resolveRoles_(email, config, departments, classes) {
     roles.isStaffAssistant = true;
     const boundLead = staffLeads.filter(function (s) { return s && s.email === assistant.leadEmail && s.disabled !== true && s.deleted !== true; })[0];
     roles.assistantLead = boundLead ? { email: boundLead.email, name: boundLead.name } : null;
+  }
+
+  // 系辦助理白名單：帳號那筆要未停用/未刪除，掛的系所也要現存且啟用，兩層都通過才進集合。
+  const deptAssistants = (config && config.deptAssistants) || [];
+  const da = deptAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
+  if (da) {
+    const ids = Array.isArray(da.deptIds) ? da.deptIds : [];
+    ids.forEach(function (id) {
+      const d = (departments || []).filter(function (x) { return x && x.id === id; })[0];
+      if (d && d.active !== false && d.deleted !== true && roles.deptAssistantOf.indexOf(id) === -1) {
+        roles.deptAssistantOf.push(id);
+      }
+    });
   }
 
   (departments || []).forEach(function (d) {
@@ -930,8 +1364,26 @@ function isValidSemesterId_(semesterId, semesters) {
 // - suggestedTutors 的 by（建議者 email，即上傳學生）與自填 email 屬個資，只有 admin
 //   看得到完整內容；其他人（含該班導師）只拿到 name（前端顯示「待確認」chip 用）。
 // - tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
+// 導師手機（tutors[].phone，Phase 2 由系辦助理填）**一律不進 bootstrap**——
+// bootstrap 的 classes 是每一個登入者（含任何 Google 帳號的學生）都拿得到的，
+// 手機留在裡面就等於全校可讀。要看手機只有一條路：deptRosterGet（後端按系所驗權限）。
+// 這裡對**所有角色含 admin** 都拔掉，讓「bootstrap 的 classes 沒有 phone」成為一條無例外的
+// 不變量——有例外就會有人依賴例外，然後某天例外變成漏洞。
+// 實作刻意**內聯**在 sanitizeClassesForViewer_ 裡而不是抽成 helper：抽出去的話，
+// test/harness.js 每個載入 sanitizeClassesForViewer_ 的測試都得記得一起載那個 helper，
+// 忘了就 ReferenceError——把不變量放在同一個函式裡，就不會有人漏掉它。
 function sanitizeClassesForViewer_(classes, roles) {
-  return (classes || []).map(function (c) {
+  return (classes || []).map(function (c0) {
+    let c = c0;
+    if (c && c.tutors && c.tutors.length) {
+      c = Object.assign({}, c0);
+      c.tutors = c0.tutors.map(function (t) {
+        if (!t || t.phone === undefined) return t;
+        const t2 = Object.assign({}, t);
+        delete t2.phone;
+        return t2;
+      });
+    }
     if (!c) return c;
     if (roles && roles.isAdmin === true) return c;
     const isTutor = !!roles && (roles.tutorOf || []).indexOf(c.id) !== -1;
@@ -1944,6 +2396,9 @@ function bootstrapAction_(params, ctx, userEmail) {
     // 「自己是不是」，roles 已算好（isStaffLead/isStaffAssistant/assistantLead），不需整份名單。
     staffLeads: roles.isAdmin ? (config.staffLeads || []) : undefined,
     staffAssistants: roles.isAdmin ? (config.staffAssistants || []) : undefined,
+    // 系辦助理白名單同理：整份名單（含各系助理 email）只給 admin；助理自己只需要知道
+    // 「我管哪幾系」，roles.deptAssistantOf 已經算好了。
+    deptAssistants: roles.isAdmin ? (config.deptAssistants || []) : undefined,
   };
 }
 
@@ -1967,7 +2422,8 @@ function sessionStartAction_(params, ctx, userEmail) {
     const classes = readJsonSafe_('classes.json', ctx, []);
     const roles = resolveRoles_(userEmail, config, departments, classes);
     const hasRole = roles.isAdmin || roles.isDirector || roles.isStaffLead ||
-      roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0;
+      roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0 ||
+      roles.deptAssistantOf.length > 0;
     if (hasRole) {
       const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
       const lines = [
@@ -2547,6 +3003,236 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteStaffAssistant' : 'adminUpsertStaffAssistant', by: userEmail, targetId: entry.email, at: now });
     return { staffAssistants: config.staffAssistants };
   });
+}
+
+// ── 系辦助理（Phase 1：角色＋白名單＋唯讀自己系）─────────────────────────────────
+// 這一組是「導師資料填報平台」的安全邊界。與學諮中心的 staffLead/staffAssistant 完全無關，
+// 不共用名單也不共用權限——同名容易混淆，命名一律用 deptAssistant / deptAssistantOf。
+//
+// 白名單形狀（config.deptAssistants，比照 staffLeads 的既有模式）：
+//   { email, name, deptIds: ['農園系','森林系'], ext?, disabled?, deleted?, ... }
+// deptIds 允許多系（技職所/師培中心那種跨單位的助理）。
+// ext＝校內分機，純聯絡備註（中心要打電話找人用），不參與任何授權判斷；
+// 自由文字但長度上限 20（名冊上有「7829/7803」「7759或7752」這種一人多分機的寫法）。
+
+// deptIds 白名單：陣列、最多 37*2 筆保險上限、每個 id 都要是現存且啟用的系所。
+// 不存在/已停用的 id 直接**拒絕整筆**而不是靜默丟掉——admin 打錯字時要看得到錯誤，
+// 不能存進一份看起來成功、實際少掛一個系的名單。
+function normalizeDeptAssistantDeptIds_(deptIds, departments) {
+  if (!Array.isArray(deptIds)) return { ok: false, error: 'deptIds must be an array' };
+  if (deptIds.length > 80) return { ok: false, error: 'too many deptIds' };
+  const out = [];
+  for (let i = 0; i < deptIds.length; i++) {
+    const id = String(deptIds[i] == null ? '' : deptIds[i]).trim();
+    if (!id) return { ok: false, error: 'empty deptId' };
+    const d = (departments || []).filter(function (x) { return x && x.id === id; })[0];
+    if (!d || d.active === false || d.deleted === true) return { ok: false, error: 'department not found: ' + id };
+    if (out.indexOf(id) === -1) out.push(id);
+  }
+  return { ok: true, deptIds: out };
+}
+
+// adminUpsertDeptAssistant：admin only，upsert-by-email。deptIds 於鎖內拿最新 departments 驗，
+// 避免「驗的時候系所還在、寫進去時已被刪」的競態。
+function adminUpsertDeptAssistantAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.deptAssistant;
+  if (!entry || !entry.email) throw new Error('deptAssistant.email required');
+  const isDelete = entry.deleted === true;
+
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    let next = entry;
+    if (!isDelete) {
+      const chk = normalizeDeptAssistantDeptIds_(entry.deptIds, departments);
+      if (!chk.ok) throw new Error(chk.error);
+      next = Object.assign({}, entry, { deptIds: chk.deptIds, ext: String(entry.ext || '').trim().slice(0, 20) });
+    }
+    config.deptAssistants = config.deptAssistants || [];
+    const idx = config.deptAssistants.findIndex(function (s) { return s && s.email === entry.email; });
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : config.deptAssistants[idx], next, userEmail, now);
+    if (idx === -1) config.deptAssistants.push(merged); else config.deptAssistants[idx] = merged;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDeptAssistant' : 'adminUpsertDeptAssistant', by: userEmail, targetId: entry.email, at: now });
+    return { deptAssistants: config.deptAssistants };
+  });
+}
+
+// 系辦助理可存取的系所集合（純函式）。admin 看全部；系辦助理只看白名單解出來的那幾系。
+// **前端送來的 deptId 一律丟進這裡重驗**，回 ok:false 就是拒絕，不做部分放行。
+function resolveDeptRosterScope_(roles, deptId, departments) {
+  if (!roles) return { ok: false, error: 'forbidden' };
+  const allowed = roles.isAdmin
+    ? (departments || []).filter(function (d) { return d && d.active !== false && d.deleted !== true; })
+        .map(function (d) { return d.id; })
+    : (roles.deptAssistantOf || []).slice();
+  if (!allowed.length) return { ok: false, error: 'forbidden' };
+  if (deptId === undefined || deptId === null || deptId === '') return { ok: true, deptIds: allowed };
+  const want = String(deptId).trim();
+  if (allowed.indexOf(want) === -1) return { ok: false, error: 'forbidden' };
+  return { ok: true, deptIds: [want] };
+}
+
+// 系辦助理看到的班級投影（純函式）。Phase 1 是唯讀，欄位刻意只給名冊需要的那幾個：
+// 不帶 uploadWhitelist（學生 gmail）、不帶 suggestedTutors（學生自填的建議，含 by/email）、
+// 不帶紀錄與核章狀態——那些不是名冊維護要用的資料，少給一個欄位就少一條外洩路徑。
+// Phase 2 要加的手機欄位也只會出現在這條通道，**永遠不進 bootstrap 的 classes**。
+function projectClassForDeptRoster_(cls) {
+  return {
+    id: cls.id, name: cls.name, displayName: cls.displayName || cls.name,
+    deptId: cls.deptId, systemId: cls.systemId || null,
+    requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
+    graduatedSemester: cls.graduatedSemester || null,
+    active: cls.active !== false,
+    // phone（導師手機）**只在這條通道出現**：bootstrap 的 classes 是每個登入者都拿得到的，
+    // 手機放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會把它整個拔掉（見該函式）。
+    tutors: (cls.tutors || []).map(function (t) {
+      return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+    }),
+  };
+}
+
+// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填手機）。
+// 姓名必填，email/手機選填。手機是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
+// 名冊上會有「0912-345-678」「(08)7703202#1234」這類寫法，硬要正規化只會逼人填假的。
+function normalizeDeptRosterTutors_(tutors) {
+  if (!Array.isArray(tutors)) return { ok: false, error: 'tutors must be an array' };
+  if (tutors.length > 10) return { ok: false, error: 'too many tutors (max 10)' };
+  const out = [];
+  for (let i = 0; i < tutors.length; i++) {
+    const t = tutors[i] || {};
+    const name = String(t.name == null ? '' : t.name).trim();
+    if (!name) return { ok: false, error: '第 ' + (i + 1) + ' 位導師沒有姓名' };
+    if (name.length > 20) return { ok: false, error: '導師姓名過長：' + name };
+    if (!/^[A-Za-z0-9一-鿿·．\s]{1,20}$/.test(name)) return { ok: false, error: '導師姓名含不允許的字元：' + name };
+    const email = String(t.email == null ? '' : t.email).trim().toLowerCase();
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
+    if (email.length > 100) return { ok: false, error: 'email 過長' };
+    const phone = String(t.phone == null ? '' : t.phone).trim();
+    if (phone && !/^[0-9+\-()#\s]{1,20}$/.test(phone)) return { ok: false, error: '電話格式不正確（只接受數字與 + - ( ) # 空白）：' + phone };
+    out.push({ name: name, email: email, phone: phone });
+  }
+  return { ok: true, tutors: out };
+}
+
+// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含手機）。
+// 刻意不開放的欄位：deptId（不能把班搬去別系）、requiredMeetingOverride／graduatedSemester
+// （應繳份數與畢業狀態是中心的事）、uploadWhitelist、suggestedTutors。
+// 既有班級一律先確認「它現在就屬於允許的系所」才准動——不然帶著別系的 classId 就能改到別系。
+function deptRosterUpsertClassAction_(params, ctx, userEmail) {
+  const entry = params.class || {};
+  const tutorsRes = normalizeDeptRosterTutors_(entry.tutors);
+  if (!tutorsRes.ok) throw new Error(tutorsRes.error);
+  const className = String(entry.name == null ? '' : entry.name).trim();
+  if (!isValidClassName_(className)) throw new Error('invalid class name: ' + className);
+  const displayName = String(entry.displayName == null ? '' : entry.displayName).trim().slice(0, 40);
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, entry.deptId, departments);
+    if (!scope.ok) throw new Error(scope.error);
+    const deptId = scope.deptIds.length === 1 ? scope.deptIds[0] : String(entry.deptId || '').trim();
+    if (!deptId || scope.deptIds.indexOf(deptId) === -1) throw new Error('forbidden');
+    const dept = departments.filter(function (d) { return d && d.id === deptId; })[0];
+
+    const now = new Date().toISOString();
+    let next = classes.slice();
+    let target = null;
+
+    if (entry.id) {
+      const idx = next.findIndex(function (c) { return c && c.id === entry.id; });
+      if (idx === -1) throw new Error('class not found: ' + entry.id);
+      const cur = next[idx];
+      // 現況必須落在授權範圍內；已軟刪除的不給改（要先由 admin 復原）。
+      if (scope.deptIds.indexOf(cur.deptId) === -1) throw new Error('forbidden');
+      if (cur.deleted === true) throw new Error('class deleted: ' + cur.id);
+      // 撞名檢查：同系不得有兩個同班名（班級身分＝(deptId, name)）。
+      const clash = next.filter(function (c) {
+        return c && c.id !== cur.id && c.deptId === deptId && c.name === className && c.deleted !== true;
+      })[0];
+      if (clash) throw new Error('class name already exists: ' + className);
+      target = Object.assign({}, cur, {
+        name: className, displayName: displayName || cur.displayName || className,
+        tutors: tutorsRes.tutors, updatedAt: now, updatedBy: userEmail,
+      });
+      next[idx] = target;
+    } else {
+      const clash = next.filter(function (c) {
+        return c && c.deptId === deptId && c.name === className && c.deleted !== true;
+      })[0];
+      if (clash) throw new Error('class name already exists: ' + className);
+      const fused = displayName || fuseClassDisplayName_(className, dept ? dept.name : deptId, null,
+        tutorsRes.tutors.length ? tutorsRes.tutors[0].name : undefined);
+      target = {
+        id: uniqueClassId_(deptId + '_' + slugifyDeptId_(className), next), name: className, deptId: deptId,
+        systemId: null, displayName: fused,
+        requiredMeetingOverride: null, tutors: tutorsRes.tutors, suggestedTutors: [],
+        dualApprovalMode: 'any', uploadWhitelist: [], active: true,
+        createdAt: now, createdBy: userEmail,
+      };
+      next.push(target);
+    }
+
+    writeJsonPath_('classes.json', next, ctx);
+    appendAuditLog_(ctx, {
+      action: entry.id ? 'deptRosterUpdateClass' : 'deptRosterCreateClass',
+      by: userEmail, targetId: target.id, at: now,
+    });
+    return { class: projectClassForDeptRoster_(target) };
+  });
+}
+
+// deptRosterDeleteClass：系辦助理刪除自己系的班級。走**軟刪除**（deleted:true 墓碑），
+// 與系統其他六類實體一致——紀錄與統計靠 classId 關聯，硬刪會讓歷史斷鏈。
+function deptRosterDeleteClassAction_(params, ctx, userEmail) {
+  const classId = String(params.classId || '').trim();
+  if (!classId) throw new Error('classId required');
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, null, departments);
+    if (!scope.ok) throw new Error(scope.error);
+
+    const idx = classes.findIndex(function (c) { return c && c.id === classId; });
+    if (idx === -1) throw new Error('class not found: ' + classId);
+    if (scope.deptIds.indexOf(classes[idx].deptId) === -1) throw new Error('forbidden');
+
+    const now = new Date().toISOString();
+    const next = classes.slice();
+    next[idx] = Object.assign({}, next[idx], { deleted: true, deletedAt: now, deletedBy: userEmail });
+    writeJsonPath_('classes.json', next, ctx);
+    appendAuditLog_(ctx, { action: 'deptRosterDeleteClass', by: userEmail, targetId: classId, at: now });
+    return { classId: classId, deleted: true };
+  });
+}
+
+// deptRosterGet：系辦助理（或 admin）讀自己系的名冊。唯讀，Phase 1 的全部功能。
+// 軟刪除的班級不回（比照系統其他地方對 deleted 的處理），停用的班級照回但帶 active:false——
+// 助理要看得到「這班被停用了」才知道為什麼統計沒算它。
+function deptRosterGetAction_(params, ctx, userEmail) {
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const roles = resolveRoles_(userEmail, config, departments, classes);
+  const scope = resolveDeptRosterScope_(roles, params.deptId, departments);
+  if (!scope.ok) throw new Error(scope.error);
+
+  const rows = classes.filter(function (c) {
+    return c && c.deleted !== true && scope.deptIds.indexOf(c.deptId) !== -1;
+  }).map(projectClassForDeptRoster_);
+
+  const depts = departments.filter(function (d) {
+    return d && scope.deptIds.indexOf(d.id) !== -1;
+  }).map(function (d) { return { id: d.id, name: d.name, collegeId: d.collegeId || null }; });
+
+  return { deptIds: scope.deptIds, departments: depts, classes: rows };
 }
 
 // adminChangeTutorMidterm：期中更換導師（admin only；Ticket C）。與 adminUpsertClass 改名單

@@ -242,6 +242,18 @@
       <a href="javascript:location.reload()">重新整理頁面</a>後再試一次。
     </p>
     <p id="login-error" class="login-error" style="display:none;"></p>
+
+    <!-- 系辦助理用的帳密登入：他們的校內信箱 @mail.npust.edu.tw 不是 Google 帳號
+         （MX 指向學校自架主機），沒辦法用上面的 Google 登入。導師與中心同仁照舊用 Google。 -->
+    <div id="local-login-box" style="margin-top:18px; border-top:1px solid var(--color-border); padding-top:14px;">
+      <p class="login-sub" style="margin-bottom:10px;">系辦助理請用校內信箱與分機登入</p>
+      <form id="local-login-form" autocomplete="on" style="display:flex; flex-direction:column; gap:8px;">
+        <input type="text" id="local-email" placeholder="校內信箱（可只打 @ 前面那段）" autocomplete="username" required>
+        <input type="password" id="local-password" placeholder="密碼（初次為校內分機）" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary" id="local-login-btn">登入</button>
+      </form>
+      <p id="local-login-error" class="login-error" style="display:none;"></p>
+    </div>
   </div>
 </div>
 
@@ -481,6 +493,9 @@ function formatDateTime(iso) {
 // ── Google Identity Services 登入 ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
+  // 帳密登入不依賴 Google，先接起來——即使 GIS 掛掉（被擋、離線）系辦助理仍能登入。
+  wireLocalLogin();
+
   if (!CLIENT_ID || CLIENT_ID.indexOf('__') === 0) {
     showLoginError('尚未設定 Google OAuth Client ID。');
     return;
@@ -509,6 +524,13 @@ window.addEventListener('load', () => {
     storedUser = JSON.parse(localStorage.getItem(LS_USER_KEY) || 'null');
     storedSession = JSON.parse(localStorage.getItem(LS_SESSION_KEY) || 'null');
   } catch (e) {}
+  if (!(storedUser && storedUser.email) && isSelfHosted()) {
+    // 沒有使用者資料就進不了主畫面 → 回 login.html。**先把 session 鍵一起清掉**：
+    // login.html 看到「session 還有效」會立刻把人送回 index.html，兩邊互踢就是無窮迴圈。
+    try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+    location.href = './login.html';
+    return;
+  }
   if (storedUser && storedUser.email) {
     currentUser = storedUser;
     const valid = storedSession && storedSession.token &&
@@ -519,6 +541,11 @@ window.addEventListener('load', () => {
       sessionExp = Number(storedSession.exp);
       showLoading('自動登入中…');
       afterLogin();
+    } else if (isSelfHosted()) {
+      // 自架軌：昨天登入過但今天的 session 已過期 → 回 login.html 重打帳密。
+      clearSession();
+      location.href = './login.html';
+      return;
     } else {
       clearSession();
       showLoading('驗證身分中…');
@@ -576,6 +603,13 @@ async function handleCredentialResponse(response) {
 // 成功時 handleCredentialResponse 會自動打 sessionStart 換發新 session，
 // 之後才 resolve——await 本函式回來時新 session 已就緒，可直接重試原請求。
 function refreshIdToken() {
+  // 自架軌沒有 Google 登入可走：憑證到期就直接回 login.html 本地帳密重登。
+  // （原本會跳出一個掛著 Google 按鈕的「登入已到期」視窗，在這裡按下去必然失敗。）
+  if (isSelfHosted()) {
+    try { localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
+    location.href = './login.html';
+    return new Promise(function () {});  // 永不 resolve：頁面正在跳轉，呼叫端不該繼續重試
+  }
   if (refreshPromise) return refreshPromise;
   refreshPromise = new Promise((resolve) => { refreshResolve = resolve; });
   const timer = setTimeout(() => { if (refreshResolve) showReloginModal(); }, 8000);
@@ -598,10 +632,121 @@ function hideReloginModal() {
   if ($('modal-box').querySelector('#relogin-btn-slot')) closeModal();
 }
 
-// 本機登出（清鍵＋重載）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+// 免憑證呼叫：只給 localLogin / localChangePassword 用（它們自己就是認證，
+// 走 proxyCall 會因為「尚未登入」在前端就被擋下）。回傳後端 data 物件原樣，
+// 由呼叫端自行判斷 data.error——後端對這兩個 action 一律回 200＋{error}，不透露帳號是否存在。
+async function proxyCallNoAuth(action, params, retryHttp) {
+  retryHttp = retryHttp || 0;
+  const payload = JSON.stringify(Object.assign({ action: action, rootFolderId: ROOT_FOLDER_ID }, params || {}));
+  const form = new URLSearchParams();
+  form.append('payload', payload);
+  let res;
+  try {
+    res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
+  } catch (e) {
+    throw new Error('網路連線失敗，請確認網路後再試一次。');
+  }
+  // GAS 偶發回 404/503（請求其實已送達並執行）。proxyCall 本來就有這段重試，
+  // 這支當初漏了——使用者實際踩到：改密碼成功了、畫面卻報錯，再送一次變成「目前密碼錯誤」。
+  // 後端的 localChangePassword 已改為冪等，所以重試是安全的。
+  if (!res.ok && (res.status === 404 || res.status === 503) && retryHttp < 2) {
+    await sleep(1200 * (retryHttp + 1));
+    return proxyCallNoAuth(action, params, retryHttp + 1);
+  }
+  if (!res.ok) throw new Error('伺服器回應 ' + res.status);
+  const json = await res.json();
+  if (json && json.success === false) throw new Error(json.error || '登入失敗');
+  return (json && json.data) || {};
+}
+
+// ── 帳密登入（系辦助理；GAS 軌與自架軌都可用）────────────────────────────────
+// 自架軌的入口是 server 提供的 login.html（那邊有自己的表單），這裡這份是給 GAS 軌用的——
+// 兩邊最後都走同一套 session（issueSessionToken_ 簽發的 HMAC token）。
+async function doLocalLogin(email, password) {
+  const res = await proxyCallNoAuth('localLogin', { email: email, password: password });
+  if (res && res.error) throw new Error(res.error);
+  currentUser = { email: res.email, name: res.name || res.email, picture: '' };
+  try { localStorage.setItem(LS_USER_KEY, JSON.stringify(currentUser)); } catch (e) {}
+  saveSession(res.sessionToken, res.exp);
+  return res;
+}
+
+function wireLocalLogin() {
+  const form = $('local-login-form');
+  if (!form) return;
+  // 自架軌不顯示這一區：那邊的登入在 login.html，index.html 根本不該停在登入畫面。
+  if (isSelfHosted()) { $('local-login-box').style.display = 'none'; return; }
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const errEl = $('local-login-error');
+    errEl.style.display = 'none';
+    const btn = $('local-login-btn');
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await doLocalLogin($('local-email').value.trim(), $('local-password').value);
+        if (res.mustChangePassword) {
+          // 初始密碼＝校內分機，而分機在系所官網公開查得到——在公開網路上這等於沒有密碼，
+          // 所以這一軌**不給「稍後再做」**，必須先改掉才進系統。
+          showForcedChangePassword(res.email, $('local-password').value);
+          return;
+        }
+        afterLogin();
+      });
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.style.display = '';
+    }
+  });
+}
+
+function showForcedChangePassword(email, currentPassword) {
+  openModal('請先設定新密碼', '<p class="field-hint">您目前使用的是初始密碼（校內分機）。' +
+    '分機在系所網站上公開查得到，等於任何人都能登入您的帳號，因此<b>必須先更改密碼</b>才能繼續。</p>' +
+    '<form id="force-pw-form">' +
+    '<div class="field"><label>新密碼</label><input type="password" id="force-pw1" placeholder="至少 8 個字元，不能只有數字" required></div>' +
+    '<div class="field"><label>再輸入一次</label><input type="password" id="force-pw2" required></div>' +
+    '<p id="force-pw-error" class="login-error" style="display:none;"></p>' +
+    '<div class="modal-actions"><button type="submit" class="btn btn-primary">更改密碼並進入系統</button></div></form>');
+  $('force-pw-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const errEl = $('force-pw-error');
+    errEl.style.display = 'none';
+    if ($('force-pw1').value !== $('force-pw2').value) {
+      errEl.textContent = '兩次輸入的新密碼不一致'; errEl.style.display = ''; return;
+    }
+    const btn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCallNoAuth('localChangePassword', {
+          email: email, currentPassword: currentPassword, newPassword: $('force-pw1').value,
+        });
+        if (res && res.error) throw new Error(res.error);
+        closeModal();
+        afterLogin();
+      });
+    } catch (err) {
+      errEl.innerHTML = escapeHtml(err.message) +
+        '<br><span class="field-hint">若您已經送出過一次，密碼可能已經更改成功——請重新整理頁面，改用<b>新密碼</b>登入試試。</span>';
+      errEl.style.display = '';
+    }
+  });
+}
+
+// 自架伺服器版？——build-public.js 會把 APPS_SCRIPT_URL 換成本機 origin，所以「不是
+// script.google.com」就是自架軌。自架軌**沒有 Google 登入**（區網 IP 不是 Google OAuth 的
+// 合法 origin），登入一律走 server 提供的 login.html 本地帳密。
+function isSelfHosted() {
+  return !/^https:\/\/script\.google\.com\//.test(APPS_SCRIPT_URL);
+}
+
+// 本機登出（清鍵）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
+// 自架軌要導回 login.html——原本一律 location.reload()，重載 index.html 後會落到內建的
+// Google 登入畫面，而那個畫面在自架環境按下去必然失敗（使用者得手動把網址的 index.html
+// 刪掉才回得了登入頁）。GAS 軌維持原本的 reload（那邊的登入畫面就是對的）。
 function localSignOut() {
   try { localStorage.removeItem(LS_USER_KEY); localStorage.removeItem(LS_SESSION_KEY); } catch (e) {}
   try { google.accounts.id.disableAutoSelect(); } catch (e) {}
+  if (isSelfHosted()) { location.href = './login.html'; return; }
   location.reload();
 }
 $('logout-btn').addEventListener('click', async (e) => {
@@ -794,6 +939,9 @@ const NAV_PAGES = [
   { id: 'queue',  label: '核章匣', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant; } },
   { id: 'stats',  label: '班級統計', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin; } },
   { id: 'overview', label: '全校總表', show: function (r) { return r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0; } },
+  // 系辦助理的導師名冊頁（Phase 1 唯讀）。roles.deptAssistantOf 是後端算好的授權集合，
+  // 前端只拿它決定「顯不顯示這個頁籤」；能不能真的讀到資料由後端 deptRosterGet 再驗一次。
+  { id: 'deptroster', label: '導師資料', show: function (r) { return (r.deptAssistantOf || []).length > 0 || r.isAdmin; } },
   { id: 'admin',  label: '後台管理', show: function (r) { return r.isAdmin; } },
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
@@ -1856,6 +2004,181 @@ async function deleteEntity(opts) {
   } catch (err) { showToast('刪除失敗：' + err.message, 'error'); }
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 導師資料（系辦助理，Phase 1：唯讀自己系）─────────────────────────────────
+// 資料**不從 bootstrap 拿**，一律走 deptRosterGet——那是這個功能專屬的通道，
+// 後端在那裡重驗 deptId、也只投影名冊需要的欄位（Phase 2 的手機欄位只會出現在這條通道）。
+// ══════════════════════════════════════════════════════════════════════════════
+let deptRosterDeptId = null;
+
+PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
+  $('page-root').innerHTML =
+    '<div class="card">' +
+      '<h2>導師資料</h2>' +
+      '<p class="field-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫聯絡電話。' +
+      '<b>導師電話屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
+      '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
+      '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button></div>' +
+      '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
+    '</div>';
+  await loadDeptRoster(null);
+  $('deptroster-dept').addEventListener('change', function () {
+    deptRosterDeptId = $('deptroster-dept').value;
+    loadDeptRoster(deptRosterDeptId);
+  });
+};
+
+async function loadDeptRoster(deptId) {
+  $('deptroster-content').innerHTML = '<div class="empty-hint">載入中…</div>';
+  try {
+    // deptId 為 null＝不指定，後端回「我管的全部系所」；選單就是用這一趟的回傳建的。
+    const res = await proxyCall('deptRosterGet', deptId ? { deptId: deptId } : {});
+    const depts = res.departments || [];
+    const sel = $('deptroster-dept');
+    if (sel && !sel.options.length) {
+      sel.innerHTML = depts.map(function (d) {
+        return '<option value="' + escapeHtml(d.id) + '">' + escapeHtml(d.name || d.id) + '</option>';
+      }).join('');
+      // 只有一個系所時選單沒有選擇餘地，收起來少一個干擾
+      sel.parentElement.style.display = depts.length > 1 ? '' : 'none';
+      if (depts.length) { deptRosterDeptId = depts[0].id; sel.value = deptRosterDeptId; }
+    }
+    renderDeptRosterTable(res.classes || [], deptId || (depts[0] && depts[0].id) || null, depts);
+  } catch (e) {
+    $('deptroster-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+function renderDeptRosterTable(classes, deptId, depts) {
+  // 未指定 deptId 的第一趟會拿到多系的班級；選單有值時只顯示該系，避免與選單所示不一致。
+  const rows = deptId ? classes.filter(function (c) { return c.deptId === deptId; }) : classes;
+  if (!rows.length) {
+    $('deptroster-content').innerHTML = '<div class="empty-hint">這個系所目前沒有班級。</div>';
+    return;
+  }
+  const sorted = rows.slice().sort(function (a, b) {
+    return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
+  });
+  const tutorCount = sorted.reduce(function (n, c) { return n + (c.tutors || []).length; }, 0);
+  const noPhone = sorted.reduce(function (n, c) {
+    return n + (c.tutors || []).filter(function (t) { return !t.phone; }).length;
+  }, 0);
+  deptRosterCache = sorted;
+  $('deptroster-content').innerHTML =
+    '<p class="field-hint">共 ' + sorted.length + ' 班、' + tutorCount + ' 位導師' +
+      (noPhone ? '，其中 <b>' + noPhone + '</b> 位還沒有電話' : '（電話都填好了）') + '。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>Email</th><th>電話</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    sorted.map(function (c) {
+      const tutors = c.tutors || [];
+      const names = tutors.length ? tutors.map(function (t) { return escapeHtml(t.name || '（未填姓名）'); }).join('<br>') : '<span class="field-hint">（尚無導師）</span>';
+      const emails = tutors.length
+        ? tutors.map(function (t) { return t.email ? escapeHtml(t.email) : '<span class="field-hint">（未填）</span>'; }).join('<br>')
+        : '<span class="field-hint">—</span>';
+      const phones = tutors.length
+        ? tutors.map(function (t) { return t.phone ? escapeHtml(t.phone) : '<span style="color:var(--color-warning);">（未填）</span>'; }).join('<br>')
+        : '<span class="field-hint">—</span>';
+      const state = [];
+      if (c.active === false) state.push('停用');
+      if (c.graduatedSemester) state.push('已畢業（' + escapeHtml(c.graduatedSemester) + '）');
+      return '<tr><td data-label="班級">' + escapeHtml(c.displayName || c.name) + '</td>' +
+        '<td data-label="班級名稱(原始)">' + escapeHtml(c.name) + '</td>' +
+        '<td data-label="導師">' + names + '</td>' +
+        '<td data-label="Email">' + emails + '</td>' +
+        '<td data-label="電話">' + phones + '</td>' +
+        '<td data-label="狀態">' + (state.length ? state.join('／') : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="deptroster-edit" data-class-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="deptroster-delete" data-class-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+// ── 班級／導師編輯（Phase 2）──────────────────────────────────────────────────
+let deptRosterCache = [];
+
+function deptRosterTutorRowHtml(t, i) {
+  t = t || {};
+  return '<tr data-tutor-row="' + i + '">' +
+    '<td><input type="text" data-tutor-field="name" value="' + escapeHtml(t.name || '') + '" maxlength="20" placeholder="必填"></td>' +
+    '<td><input type="text" data-tutor-field="email" value="' + escapeHtml(t.email || '') + '" placeholder="選填"></td>' +
+    '<td><input type="text" data-tutor-field="phone" value="' + escapeHtml(t.phone || '') + '" maxlength="20" placeholder="選填，例 0912345678"></td>' +
+    '<td><button type="button" class="btn btn-sm btn-danger" data-action="deptroster-tutor-remove">移除</button></td></tr>';
+}
+
+function openDeptRosterForm(classId) {
+  const cls = classId ? deptRosterCache.find(function (c) { return c.id === classId; }) : null;
+  const tutors = (cls && cls.tutors && cls.tutors.length) ? cls.tutors : [{ name: '', email: '', phone: '' }];
+  const bodyHtml = '<form id="deptroster-form">' +
+    '<div class="field"><label>班級名稱（原始）</label>' +
+      '<input type="text" id="deptroster-name" maxlength="20" value="' + escapeHtml(cls ? cls.name : '') + '" required>' +
+      '<span class="field-hint">限 1–20 字中英數字，不可含空白、頓號、括號等符號（這是班級的識別名）。</span></div>' +
+    '<div class="field"><label>顯示簡稱</label>' +
+      '<input type="text" id="deptroster-display" maxlength="40" value="' + escapeHtml(cls ? (cls.displayName || '') : '') + '" placeholder="留空自動產生">' +
+      '<span class="field-hint">這一欄可以用符號，對外看到的就是它。</span></div>' +
+    '<div class="field"><label>導師（最多 10 位）</label>' +
+      '<div class="table-wrap"><table id="deptroster-tutors"><thead><tr><th>姓名</th><th>Email</th><th>電話</th><th></th></tr></thead><tbody>' +
+      tutors.map(deptRosterTutorRowHtml).join('') + '</tbody></table></div>' +
+      '<button type="button" class="btn btn-sm" data-action="deptroster-tutor-add" style="margin-top:6px;">新增一位導師</button>' +
+      '<span class="field-hint">電話屬於高度個資，只有您與學諮中心看得到。</span></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="submit" class="btn btn-primary">儲存</button></div></form>';
+  openModal(cls ? '編輯班級' : '新增班級', bodyHtml);
+
+  $('deptroster-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const rows = Array.prototype.slice.call(document.querySelectorAll('#deptroster-tutors tbody tr'));
+    const tutorList = rows.map(function (tr) {
+      const get = function (f) { const el = tr.querySelector('[data-tutor-field="' + f + '"]'); return el ? el.value.trim() : ''; };
+      return { name: get('name'), email: get('email'), phone: get('phone') };
+    }).filter(function (t) { return t.name || t.email || t.phone; });  // 整列空白＝使用者沒填，不送
+    const payload = {
+      class: {
+        id: cls ? cls.id : undefined,
+        deptId: deptRosterDeptId,
+        name: $('deptroster-name').value.trim(),
+        displayName: $('deptroster-display').value.trim(),
+        tutors: tutorList,
+      },
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        await proxyCall('deptRosterUpsertClass', payload);
+        showToast('已儲存', 'success');
+        closeModal();
+        await loadDeptRoster(deptRosterDeptId);
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="deptroster-new"]')) { openDeptRosterForm(null); return; }
+  const edit = e.target.closest('[data-action="deptroster-edit"]');
+  if (edit) { openDeptRosterForm(edit.dataset.classId); return; }
+  const add = e.target.closest('[data-action="deptroster-tutor-add"]');
+  if (add) {
+    const tbody = document.querySelector('#deptroster-tutors tbody');
+    if (tbody && tbody.children.length < 10) tbody.insertAdjacentHTML('beforeend', deptRosterTutorRowHtml({}, tbody.children.length));
+    else if (tbody) showToast('最多 10 位導師', 'error');
+    return;
+  }
+  const rm = e.target.closest('[data-action="deptroster-tutor-remove"]');
+  if (rm) { const tr = rm.closest('tr'); if (tr) tr.remove(); return; }
+  const del = e.target.closest('[data-action="deptroster-delete"]');
+  if (del) {
+    const cls = deptRosterCache.find(function (c) { return c.id === del.dataset.classId; });
+    if (!cls) return;
+    if (!confirm('確定刪除「' + (cls.displayName || cls.name) + '」？刪除後不影響既有的班會紀錄與歷史。')) return;
+    try {
+      await withBtnPending(del, async function () {
+        await proxyCall('deptRosterDeleteClass', { classId: cls.id });
+        showToast('已刪除', 'success');
+        await loadDeptRoster(deptRosterDeptId);
+      });
+    } catch (err) { showToast('刪除失敗：' + err.message, 'error'); }
+    return;
+  }
+});
+
 let adminTab = 'departments';
 const ADMIN_TABS = [
   { id: 'colleges', label: '學院' },
@@ -1865,6 +2188,8 @@ const ADMIN_TABS = [
   { id: 'semesters', label: '學期' },
   { id: 'users', label: '職員帳號' },
   { id: 'staffTeam', label: '學諮主責／助理' },
+  { id: 'deptAssistants', label: '系辦助理' },
+  { id: 'deptAccounts', label: '系辦助理帳號' },
   { id: 'keywords', label: '宣導關鍵字' },
   { id: 'roster', label: 'Excel 匯入導師名單' },
 ];
@@ -1887,7 +2212,9 @@ function renderAdminTab() {
   const fns = {
     colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
     classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
-    staffTeam: renderAdminStaffTeam, keywords: renderAdminKeywords, roster: renderAdminRoster,
+    staffTeam: renderAdminStaffTeam, deptAssistants: renderAdminDeptAssistants,
+    deptAccounts: renderAdminDeptAccounts,
+    keywords: renderAdminKeywords, roster: renderAdminRoster,
   };
   (fns[adminTab] || function () {})();
 }
@@ -2045,6 +2372,288 @@ function renderAdminStaffTeam() {
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="assistant-new" style="margin-top:12px;">新增助理</button></div>';
 }
+
+// ── 系辦助理白名單（Phase 1）──────────────────────────────────────────────────
+// 與上面的「學諮中心助理」是兩回事：這裡是各系系辦的助理，用來維護本系導師名冊。
+// 一人可掛多系；deptIds 是授權範圍的唯一來源，後端每個 action 都會拿它重驗。
+function deptNameById(id) {
+  const d = (bootstrapData.departments || []).find(function (x) { return x.id === id; });
+  return d ? (d.name || d.id) : id;
+}
+
+function renderAdminDeptAssistants() {
+  const rows = (bootstrapData.deptAssistants || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>系辦助理</h3>' +
+    '<p class="field-hint">各系系辦助理維護本系導師名冊用。<b>只看得到自己掛的系所</b>，看不到他系；' +
+    '一人可掛多個系所（例如同時兼任兩個單位）。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    (rows.length ? rows.map(function (s) {
+      const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
+      return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td>' +
+        '<td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="分機">' + escapeHtml(s.ext || '') + '</td>' +
+        '<td data-label="負責系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="deptasst-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
+    }).join('') : '<tr><td colspan="6"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
+    '</tbody></table></div>' +
+    '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button> ' +
+    '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button></div>';
+}
+
+// 批次匯入白名單：37 個系所手 key 太痛苦，而名單本身是個資、不能進 repo，
+// 所以做成「貼上 JSON」——資料留在使用者手上，只在匯入當下經過瀏覽器。
+// 同一個 email 出現在多列會自動合併 deptIds（白名單以 email 為鍵），規則與
+// server/scripts/upsert-dept-assistants.js 的 mergeByEmail 一致。
+function mergeDeptAssistantRows(rows) {
+  const byEmail = new Map();
+  rows.forEach(function (r, i) {
+    const email = String((r && r.email) || '').trim().toLowerCase();
+    if (!email) throw new Error('第 ' + (i + 1) + ' 列缺 email');
+    const deptId = String((r && r.deptId) || '').trim();
+    if (!byEmail.has(email)) {
+      byEmail.set(email, { email: email, name: String(r.name || '').trim(), ext: String(r.ext || '').trim(), deptIds: [] });
+    }
+    const e = byEmail.get(email);
+    // 支援兩種輸入形狀：一列一個 deptId，或一列帶 deptIds 陣列
+    const ids = deptId ? [deptId] : (Array.isArray(r.deptIds) ? r.deptIds : []);
+    ids.forEach(function (id) { if (id && e.deptIds.indexOf(id) === -1) e.deptIds.push(String(id).trim()); });
+  });
+  return Array.from(byEmail.values());
+}
+
+function openDeptAssistantBulkForm() {
+  openModal('批次匯入系辦助理白名單',
+    '<p class="field-hint">貼上 JSON 陣列，每列 <code>{"email","name","ext","deptId"}</code>' +
+    '（或用 <code>deptIds:[...]</code> 一次帶多系）。同一個 email 出現多次會自動合併系所。</p>' +
+    '<div class="field"><textarea id="deptasst-bulk-json" rows="10" style="width:100%; font-family:monospace; font-size:.8rem;" ' +
+    'placeholder=\'[{"email":"plant@mail.npust.edu.tw","name":"羅芬芳","ext":"6325","deptId":"農園系"}]\'></textarea></div>' +
+    '<div id="deptasst-bulk-result"></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="button" class="btn btn-primary" data-action="deptasst-bulk-run">開始匯入</button></div>');
+}
+
+document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="deptasst-bulk"]')) { openDeptAssistantBulkForm(); return; }
+  const run = e.target.closest('[data-action="deptasst-bulk-run"]');
+  if (!run) return;
+  const resultEl = $('deptasst-bulk-result');
+  let entries;
+  try {
+    const rows = JSON.parse($('deptasst-bulk-json').value);
+    if (!Array.isArray(rows)) throw new Error('最外層必須是陣列');
+    entries = mergeDeptAssistantRows(rows);
+  } catch (err) {
+    resultEl.innerHTML = '<div class="import-error-box"><div class="import-error-title">JSON 解析失敗</div>' +
+      escapeHtml(err.message) + '</div>';
+    return;
+  }
+  try {
+    await withBtnPending(run, async function () {
+      const failed = [];
+      let ok = 0;
+      // 逐筆送：單筆失敗（例如系所名對不上）不該讓整批停下來，且錯誤要逐筆看得到。
+      for (const entry of entries) {
+        try {
+          const res = await proxyCall('adminUpsertDeptAssistant', { deptAssistant: entry });
+          bootstrapData.deptAssistants = res.deptAssistants;
+          ok++;
+        } catch (err) { failed.push({ email: entry.email, error: err.message }); }
+      }
+      resultEl.innerHTML = '<p class="field-hint">完成：成功 ' + ok + ' 筆、失敗 ' + failed.length + ' 筆。</p>' +
+        (failed.length ? '<div class="import-error-box"><div class="import-error-title">失敗清單</div><ul>' +
+          failed.map(function (f) { return '<li>' + escapeHtml(f.email) + '：' + escapeHtml(f.error) + '</li>'; }).join('') +
+          '</ul></div>' : '');
+      showToast('匯入完成：成功 ' + ok + ' 筆', failed.length ? 'info' : 'success');
+      renderAdminDeptAssistants();
+    });
+  } catch (err) { showToast('匯入失敗：' + err.message, 'error'); }
+});
+
+function openDeptAssistantForm(email) {
+  const list = bootstrapData.deptAssistants || [];
+  const s = list.find(function (x) { return x.email === email; }) || {};
+  const selected = Array.isArray(s.deptIds) ? s.deptIds : [];
+  const depts = (bootstrapData.departments || []).filter(function (d) {
+    return d && d.active !== false && d.deleted !== true;
+  }).slice().sort(function (a, b) { return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-Hant'); });
+
+  const bodyHtml = '<form id="deptasst-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="deptasst-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="deptasst-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>校內分機</label><input type="text" id="deptasst-ext" maxlength="20" value="' + escapeHtml(s.ext || '') + '" placeholder="例：7903（純聯絡用，不影響權限）"></div>' +
+    '<div class="field"><label>負責系所（可複選）</label>' +
+      '<div id="deptasst-depts" style="max-height:240px; overflow-y:auto; border:1px solid var(--color-border); border-radius:8px; padding:8px;">' +
+      depts.map(function (d) {
+        return '<label style="display:block; padding:2px 0;"><input type="checkbox" data-deptasst-dept="' + escapeHtml(d.id) + '"' +
+          (selected.indexOf(d.id) !== -1 ? ' checked' : '') + '> ' + escapeHtml(d.name || d.id) + '</label>';
+      }).join('') +
+      '</div><span class="field-hint">未勾選任何系所＝這個帳號什麼都看不到（等同停用）。</span></div>' +
+    '<div class="field"><label><input type="checkbox" id="deptasst-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
+  '</form>';
+  openModal(email ? '編輯系辦助理' : '新增系辦助理', bodyHtml);
+  $('deptasst-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const targetEmail = $('deptasst-email').value.trim().toLowerCase();
+    if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const deptIds = Array.prototype.slice.call(document.querySelectorAll('[data-deptasst-dept]'))
+      .filter(function (cb) { return cb.checked; })
+      .map(function (cb) { return cb.dataset.deptasstDept; });
+    const entry = {
+      email: targetEmail, name: $('deptasst-name').value.trim(),
+      ext: $('deptasst-ext').value.trim(),
+      deptIds: deptIds, disabled: $('deptasst-disabled').checked,
+    };
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('adminUpsertDeptAssistant', { deptAssistant: entry });
+        bootstrapData.deptAssistants = res.deptAssistants;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminDeptAssistants();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="deptasst-new"]')) { openDeptAssistantForm(null); return; }
+  const edit = e.target.closest('[data-action="deptasst-edit"]');
+  if (edit) { openDeptAssistantForm(edit.dataset.email); return; }
+  const del = e.target.closest('[data-action="deptasst-delete"]');
+  if (del) {
+    const email = del.dataset.email;
+    const s = (bootstrapData.deptAssistants || []).find(function (x) { return x.email === email; });
+    if (!s) return;
+    deleteEntity({
+      btn: del, name: s.name || s.email, action: 'adminUpsertDeptAssistant',
+      payload: { deptAssistant: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.deptAssistants = res.deptAssistants; renderAdminDeptAssistants(); },
+    });
+    return;
+  }
+});
+
+// ── 系辦助理的「登入帳號」管理 ────────────────────────────────────────────────
+// 本機帳密那一層活在自架的 server/ 裡（users.json），不是 Code.gs 的資料，
+// 所以走 /admin/accounts 而不是 proxyCall。GAS 軌沒有這個端點——抓不到就顯示說明，
+// 不讓分頁看起來像壞掉。授權在後端：session token → resolveRoles_ → isAdmin。
+async function serverAdminCall(op, params) {
+  // 兩軌同一套 UI、兩種傳輸：自架軌的本機帳號活在 server/ 的 users.json（走 /admin/accounts），
+  // GAS 軌活在 Drive 的 localAccounts.json（走 adminLocalAccounts action）。op 名稱刻意一致。
+  if (!isSelfHosted()) return proxyCall('adminLocalAccounts', Object.assign({ op: op }, params || {}));
+  // 用模組層級的 sessionToken（load() 已從 localStorage 還原並驗過效期），不另外讀一次。
+  const body = Object.assign({ op: op, sessionToken: sessionToken }, params || {});
+  const res = await fetch('./admin/accounts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error('伺服器回應 ' + res.status);
+  const json = await res.json();
+  if (!json || json.success !== true) throw new Error((json && json.error) || '操作失敗');
+  return json.data || {};
+}
+
+function renderAdminDeptAccounts() {
+  $('admin-tab-content').innerHTML = '<div class="card"><h3>系辦助理帳號</h3>' +
+    '<div id="deptacct-content"><div class="empty-hint">載入中…</div></div></div>';
+  loadDeptAccounts();
+}
+
+async function loadDeptAccounts() {
+  try {
+    const data = await serverAdminCall('list');
+    renderDeptAccountsTable(data.accounts || []);
+  } catch (e) {
+    $('deptacct-content').innerHTML =
+      '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>' +
+      '<p class="field-hint">本機登入帳號只存在於自架伺服器版本；若這裡是 GitHub Pages＋GAS 的版本，' +
+      '就沒有這個功能（那一軌用 Google 登入）。</p>';
+  }
+}
+
+function renderDeptAccountsTable(rows) {
+  if (!rows.length) {
+    $('deptacct-content').innerHTML = '<div class="empty-hint">白名單還沒有任何系辦助理，請先到「系辦助理」分頁建立。</div>';
+    return;
+  }
+  const noAccount = rows.filter(function (r) { return !r.hasAccount; }).length;
+  const initial = rows.filter(function (r) { return r.hasAccount && r.mustChangePassword; }).length;
+  $('deptacct-content').innerHTML =
+    '<p class="field-hint">帳號＝白名單的 email（登入時也可以只打 @ 前面那段），' +
+    '<b>初始密碼＝該筆的校內分機</b>，第一次登入會被邀請改密碼（可以選擇稍後再做）。' +
+    '沒填分機的無法建立帳號——請先到「系辦助理」分頁補上分機。</p>' +
+    '<p class="field-hint">目前：<b>' + rows.length + '</b> 人，其中 <b>' + noAccount + '</b> 人尚無帳號、' +
+    '<b>' + initial + '</b> 人仍在使用初始密碼。</p>' +
+    '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button></div>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>帳號狀態</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
+    rows.map(function (r) {
+      const acct = !r.hasAccount ? '<span style="color:var(--color-danger);">尚未建立</span>'
+        : (r.accountDisabled ? '<span style="color:var(--color-danger);">已停用</span>' : '啟用');
+      const pw = !r.hasAccount ? '—'
+        : (r.mustChangePassword ? '<span style="color:var(--color-warning);">初始密碼（分機）</span>' : '已自行更改');
+      const ops = [];
+      if (!r.ext) ops.push('<span class="field-hint">未填分機</span>');
+      else ops.push('<button class="btn btn-sm" data-action="deptacct-reset" data-email="' + escapeHtml(r.email) + '">' +
+        (r.hasAccount ? '重設為分機' : '建立帳號') + '</button>');
+      if (r.hasAccount) {
+        ops.push('<button class="btn btn-sm" data-action="deptacct-toggle" data-email="' + escapeHtml(r.email) + '" data-disabled="' + (r.accountDisabled ? '0' : '1') + '">' +
+          (r.accountDisabled ? '啟用' : '停用') + '</button>');
+      }
+      return '<tr><td data-label="Email">' + escapeHtml(r.email) + '</td>' +
+        '<td data-label="姓名">' + escapeHtml(r.name || '') + '</td>' +
+        '<td data-label="分機">' + escapeHtml(r.ext || '') + '</td>' +
+        '<td data-label="帳號狀態">' + acct + '</td>' +
+        '<td data-label="密碼">' + pw + '</td>' +
+        '<td data-label="操作">' + ops.join(' ') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+document.body.addEventListener('click', async function (e) {
+  const createAll = e.target.closest('[data-action="deptacct-create-all"]');
+  if (createAll) {
+    if (!confirm('將為所有「尚未建立帳號」且有填分機的系辦助理建立帳號，初始密碼＝各自的分機。確定？')) return;
+    try {
+      await withBtnPending(createAll, async function () {
+        const data = await serverAdminCall('list');
+        const targets = (data.accounts || []).filter(function (r) { return !r.hasAccount && r.ext; });
+        for (const t of targets) await serverAdminCall('createOrReset', { email: t.email });
+        showToast('已建立 ' + targets.length + ' 個帳號', 'success');
+        await loadDeptAccounts();
+      });
+    } catch (err) { showToast('建立失敗：' + err.message, 'error'); }
+    return;
+  }
+  const reset = e.target.closest('[data-action="deptacct-reset"]');
+  if (reset) {
+    const email = reset.dataset.email;
+    if (!confirm('將「' + email + '」的密碼設為該筆的校內分機，並要求下次登入改密碼。確定？')) return;
+    try {
+      await withBtnPending(reset, async function () {
+        await serverAdminCall('createOrReset', { email: email });
+        showToast('已設定', 'success');
+        await loadDeptAccounts();
+      });
+    } catch (err) { showToast('失敗：' + err.message, 'error'); }
+    return;
+  }
+  const toggle = e.target.closest('[data-action="deptacct-toggle"]');
+  if (toggle) {
+    const email = toggle.dataset.email;
+    const disabled = toggle.dataset.disabled === '1';
+    try {
+      await withBtnPending(toggle, async function () {
+        await serverAdminCall('setDisabled', { email: email, disabled: disabled });
+        showToast(disabled ? '已停用' : '已啟用', 'success');
+        await loadDeptAccounts();
+      });
+    } catch (err) { showToast('失敗：' + err.message, 'error'); }
+    return;
+  }
+});
 
 function openStaffLeadForm(email) {
   const leads = bootstrapData.staffLeads || [];
