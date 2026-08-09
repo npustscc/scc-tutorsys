@@ -71,6 +71,21 @@ function doPost(e) {
     //     純本地驗證、零外部 HTTP。失效回 'Session expired'（前端據此靜默重登＋重試）。
     //   - idToken：Google ID token。sessionStart 只收 idToken——帶 sessionToken 打
     //     sessionStart 一律拒絕，不允許「以舊 session 換新 session」無限續命。
+    // ctx（Drive 根資料夾）先解析：免認證的 localLogin 也需要它，而白名單比對本身
+    // 不依賴使用者身分。帶不在白名單的 rootFolderId 一律拒絕（跨環境 fail-closed）。
+    let ctx = { root: ROOT_FOLDER_ID };
+    if (rootFolderId) {
+      if (!ALLOWED_ROOTS[rootFolderId]) return jsonResp_({ error: 'Unauthorized rootFolderId' });
+      ctx = { root: rootFolderId };
+    }
+
+    // **本 dispatcher 唯一免認證的兩個 action**：帳密登入與帳密改密碼——它們自己就是認證
+    // （驗完帳密才簽發／才改），要求先有憑證等於雞生蛋。兩者都在函式內部自行節流，
+    // 且回應形狀只有 {error} 或簽發結果，不洩漏帳號是否存在。
+    // 新增任何 action 時預設「需要認證」，不要往這個分支加東西。
+    if (action === 'localLogin') return jsonResp_(localLoginAction_(params, ctx));
+    if (action === 'localChangePassword') return jsonResp_(localChangePasswordAction_(params, ctx));
+
     let userEmail;
     if (sessionToken) {
       if (action === 'sessionStart') return jsonResp_({ error: 'sessionStart requires idToken' });
@@ -79,12 +94,6 @@ function doPost(e) {
     } else {
       userEmail = idToken ? verifyIdToken_(idToken) : null;
       if (!userEmail) return jsonResp_({ error: 'Unauthorized' });
-    }
-
-    let ctx = { root: ROOT_FOLDER_ID };
-    if (rootFolderId) {
-      if (!ALLOWED_ROOTS[rootFolderId]) return jsonResp_({ error: 'Unauthorized rootFolderId' });
-      ctx = { root: rootFolderId };
     }
 
     let result;
@@ -114,6 +123,7 @@ function doPost(e) {
       case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
+      case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
       case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
@@ -212,6 +222,266 @@ function issueSessionToken_(email) {
     Utilities.computeHmacSha256Signature(payloadB64, secret)
   );
   return { token: payloadB64 + '.' + sigB64, exp: exp, jti: jti, iat: iat };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 本機帳密（系辦助理用；GAS 軌也要有）────────────────────────────────────────
+// 為什麼 GAS 軌需要帳密：系辦助理的校內信箱 @mail.npust.edu.tw **不是 Google 帳號**
+// （MX 指向學校自架的 spamalumni.npust.edu.tw，不是 Google），所以他們沒辦法用 Google 登入。
+// 導師與中心同仁走 Google 登入不變，這一套只是多一條路。
+//
+// 密碼保護：HMAC-SHA256 迭代（PBKDF2 精神；GAS 沒有 scrypt/bcrypt）＋ Script Property 的
+// **pepper**。pepper 不在資料庫裡，所以就算 Drive 上的 localAccounts.json 整份外流，
+// 沒有 pepper 也無法離線暴力破解。格式：hmac$<iterations>$<saltHex>$<keyHex>。
+//
+// ⚠️ 初始密碼＝校內分機，而分機在各系所官網上公開查得到。這在區網自架版還算堪用，
+// 搬到公開網際網路的 GAS 軌就等於「任何人都能拿到的密碼」。因此這裡加了兩道限制：
+//   1. mustChangePassword 的帳號有 **activationExpiresAt 啟用期限**（預設 14 天），
+//      過期即拒絕登入，要由中心重新啟用——公開的分機只在啟用窗口內有效。
+//   2. 前端在非自架軌不提供「稍後再做」，首次登入必須改密碼。
+// 這兩道都不是「安全」，是把暴露窗口從無限縮到有限。真正的解是接學校 SSO。
+function getPasswordPepper_() {
+  return PropertiesService.getScriptProperties().getProperty('PASSWORD_PEPPER');
+}
+
+// 在 GAS 編輯器手動執行一次（每個環境各跑一次，dev/prod 的 pepper 互不相同）。
+// 刻意不自動產生：pepper 一旦改變，所有既存密碼全部失效，不能讓它在請求路徑上被偷偷重建。
+function setupPasswordPepper() {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('PASSWORD_PEPPER')) {
+    Logger.log('PASSWORD_PEPPER 已存在，不覆寫。');
+    return;
+  }
+  const bytes = [];
+  for (let i = 0; i < 32; i++) bytes.push(Math.floor(Math.random() * 256));
+  const secret = Utilities.base64Encode(bytes);
+  props.setProperty('PASSWORD_PEPPER', secret);
+  Logger.log('PASSWORD_PEPPER 已產生並存入 Script Properties（長度 ' + secret.length + '）。');
+}
+
+function bytesToHex_(bytes) {
+  let out = '';
+  for (let i = 0; i < bytes.length; i++) {
+    const b = bytes[i] < 0 ? bytes[i] + 256 : bytes[i];
+    out += (b < 16 ? '0' : '') + b.toString(16);
+  }
+  return out;
+}
+
+const PASSWORD_ITERATIONS_ = 2000;
+
+// 迭代 HMAC。第一輪把 salt 與密碼綁進去，之後對前一輪輸出反覆 HMAC。
+function derivePasswordKey_(password, saltHex, iterations, pepper) {
+  let acc = Utilities.computeHmacSha256Signature(saltHex + ':' + String(password), pepper);
+  for (let i = 1; i < iterations; i++) {
+    acc = Utilities.computeHmacSha256Signature(acc, pepper);
+  }
+  return bytesToHex_(acc);
+}
+
+function hashPasswordGas_(password) {
+  const pepper = getPasswordPepper_();
+  if (!pepper) throw new Error('PASSWORD_PEPPER not configured（請在 GAS 編輯器執行一次 setupPasswordPepper）');
+  const saltBytes = [];
+  for (let i = 0; i < 16; i++) saltBytes.push(Math.floor(Math.random() * 256));
+  const saltHex = bytesToHex_(saltBytes);
+  const key = derivePasswordKey_(password, saltHex, PASSWORD_ITERATIONS_, pepper);
+  return 'hmac$' + PASSWORD_ITERATIONS_ + '$' + saltHex + '$' + key;
+}
+
+// 長度先比、再逐字元 XOR 累加——避免早退造成的時間差。
+function constantTimeEqual_(a, b) {
+  const x = String(a), y = String(b);
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= (x.charCodeAt(i) ^ y.charCodeAt(i));
+  return diff === 0;
+}
+
+function verifyPasswordGas_(password, hashStr) {
+  const pepper = getPasswordPepper_();
+  if (!pepper) return false;
+  const parts = String(hashStr || '').split('$');
+  if (parts.length !== 4 || parts[0] !== 'hmac') return false;
+  const iterations = Number(parts[1]);
+  if (!iterations || iterations > 20000) return false;
+  const derived = derivePasswordKey_(password, parts[2], iterations, pepper);
+  return constantTimeEqual_(derived, parts[3]);
+}
+
+// 新密碼規則與自架版一致（server/index.js validateNewPassword_）：至少 8 字、不得全數字。
+function validateNewPasswordGas_(pw) {
+  const s = String(pw == null ? '' : pw);
+  if (s.length < 8) return '新密碼至少 8 個字元';
+  if (s.length > 200) return '新密碼過長';
+  if (/^\d+$/.test(s)) return '新密碼不能只有數字（分機那種形式全校查得到）';
+  return null;
+}
+
+// 初始密碼取分機的第一段數字（名冊有「7829/7803」這種一格兩支的寫法）。
+// 與 server/index.js 的 initialPasswordFromExt_ 同規則，改動要兩邊同步。
+function initialPasswordFromExtGas_(ext) {
+  const m = String(ext == null ? '' : ext).match(/\d+/);
+  return m ? m[0] : '';
+}
+
+const ACTIVATION_WINDOW_DAYS_ = 14;
+
+// 登入失敗節流：CacheService 記 (email) 的連續失敗次數，達 5 次鎖 60 秒。
+// CacheService 是 best-effort（可能被清空），所以這是「提高成本」而不是硬保證。
+function loginFailKey_(email) { return 'lgf:' + String(email || '').toLowerCase(); }
+function loginFailCount_(email) {
+  const v = CacheService.getScriptCache().get(loginFailKey_(email));
+  return v ? Number(v) : 0;
+}
+function bumpLoginFail_(email) {
+  const n = loginFailCount_(email) + 1;
+  CacheService.getScriptCache().put(loginFailKey_(email), String(n), 60);
+  return n;
+}
+function clearLoginFail_(email) {
+  CacheService.getScriptCache().remove(loginFailKey_(email));
+}
+
+// 帳號解析：允許只打 @ 之前那段（規則同 server/index.js 的 resolveLoginEmail_——
+// local-part 剛好命中一個帳號才算數，多個一律當查無）。
+function resolveLocalLoginEmail_(accounts, input) {
+  const raw = String(input == null ? '' : input).trim().toLowerCase();
+  if (!raw || raw.indexOf('@') !== -1) return raw;
+  const hits = Object.keys(accounts || {}).filter(function (e) {
+    return String(e).toLowerCase().split('@')[0] === raw;
+  });
+  return hits.length === 1 ? hits[0] : raw;
+}
+
+// localLogin：**這個 dispatcher 唯一免認證的 action**——它自己就是認證。
+// 驗完帳密才簽發 session token，形狀與 sessionStart 一致（前端共用同一套 session 流程）。
+function localLoginAction_(params, ctx) {
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const email = resolveLocalLoginEmail_(accounts, params.email);
+  const password = String(params.password == null ? '' : params.password);
+
+  if (loginFailCount_(email) >= 5) return { error: '嘗試次數過多，請稍後再試' };
+
+  const entry = email ? accounts[email] : null;
+  // 查無帳號也照跑一次同樣迭代次數的雜湊，拉平時間差（同 server/index.js 的 DUMMY_HASH 手法）。
+  const hashToCheck = (entry && entry.hash) ? entry.hash
+    : ('hmac$' + PASSWORD_ITERATIONS_ + '$' + '00'.repeat(16) + '$' + 'ff'.repeat(32));
+  const passwordOk = verifyPasswordGas_(password, hashToCheck);
+  const accountOk = !!entry && entry.disabled !== true && entry.deleted !== true;
+  if (!accountOk || !passwordOk) {
+    bumpLoginFail_(email);
+    return { error: '帳號或密碼錯誤' };
+  }
+  // 啟用期限：仍在用初始密碼（分機，公開查得到）且已過期 → 拒絕，要中心重新啟用。
+  if (entry.mustChangePassword === true && entry.activationExpiresAt &&
+      new Date().toISOString() > entry.activationExpiresAt) {
+    bumpLoginFail_(email);
+    return { error: '初次登入啟用期限已過，請聯絡學諮中心重新啟用帳號' };
+  }
+
+  clearLoginFail_(email);
+  const issued = issueSessionToken_(email);
+  return {
+    sessionToken: issued.token, exp: issued.exp, email: email,
+    name: entry.name || '', mustChangePassword: entry.mustChangePassword === true,
+  };
+}
+
+// localChangePassword：要帶目前密碼（不只認 session token——token 存 localStorage，
+// 撿到 token 的人不該就能改密碼把本人鎖在外面）。同 server/index.js 的判斷。
+function localChangePasswordAction_(params, ctx) {
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const email = resolveLocalLoginEmail_(accounts, params.email);
+  const current = String(params.currentPassword == null ? '' : params.currentPassword);
+  const next = String(params.newPassword == null ? '' : params.newPassword);
+
+  if (loginFailCount_(email) >= 5) return { error: '嘗試次數過多，請稍後再試' };
+  const policyErr = validateNewPasswordGas_(next);
+  if (policyErr) return { error: policyErr };
+
+  const entry = accounts[email];
+  const hashToCheck = (entry && entry.hash) ? entry.hash
+    : ('hmac$' + PASSWORD_ITERATIONS_ + '$' + '00'.repeat(16) + '$' + 'ff'.repeat(32));
+  const ok = verifyPasswordGas_(current, hashToCheck) && !!entry && entry.disabled !== true;
+  if (!ok) { bumpLoginFail_(email); return { error: '帳號或目前密碼錯誤' }; }
+  if (current === next) return { error: '新密碼不能與目前密碼相同' };
+
+  clearLoginFail_(email);
+  return withLock_(function () {
+    const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+    const now = new Date().toISOString();
+    fresh[email] = Object.assign({}, fresh[email] || entry, {
+      hash: hashPasswordGas_(next), mustChangePassword: false,
+      activationExpiresAt: null, passwordChangedAt: now,
+    });
+    writeJsonPath_('localAccounts.json', fresh, ctx);
+    return { changed: true };
+  });
+}
+
+// adminLocalAccounts：admin only，操作與自架版 /admin/accounts 完全對應
+// （list / createOrReset / setDisabled），前端同一套 UI 依環境切換傳輸方式。
+function adminLocalAccountsAction_(params, ctx, userEmail) {
+  const roles = loadRolesForCtx_(ctx, userEmail);
+  requireAdmin_(roles);
+  const op = String(params.op || 'list');
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+
+  if (op === 'list') {
+    const assistants = (config.deptAssistants || []).filter(function (a) { return a && a.deleted !== true; });
+    return {
+      accounts: assistants.map(function (a) {
+        const u = accounts[String(a.email || '').toLowerCase()];
+        return {
+          email: a.email, name: a.name || '', ext: a.ext || '', deptIds: a.deptIds || [],
+          assistantDisabled: a.disabled === true,
+          hasAccount: !!u, accountDisabled: !!u && u.disabled === true,
+          mustChangePassword: !!u && u.mustChangePassword === true,
+          activationExpiresAt: (u && u.activationExpiresAt) || null,
+          passwordChangedAt: (u && u.passwordChangedAt) || null,
+        };
+      }),
+    };
+  }
+
+  const targetEmail = String(params.email || '').trim().toLowerCase();
+  if (!targetEmail) throw new Error('email required');
+
+  if (op === 'createOrReset') {
+    const assistant = (config.deptAssistants || []).filter(function (a) {
+      return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
+    })[0];
+    if (!assistant) throw new Error('這個 email 不在系辦助理白名單內');
+    const pw = String(params.password || initialPasswordFromExtGas_(assistant.ext) || '').trim();
+    if (!pw) throw new Error('沒有可用的初始密碼（白名單沒填分機），請手動指定');
+    return withLock_(function () {
+      const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+      const now = new Date();
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail] || {}, {
+        name: assistant.name || '', hash: hashPasswordGas_(pw), disabled: false,
+        mustChangePassword: true,
+        activationExpiresAt: new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString(),
+      });
+      writeJsonPath_('localAccounts.json', fresh, ctx);
+      appendAuditLog_(ctx, { action: 'adminResetLocalAccount', by: userEmail, targetId: targetEmail, at: now.toISOString() });
+      return { email: targetEmail, activationDays: ACTIVATION_WINDOW_DAYS_ };
+    });
+  }
+
+  if (op === 'setDisabled') {
+    return withLock_(function () {
+      const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+      if (!fresh[targetEmail]) throw new Error('這個 email 沒有本機帳號');
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail], { disabled: params.disabled === true });
+      writeJsonPath_('localAccounts.json', fresh, ctx);
+      appendAuditLog_(ctx, { action: 'adminSetLocalAccountDisabled', by: userEmail, targetId: targetEmail, at: new Date().toISOString() });
+      return { email: targetEmail, disabled: params.disabled === true };
+    });
+  }
+
+  throw new Error('unknown op: ' + op);
 }
 
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──

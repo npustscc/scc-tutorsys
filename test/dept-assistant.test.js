@@ -232,3 +232,53 @@ test('deptRosterGet 的投影**要**帶 phone（那是唯一看得到手機的�
   });
   assert.equal(out.tutors[0].phone, '0912345678');
 });
+
+// ── GAS 軌的本機帳密（系辦助理校內信箱不是 Google 帳號，只能走帳密）───────────
+// 純函式部分：密碼政策、分機取第一段、local-part 解析、常數時間比較。
+// 雜湊本身依賴 GAS 的 Utilities，改由 e2e/實機驗證。
+function makeSandbox3() {
+  return load([
+    'validateNewPasswordGas_', 'initialPasswordFromExtGas_',
+    'resolveLocalLoginEmail_', 'constantTimeEqual_', 'bytesToHex_',
+  ], {});
+}
+
+test('GAS 密碼政策與自架版一致：至少 8 字、不得全數字', () => {
+  const S = makeSandbox3();
+  assert.match(S.validateNewPasswordGas_('1234'), /至少 8/);
+  assert.match(S.validateNewPasswordGas_('12345678'), /只有數字/);
+  assert.equal(S.validateNewPasswordGas_('abcd1234'), null);
+  assert.match(S.validateNewPasswordGas_('a'.repeat(201)), /過長/);
+});
+
+test('初始密碼取分機第一段（與 server/index.js 同規則）', () => {
+  const S = makeSandbox3();
+  assert.equal(S.initialPasswordFromExtGas_('7829/7803'), '7829');
+  assert.equal(S.initialPasswordFromExtGas_('7759或7752'), '7759');
+  assert.equal(S.initialPasswordFromExtGas_('6325'), '6325');
+  assert.equal(S.initialPasswordFromExtGas_(''), '');
+});
+
+test('帳號可只打 local-part；剛好一個才算數，多個或查無一律原樣回傳', () => {
+  const S = makeSandbox3();
+  const accounts = { 'plant@mail.npust.edu.tw': {}, 'mis@mail.npust.edu.tw': {}, 'a@x.tw': {}, 'a@y.tw': {} };
+  assert.equal(S.resolveLocalLoginEmail_(accounts, 'plant'), 'plant@mail.npust.edu.tw');
+  assert.equal(S.resolveLocalLoginEmail_(accounts, 'PLANT'), 'plant@mail.npust.edu.tw');
+  assert.equal(S.resolveLocalLoginEmail_(accounts, 'a'), 'a');           // 兩筆撞名 → 不猜
+  assert.equal(S.resolveLocalLoginEmail_(accounts, 'nobody'), 'nobody'); // 查無 → 原樣（走假雜湊）
+  assert.equal(S.resolveLocalLoginEmail_(accounts, 'plant@mail.npust.edu.tw'), 'plant@mail.npust.edu.tw');
+});
+
+test('constantTimeEqual_：相同為真、長度不同或內容不同為偽', () => {
+  const S = makeSandbox3();
+  assert.equal(S.constantTimeEqual_('abc', 'abc'), true);
+  assert.equal(S.constantTimeEqual_('abc', 'abd'), false);
+  assert.equal(S.constantTimeEqual_('abc', 'abcd'), false);
+  assert.equal(S.constantTimeEqual_('', ''), true);
+});
+
+test('bytesToHex_：處理 GAS byte array 的負數（signed byte）', () => {
+  const S = makeSandbox3();
+  assert.equal(S.bytesToHex_([0, 15, 16, 127]), '000f107f');
+  assert.equal(S.bytesToHex_([-1, -128]), 'ff80');   // -1 → 255、-128 → 128
+});

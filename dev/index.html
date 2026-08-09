@@ -242,6 +242,18 @@
       <a href="javascript:location.reload()">重新整理頁面</a>後再試一次。
     </p>
     <p id="login-error" class="login-error" style="display:none;"></p>
+
+    <!-- 系辦助理用的帳密登入：他們的校內信箱 @mail.npust.edu.tw 不是 Google 帳號
+         （MX 指向學校自架主機），沒辦法用上面的 Google 登入。導師與中心同仁照舊用 Google。 -->
+    <div id="local-login-box" style="margin-top:18px; border-top:1px solid var(--color-border); padding-top:14px;">
+      <p class="login-sub" style="margin-bottom:10px;">系辦助理請用校內信箱與分機登入</p>
+      <form id="local-login-form" autocomplete="on" style="display:flex; flex-direction:column; gap:8px;">
+        <input type="text" id="local-email" placeholder="校內信箱（可只打 @ 前面那段）" autocomplete="username" required>
+        <input type="password" id="local-password" placeholder="密碼（初次為校內分機）" autocomplete="current-password" required>
+        <button type="submit" class="btn btn-primary" id="local-login-btn">登入</button>
+      </form>
+      <p id="local-login-error" class="login-error" style="display:none;"></p>
+    </div>
   </div>
 </div>
 
@@ -481,6 +493,9 @@ function formatDateTime(iso) {
 // ── Google Identity Services 登入 ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 window.addEventListener('load', () => {
+  // 帳密登入不依賴 Google，先接起來——即使 GIS 掛掉（被擋、離線）系辦助理仍能登入。
+  wireLocalLogin();
+
   if (!CLIENT_ID || CLIENT_ID.indexOf('__') === 0) {
     showLoginError('尚未設定 Google OAuth Client ID。');
     return;
@@ -615,6 +630,94 @@ function showReloginModal() {
 }
 function hideReloginModal() {
   if ($('modal-box').querySelector('#relogin-btn-slot')) closeModal();
+}
+
+// 免憑證呼叫：只給 localLogin / localChangePassword 用（它們自己就是認證，
+// 走 proxyCall 會因為「尚未登入」在前端就被擋下）。回傳後端 data 物件原樣，
+// 由呼叫端自行判斷 data.error——後端對這兩個 action 一律回 200＋{error}，不透露帳號是否存在。
+async function proxyCallNoAuth(action, params) {
+  const payload = JSON.stringify(Object.assign({ action: action, rootFolderId: ROOT_FOLDER_ID }, params || {}));
+  const form = new URLSearchParams();
+  form.append('payload', payload);
+  let res;
+  try {
+    res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
+  } catch (e) {
+    throw new Error('網路連線失敗，請確認網路後再試一次。');
+  }
+  if (!res.ok) throw new Error('伺服器回應 ' + res.status);
+  const json = await res.json();
+  if (json && json.success === false) throw new Error(json.error || '登入失敗');
+  return (json && json.data) || {};
+}
+
+// ── 帳密登入（系辦助理；GAS 軌與自架軌都可用）────────────────────────────────
+// 自架軌的入口是 server 提供的 login.html（那邊有自己的表單），這裡這份是給 GAS 軌用的——
+// 兩邊最後都走同一套 session（issueSessionToken_ 簽發的 HMAC token）。
+async function doLocalLogin(email, password) {
+  const res = await proxyCallNoAuth('localLogin', { email: email, password: password });
+  if (res && res.error) throw new Error(res.error);
+  currentUser = { email: res.email, name: res.name || res.email, picture: '' };
+  try { localStorage.setItem(LS_USER_KEY, JSON.stringify(currentUser)); } catch (e) {}
+  saveSession(res.sessionToken, res.exp);
+  return res;
+}
+
+function wireLocalLogin() {
+  const form = $('local-login-form');
+  if (!form) return;
+  // 自架軌不顯示這一區：那邊的登入在 login.html，index.html 根本不該停在登入畫面。
+  if (isSelfHosted()) { $('local-login-box').style.display = 'none'; return; }
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const errEl = $('local-login-error');
+    errEl.style.display = 'none';
+    const btn = $('local-login-btn');
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await doLocalLogin($('local-email').value.trim(), $('local-password').value);
+        if (res.mustChangePassword) {
+          // 初始密碼＝校內分機，而分機在系所官網公開查得到——在公開網路上這等於沒有密碼，
+          // 所以這一軌**不給「稍後再做」**，必須先改掉才進系統。
+          showForcedChangePassword(res.email, $('local-password').value);
+          return;
+        }
+        afterLogin();
+      });
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.style.display = '';
+    }
+  });
+}
+
+function showForcedChangePassword(email, currentPassword) {
+  openModal('請先設定新密碼', '<p class="field-hint">您目前使用的是初始密碼（校內分機）。' +
+    '分機在系所網站上公開查得到，等於任何人都能登入您的帳號，因此<b>必須先更改密碼</b>才能繼續。</p>' +
+    '<form id="force-pw-form">' +
+    '<div class="field"><label>新密碼</label><input type="password" id="force-pw1" placeholder="至少 8 個字元，不能只有數字" required></div>' +
+    '<div class="field"><label>再輸入一次</label><input type="password" id="force-pw2" required></div>' +
+    '<p id="force-pw-error" class="login-error" style="display:none;"></p>' +
+    '<div class="modal-actions"><button type="submit" class="btn btn-primary">更改密碼並進入系統</button></div></form>');
+  $('force-pw-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const errEl = $('force-pw-error');
+    errEl.style.display = 'none';
+    if ($('force-pw1').value !== $('force-pw2').value) {
+      errEl.textContent = '兩次輸入的新密碼不一致'; errEl.style.display = ''; return;
+    }
+    const btn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCallNoAuth('localChangePassword', {
+          email: email, currentPassword: currentPassword, newPassword: $('force-pw1').value,
+        });
+        if (res && res.error) throw new Error(res.error);
+        closeModal();
+        afterLogin();
+      });
+    } catch (err) { errEl.textContent = err.message; errEl.style.display = ''; }
+  });
 }
 
 // 自架伺服器版？——build-public.js 會把 APPS_SCRIPT_URL 換成本機 origin，所以「不是
@@ -2358,6 +2461,9 @@ document.body.addEventListener('click', function (e) {
 // 所以走 /admin/accounts 而不是 proxyCall。GAS 軌沒有這個端點——抓不到就顯示說明，
 // 不讓分頁看起來像壞掉。授權在後端：session token → resolveRoles_ → isAdmin。
 async function serverAdminCall(op, params) {
+  // 兩軌同一套 UI、兩種傳輸：自架軌的本機帳號活在 server/ 的 users.json（走 /admin/accounts），
+  // GAS 軌活在 Drive 的 localAccounts.json（走 adminLocalAccounts action）。op 名稱刻意一致。
+  if (!isSelfHosted()) return proxyCall('adminLocalAccounts', Object.assign({ op: op }, params || {}));
   // 用模組層級的 sessionToken（load() 已從 localStorage 還原並驗過效期），不另外讀一次。
   const body = Object.assign({ op: op, sessionToken: sessionToken }, params || {});
   const res = await fetch('./admin/accounts', {
