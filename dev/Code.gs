@@ -605,6 +605,57 @@ function maintenanceCreateAdminAccount() {
   return out;
 }
 
+// importer 專用的服務帳號。校內自架站的排程要來拉名冊，需要一組憑證——
+// **刻意不用 admin**：importer 只需要「讀得到全部系所的名冊」，而那正好是
+// 「系辦助理掛滿所有系所」的權限。用 admin 等於把後台帳號管理、config、稽核一起交出去。
+//
+// 與一般助理帳號的兩個差異，都是因為它是服務帳號而非真人帳號：
+//   - mustChangePassword=false（沒有人會去改它）
+//   - 不設 activationExpiresAt（14 天後過期會讓排程無聲無息地停掉）
+// 要換密碼就再執行一次本函式，舊密碼立即失效。
+const IMPORTER_ACCOUNT_EMAIL_ = 'importer@heartnpust.tw';
+
+function maintenanceCreateImporterAccount() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const allDeptIds = departments.filter(function (d) {
+    return d && d.active !== false && d.deleted !== true;
+  }).map(function (d) { return d.id; });
+  if (!allDeptIds.length) {
+    const e = JSON.stringify({ error: '這個環境沒有任何啟用的系所，先把名冊灌進來再跑' });
+    Logger.log(e);
+    return e;
+  }
+
+  adminUpsertDeptAssistantAction_({
+    deptAssistant: { email: IMPORTER_ACCOUNT_EMAIL_, name: '校內同步服務（importer）', ext: '', deptIds: allDeptIds },
+  }, ctx, who);
+
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 32; i++) pw += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  const hash = hashPasswordGas_(pw);
+  withLock_(function () {
+    const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+    accounts[IMPORTER_ACCOUNT_EMAIL_] = {
+      name: '校內同步服務（importer）', hash: hash, disabled: false,
+      mustChangePassword: false, activationExpiresAt: null,
+    };
+    writeJsonPath_('localAccounts.json', accounts, ctx);
+  });
+  appendAuditLog_(ctx, { action: 'maintenanceCreateImporterAccount', by: who, targetId: IMPORTER_ACCOUNT_EMAIL_, at: new Date().toISOString() });
+
+  const out = JSON.stringify({
+    帳號: IMPORTER_ACCOUNT_EMAIL_, 密碼: pw, 涵蓋系所數: allDeptIds.length,
+    權限: '等同「掛滿所有系所的系辦助理」——讀寫名冊，但不是 admin：碰不到帳號管理、config、稽核',
+    用途: '寫進 scc-server 的 server/.env（GAS_ADMIN_EMAIL/GAS_ADMIN_PASSWORD），給排程 importer 用',
+    輪替: '再執行一次本函式即產生新密碼，舊的立即失效',
+  });
+  Logger.log(out);
+  return out;
+}
+
 // ── 名冊搬運：自架版 → GAS Drive ─────────────────────────────────────────────
 // 為什麼是「上傳檔案 + 零參數函式」這種形狀：
 //   - GAS 編輯器只能執行**零參數**函式，所以資料不能用參數傳。
