@@ -139,7 +139,11 @@ function createHost(opts) {
     newBlob: function (bytes, mime, name) {
       return {
         getDataAsString: function () { return toBuffer(bytes).toString('utf8'); },
-        getBytes: function () { return bytes; },
+        // 真 GAS 的 Blob.getBytes() **一律回位元組陣列**，即使建立時給的是字串。
+        // 原本原樣回傳，於是 newBlob('字串').getBytes() 得到字串，讓
+        // computeHmacSha256Signature(bytes, '字串') 這種在真 GAS 會炸的組合在本機通過
+        // （2026-08-09 第二次踩到同一類「模擬器比真環境寬鬆」的坑）。
+        getBytes: function () { return toSignedBytes(toBuffer(bytes)); },
         getContentType: function () { return mime || 'application/octet-stream'; },
         getName: function () { return name || ''; },
       };

@@ -635,7 +635,8 @@ function hideReloginModal() {
 // 免憑證呼叫：只給 localLogin / localChangePassword 用（它們自己就是認證，
 // 走 proxyCall 會因為「尚未登入」在前端就被擋下）。回傳後端 data 物件原樣，
 // 由呼叫端自行判斷 data.error——後端對這兩個 action 一律回 200＋{error}，不透露帳號是否存在。
-async function proxyCallNoAuth(action, params) {
+async function proxyCallNoAuth(action, params, retryHttp) {
+  retryHttp = retryHttp || 0;
   const payload = JSON.stringify(Object.assign({ action: action, rootFolderId: ROOT_FOLDER_ID }, params || {}));
   const form = new URLSearchParams();
   form.append('payload', payload);
@@ -644,6 +645,13 @@ async function proxyCallNoAuth(action, params) {
     res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
   } catch (e) {
     throw new Error('網路連線失敗，請確認網路後再試一次。');
+  }
+  // GAS 偶發回 404/503（請求其實已送達並執行）。proxyCall 本來就有這段重試，
+  // 這支當初漏了——使用者實際踩到：改密碼成功了、畫面卻報錯，再送一次變成「目前密碼錯誤」。
+  // 後端的 localChangePassword 已改為冪等，所以重試是安全的。
+  if (!res.ok && (res.status === 404 || res.status === 503) && retryHttp < 2) {
+    await sleep(1200 * (retryHttp + 1));
+    return proxyCallNoAuth(action, params, retryHttp + 1);
   }
   if (!res.ok) throw new Error('伺服器回應 ' + res.status);
   const json = await res.json();
@@ -716,7 +724,11 @@ function showForcedChangePassword(email, currentPassword) {
         closeModal();
         afterLogin();
       });
-    } catch (err) { errEl.textContent = err.message; errEl.style.display = ''; }
+    } catch (err) {
+      errEl.innerHTML = escapeHtml(err.message) +
+        '<br><span class="field-hint">若您已經送出過一次，密碼可能已經更改成功——請重新整理頁面，改用<b>新密碼</b>登入試試。</span>';
+      errEl.style.display = '';
+    }
   });
 }
 

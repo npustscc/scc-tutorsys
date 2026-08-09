@@ -719,6 +719,55 @@ await flow('G', async () => {
   await ctx2.close();
 });
 
+// ══ H：系辦助理帳密登入（GAS 軌專用的路；校內信箱不是 Google 帳號）═══════════
+await flow('H', async () => {
+  await check('H', '建立系辦助理白名單＋本機帳號（初始密碼＝分機）', async () => {
+    const r1 = await apiCall('adminUpsertDeptAssistant', {
+      deptAssistant: { email: 'h-asst@example.com', name: 'H 測試助理', ext: '7788', deptIds: ['森林系'] },
+    }, adminToken.token);
+    expect(r1.success === true, JSON.stringify(r1).slice(0, 200));
+    const r2 = await apiCall('adminLocalAccounts', { op: 'createOrReset', email: 'h-asst@example.com' }, adminToken.token);
+    evid['H-create-account'] = JSON.stringify(r2).slice(0, 200);
+    expect(r2.success === true, JSON.stringify(r2).slice(0, 200));
+  });
+  await check('H', '用分機登入（只打 local-part）→ 發 token 且標記須改密碼', async () => {
+    const r = await apiCall('localLogin', { email: 'h-asst', password: '7788' });
+    evid['H-login'] = JSON.stringify(r).slice(0, 200);
+    expect(r.data && r.data.sessionToken, '沒拿到 token：' + JSON.stringify(r).slice(0, 200));
+    expect(r.data.mustChangePassword === true, 'mustChangePassword 應為 true');
+  });
+  await check('H', '🔒 錯誤密碼 → 帳號或密碼錯誤（不透露帳號是否存在）', async () => {
+    const bad = await apiCall('localLogin', { email: 'h-asst', password: 'wrong' });
+    const ghost = await apiCall('localLogin', { email: 'no-such-user', password: 'wrong' });
+    expect(bad.data.error === '帳號或密碼錯誤', JSON.stringify(bad));
+    expect(ghost.data.error === '帳號或密碼錯誤', '不存在的帳號應回一樣的訊息：' + JSON.stringify(ghost));
+  });
+  await check('H', '🔒 新密碼政策：太短、純數字都被擋', async () => {
+    const a = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: '7788', newPassword: 'ab1' });
+    const b = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: '7788', newPassword: '12345678' });
+    expect(/至少 8/.test(a.data.error || ''), JSON.stringify(a));
+    expect(/只有數字/.test(b.data.error || ''), JSON.stringify(b));
+  });
+  await check('H', '改密碼成功，舊密碼失效、新密碼可登入且不再要求改', async () => {
+    const c = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: '7788', newPassword: 'newpass-h1' });
+    expect(c.data && c.data.changed === true, JSON.stringify(c));
+    const old = await apiCall('localLogin', { email: 'h-asst', password: '7788' });
+    expect(old.data.error === '帳號或密碼錯誤', '舊密碼仍可用：' + JSON.stringify(old));
+    const nw = await apiCall('localLogin', { email: 'h-asst', password: 'newpass-h1' });
+    expect(nw.data && nw.data.sessionToken, JSON.stringify(nw).slice(0, 200));
+    expect(nw.data.mustChangePassword === false, 'mustChangePassword 應已清除');
+  });
+  await check('H', '🔁 重送同一次改密碼請求 → 冪等回成功（GAS 偶發 404 重試的情境）', async () => {
+    const again = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: '7788', newPassword: 'newpass-h1' });
+    evid['H-idempotent-retry'] = JSON.stringify(again);
+    expect(again.data && again.data.alreadyChanged === true, '重送應回 alreadyChanged：' + JSON.stringify(again));
+  });
+  await check('H', '🔒 目前密碼與新密碼都錯 → 仍然拒絕', async () => {
+    const r = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: 'nope', newPassword: 'another-pass1' });
+    expect(/目前密碼錯誤/.test(r.data.error || ''), JSON.stringify(r));
+  });
+});
+
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════
 await check('probe', '🔍 竄改 session token 一字元 → 拒絕', async () => {
   const bad = adminToken.token.slice(0, -2) + (adminToken.token.slice(-2) === 'aa' ? 'bb' : 'aa');

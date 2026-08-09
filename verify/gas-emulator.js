@@ -64,7 +64,11 @@ function createEmulator(opts) {
     newBlob: function (bytes, mime, name) {
       return {
         getDataAsString: function () { return toBuffer(bytes).toString('utf8'); },
-        getBytes: function () { return bytes; },
+        // 真 GAS 的 Blob.getBytes() **一律回位元組陣列**，即使建立時給的是字串。
+        // 原本原樣回傳，於是 newBlob('字串').getBytes() 得到字串，讓
+        // computeHmacSha256Signature(bytes, '字串') 這種在真 GAS 會炸的組合在本機通過
+        // （2026-08-09 第二次踩到同一類「模擬器比真環境寬鬆」的坑）。
+        getBytes: function () { return toSignedBytes(toBuffer(bytes)); },
         getContentType: function () { return mime || 'application/octet-stream'; },
         getName: function () { return name || ''; },
       };
@@ -160,6 +164,10 @@ function createEmulator(opts) {
   if (opts.seed !== false) seed(sandbox);
 
   function seed(sb) {
+    // 帳密登入需要 pepper（Code.gs 沒有它會 fail-closed）。真實環境由人手動跑
+    // setupPasswordPepper 產生；測試環境給一個固定值，讓 localLogin/localChangePassword
+    // 這條路在本機也跑得到——否則這個功能只有推上 GAS 才驗得了。
+    sb.PropertiesService.getScriptProperties().setProperty('PASSWORD_PEPPER', 'verify-fixed-pepper-for-tests');
     sb.writeJsonPath_('semesters.json', [
       { id: '114-1', label: '114 學年度第 1 學期', quotaMeeting: 5, quotaActivity: 1, isCurrent: false },
       { id: '114-2', label: '114 學年度第 2 學期', quotaMeeting: 5, quotaActivity: 1, isCurrent: true },

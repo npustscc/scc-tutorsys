@@ -421,7 +421,17 @@ function localChangePasswordAction_(params, ctx) {
   const hashToCheck = (entry && entry.hash) ? entry.hash
     : ('hmac$' + PASSWORD_ITERATIONS_ + '$' + '00'.repeat(16) + '$' + 'ff'.repeat(32));
   const ok = verifyPasswordGas_(current, hashToCheck) && !!entry && entry.disabled !== true;
-  if (!ok) { bumpLoginFail_(email); return { error: '帳號或目前密碼錯誤' }; }
+  if (!ok) {
+    // 冪等：目前密碼對不上，但「新密碼」已經是現行密碼 → 代表這次請求其實已經成功過一次
+    // （GAS 偶發 404/503 讓前端重試時就會這樣，使用者 2026-08-09 實際踩到：
+    //  第一次改成功但畫面報錯，第二次送出被判「目前密碼錯誤」）。
+    // 回成功而不改動任何東西——呼叫端證明了自己知道新密碼，且狀態已經是它要的樣子。
+    if (entry && entry.disabled !== true && verifyPasswordGas_(next, entry.hash)) {
+      clearLoginFail_(email);
+      return { changed: false, alreadyChanged: true };
+    }
+    bumpLoginFail_(email); return { error: '帳號或目前密碼錯誤' };
+  }
   if (current === next) return { error: '新密碼不能與目前密碼相同' };
 
   clearLoginFail_(email);
