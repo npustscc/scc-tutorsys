@@ -101,3 +101,28 @@ test('系所：新增與改名，且不動 headEmail 等本地欄位', () => {
   assert.equal(departments[0].name, '農藝系');
   assert.equal(departments[0].headEmail, 'head@x.com', '系主任 email 是本地資料，不該被投影蓋掉');
 });
+
+test('欄位形狀差異不算變動：本地 tutors 沒 phone 欄位、graduatedSemester 是 undefined', () => {
+  // 首次預演時 375 筆全被報成「更新」，實際上只是本地舊資料還沒有 phone 欄位。
+  const local = [localClass({ tutors: [{ name: '李鎮宇', email: '' }], graduatedSemester: undefined })];
+  delete local[0].graduatedSemester;
+  const remote = [{
+    id: '農園系_四技一A', name: '四技一A', deptId: '農園系', systemId: 'day_college',
+    displayName: '四農園一A', requiredMeetingOverride: 4, graduatedSemester: null, active: true,
+    tutors: [{ name: '李鎮宇', email: '', phone: '' }],
+  }];
+  const { classes, report } = mergeClasses(local, remote);
+  assert.deepEqual(report.unchanged, ['農園系_四技一A'], '形狀差異不該算成變動');
+  assert.deepEqual(report.updated, []);
+  // 仍然要把正規化後的形狀寫回去（之後就有 phone 欄位了）
+  assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: '', phone: '' }]);
+});
+
+test('真的有電話填進來時，要算成變動', () => {
+  const local = [localClass({ tutors: [{ name: '李鎮宇', email: '' }] })];
+  const remote = [{ id: '農園系_四技一A', name: '四技一A', deptId: '農園系', systemId: 'day_college',
+    displayName: '四農園一A', requiredMeetingOverride: 4, graduatedSemester: null, active: true,
+    tutors: [{ name: '李鎮宇', email: '', phone: '0912345678' }] }];
+  const { report } = mergeClasses(local, remote);
+  assert.deepEqual(report.updated, ['農園系_四技一A']);
+});

@@ -35,6 +35,23 @@ import path from 'node:path';
 // ── 純函式：合併名冊（可單元測試，不碰 I/O）──────────────────────────────────
 const ROSTER_FIELDS = ['name', 'displayName', 'deptId', 'systemId', 'requiredMeetingOverride', 'graduatedSemester', 'active'];
 
+// 比較用的正規化：本地舊資料的 tutors 是 {name,email}（沒有 phone 欄位）、缺欄位是 undefined；
+// 遠端投影一律補成 phone:'' 與 null。不正規化就比較的話，第一次同步會把 375 筆全報成「更新」，
+// 之後每次也一樣——真正的變動就被雜訊淹掉了（2026-08-10 首次預演實際看到）。
+function normRosterValue(v) { return v === undefined ? null : v; }
+function normTutors(tutors) {
+  return (tutors || []).map(function (t) {
+    return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+  });
+}
+function sameRoster(local, remote) {
+  for (const f of ROSTER_FIELDS) {
+    if (remote[f] === undefined) continue;   // 遠端沒給的欄位不參與比較
+    if (JSON.stringify(normRosterValue(local[f])) !== JSON.stringify(normRosterValue(remote[f]))) return false;
+  }
+  return JSON.stringify(normTutors(local.tutors)) === JSON.stringify(normTutors(remote.tutors));
+}
+
 export function mergeClasses(localClasses, remoteClasses) {
   const byId = new Map((localClasses || []).map((c) => [c.id, c]));
   const report = { updated: [], created: [], unchanged: [], localOnly: [] };
@@ -48,19 +65,18 @@ export function mergeClasses(localClasses, remoteClasses) {
         displayName: r.displayName || r.name,
         requiredMeetingOverride: r.requiredMeetingOverride === undefined ? null : r.requiredMeetingOverride,
         graduatedSemester: r.graduatedSemester || null,
-        tutors: (r.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '', phone: t.phone || '' })),
+        tutors: normTutors(r.tutors),
         suggestedTutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: r.active !== false,
       });
       report.created.push(r.id);
       continue;
     }
-    const before = JSON.stringify([ROSTER_FIELDS.map((f) => local[f]), local.tutors]);
+    const changed = !sameRoster(local, r);
     for (const f of ROSTER_FIELDS) {
       if (r[f] !== undefined) local[f] = r[f];
     }
-    local.tutors = (r.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '', phone: t.phone || '' }));
-    const after = JSON.stringify([ROSTER_FIELDS.map((f) => local[f]), local.tutors]);
-    (before === after ? report.unchanged : report.updated).push(r.id);
+    local.tutors = normTutors(r.tutors);
+    (changed ? report.updated : report.unchanged).push(r.id);
   }
 
   const remoteIds = new Set((remoteClasses || []).map((c) => c.id));
