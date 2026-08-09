@@ -94,6 +94,47 @@ function readUsersSync_(dataDir) {
   }
 }
 
+// 產雜湊（參數同 create-user.js：scrypt N=16384 r=8 p=1、32-byte 金鑰、16-byte 隨機 salt）。
+function hashPassword_(password) {
+  const N = 16384, r = 8, p = 1;
+  const salt = crypto.randomBytes(16);
+  const key = scryptDerive_(password, salt, N, r, p);
+  return 'scrypt$' + N + '$' + r + '$' + p + '$' + salt.toString('hex') + '$' + key.toString('hex');
+}
+
+// 登入帳號可以只打 @ 之前那段（系辦助理不必每次打完整 email）。
+// 規則：輸入含 '@' → 原樣當 email；不含 '@' → 在現有帳號裡找 local-part 相同的，
+// **剛好一個**才算數。多個相同 local-part（例如 a@x.tw 與 a@y.tw 同時存在）→ 視為查無帳號，
+// 不猜、也不隨便挑一個——猜錯就是把密碼送去驗證另一個人的帳號。
+// 回傳「解析後的 email」，查無對應時原樣回傳輸入值，讓後續走既有的假雜湊路徑（時間差已拉平）。
+function resolveLoginEmail_(users, input) {
+  const raw = String(input == null ? '' : input).trim().toLowerCase();
+  if (!raw || raw.indexOf('@') !== -1) return raw;
+  const hits = Object.keys(users || {}).filter(function (e) {
+    return String(e).toLowerCase().split('@')[0] === raw;
+  });
+  return hits.length === 1 ? hits[0] : raw;
+}
+
+// users.json 含密碼雜湊 → 0600，且用 tmp+rename 原子寫（同 create-user.js 的做法）。
+function writeUsersSync_(dataDir, users) {
+  const p = path.join(dataDir, 'users.json');
+  const tmp = p + '.tmp-' + process.pid + '-' + Date.now();
+  fs.writeFileSync(tmp, JSON.stringify(users, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+
+// 新密碼規則：至少 8 字，且不能與初始密碼（分機）同形——初始密碼是 4 碼分機，
+// 全校可查，等於沒有密碼，所以改密碼時一定要離開那個形狀。
+const MIN_PASSWORD_LEN = 8;
+function validateNewPassword_(pw) {
+  const s = String(pw == null ? '' : pw);
+  if (s.length < MIN_PASSWORD_LEN) return '新密碼至少 ' + MIN_PASSWORD_LEN + ' 個字元';
+  if (s.length > 200) return '新密碼過長';
+  if (/^\d{1,6}$/.test(s)) return '新密碼不能只有數字（分機那種形式全校查得到）';
+  return null;
+}
+
 function startServer(config) {
   const mailer = createMailer({
     host: config.smtpHost, port: config.smtpPort,
@@ -114,9 +155,12 @@ function startServer(config) {
   function handleLogin(req, res, bodyStr) {
     let body;
     try { body = JSON.parse(bodyStr || '{}'); } catch (e) { body = {}; }
-    const email = String((body && body.email) || '').trim().toLowerCase();
     const password = String((body && body.password) || '');
     const ip = req.socket.remoteAddress || '';
+    const users = readUsersSync_(config.dataDir);
+    // 允許只打 @ 之前那段（見 resolveLoginEmail_）。節流的 key 用解析後的 email，
+    // 這樣「打 plant」與「打 plant@mail.npust.edu.tw」共用同一個失敗計數，繞不掉。
+    const email = resolveLoginEmail_(users, (body && body.email) || '');
     const key = ip + '|' + email;
     const now = Date.now();
     const rec = failMap.get(key);
@@ -126,7 +170,6 @@ function startServer(config) {
       return sendJson(res, 200, { success: false, error: '嘗試次數過多，請稍後再試' });
     }
 
-    const users = readUsersSync_(config.dataDir);
     const entry = email ? users[email] : null;
     // 查無帳號 → 仍對固定假雜湊跑一次 scrypt（見 DUMMY_HASH 註解），拉平時間差；
     // disabled 帳號 → 用它真正的雜湊驗證（時間路徑與正常帳號一致），但結果一律視為失敗。
@@ -154,8 +197,144 @@ function startServer(config) {
     logLine('POST', '/login', 200, 'ok');
     return sendJson(res, 200, {
       success: true,
-      data: { sessionToken: result.sessionToken, exp: result.exp, email: result.email, name: entry.name || '' },
+      data: {
+        sessionToken: result.sessionToken, exp: result.exp, email: result.email, name: entry.name || '',
+        // 初始密碼（系辦助理＝校內分機）尚未換掉 → 登入頁提示改密碼；使用者可選「稍後再做」。
+        mustChangePassword: entry.mustChangePassword === true,
+      },
     });
+  }
+
+  // ── 改密碼（自助）────────────────────────────────────────────────────────────
+  // 要帶「目前密碼」而不是只認 session token：session token 存在 localStorage，
+  // 拿到 token 的人不該就能把密碼換掉把本人鎖在外面。驗證路徑與 /login 完全相同
+  // （含假雜湊拉平時間差、共用同一份失敗節流），成功後清掉 mustChangePassword。
+  function handleChangePassword(req, res, bodyStr) {
+    let body;
+    try { body = JSON.parse(bodyStr || '{}'); } catch (e) { body = {}; }
+    const email = resolveLoginEmail_(readUsersSync_(config.dataDir), (body && body.email) || '');
+    const current = String((body && body.currentPassword) || '');
+    const next = String((body && body.newPassword) || '');
+    const ip = req.socket.remoteAddress || '';
+    const key = ip + '|' + email;
+    const now = Date.now();
+    const rec = failMap.get(key);
+
+    if (rec && rec.count >= FAIL_THRESHOLD && now < rec.blockedUntil) {
+      logLine('POST', '/change-password', 200, 'throttled');
+      return sendJson(res, 200, { success: false, error: '嘗試次數過多，請稍後再試' });
+    }
+    const policyErr = validateNewPassword_(next);
+    if (policyErr) {
+      logLine('POST', '/change-password', 200, 'policy');
+      return sendJson(res, 200, { success: false, error: policyErr });
+    }
+
+    const users = readUsersSync_(config.dataDir);
+    const entry = email ? users[email] : null;
+    const hashToCheck = (entry && entry.hash) ? entry.hash : DUMMY_HASH;
+    const passwordOk = verifyPassword_(current, hashToCheck);
+    const accountOk = !!entry && entry.disabled !== true;
+    if (!accountOk || !passwordOk) {
+      const n = { count: (rec ? rec.count : 0) + 1, blockedUntil: 0 };
+      if (n.count >= FAIL_THRESHOLD) n.blockedUntil = now + config.loginThrottleMs;
+      failMap.set(key, n);
+      logLine('POST', '/change-password', 200, 'fail');
+      return sendJson(res, 200, { success: false, error: '帳號或目前密碼錯誤' });
+    }
+    if (current === next) {
+      return sendJson(res, 200, { success: false, error: '新密碼不能與目前密碼相同' });
+    }
+
+    failMap.delete(key);
+    // 重讀一次再寫，縮小與 admin 端同時改同一份 users.json 的覆寫窗口。
+    const fresh = readUsersSync_(config.dataDir);
+    const target = fresh[email] || entry;
+    fresh[email] = Object.assign({}, target, {
+      hash: hashPassword_(next), mustChangePassword: false, passwordChangedAt: new Date().toISOString(),
+    });
+    writeUsersSync_(config.dataDir, fresh);
+    logLine('POST', '/change-password', 200, 'ok');
+    return sendJson(res, 200, { success: true, data: { changed: true } });
+  }
+
+  // ── 管理端：系辦助理的登入帳號 ───────────────────────────────────────────────
+  // 這一層（本機帳密）活在 server/ 而不是 Code.gs 裡，所以走 /exec 的 action 管不到它，
+  // 另開 /admin/accounts 端點。授權完全沿用 Code.gs 本尊：session token 過
+  // verifySessionToken_，再用 resolveRoles_ 判 isAdmin——不另立一套判斷，免得兩邊漂移。
+  // 回應**永遠不含 hash**，只回「有沒有帳號、是否停用、是否還在用初始密碼」。
+  function requireAdminBySession_(body) {
+    const token = String((body && body.sessionToken) || '');
+    const v = host.sandbox.verifySessionToken_(token);
+    if (!v || !v.ok || !v.email) return { ok: false, error: 'Session expired' };
+    const ctx = { root: host.rootFolderId };
+    const cfg = host.sandbox.readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = host.sandbox.readJsonSafe_('departments.json', ctx, []);
+    const classes = host.sandbox.readJsonSafe_('classes.json', ctx, []);
+    const roles = host.sandbox.resolveRoles_(v.email, cfg, departments, classes);
+    if (!roles || !roles.isAdmin) return { ok: false, error: 'admin only' };
+    return { ok: true, email: v.email, config: cfg };
+  }
+
+  function handleAdminAccounts(req, res, bodyStr) {
+    let body;
+    try { body = JSON.parse(bodyStr || '{}'); } catch (e) { body = {}; }
+    const auth = requireAdminBySession_(body);
+    if (!auth.ok) {
+      logLine('POST', '/admin/accounts', 200, auth.error);
+      return sendJson(res, 200, { success: false, error: auth.error });
+    }
+    const op = String((body && body.op) || 'list');
+    const users = readUsersSync_(config.dataDir);
+
+    // list：把系辦助理白名單與本機帳號對起來，回「誰還沒有帳號、誰還在用初始密碼」。
+    if (op === 'list') {
+      const assistants = (auth.config.deptAssistants || []).filter(function (a) { return a && a.deleted !== true; });
+      const rows = assistants.map(function (a) {
+        const u = users[String(a.email || '').toLowerCase()];
+        return {
+          email: a.email, name: a.name || '', ext: a.ext || '', deptIds: a.deptIds || [],
+          assistantDisabled: a.disabled === true,
+          hasAccount: !!u,
+          accountDisabled: !!u && u.disabled === true,
+          mustChangePassword: !!u && u.mustChangePassword === true,
+          passwordChangedAt: (u && u.passwordChangedAt) || null,
+        };
+      });
+      return sendJson(res, 200, { success: true, data: { accounts: rows } });
+    }
+
+    const targetEmail = String((body && body.email) || '').trim().toLowerCase();
+    if (!targetEmail) return sendJson(res, 200, { success: false, error: 'email required' });
+
+    // create/reset：以指定密碼（預設＝白名單裡的分機）建立或重設，並標記 mustChangePassword。
+    if (op === 'createOrReset') {
+      const assistant = (auth.config.deptAssistants || []).filter(function (a) {
+        return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
+      })[0];
+      if (!assistant) return sendJson(res, 200, { success: false, error: '這個 email 不在系辦助理白名單內' });
+      const pw = String((body && body.password) || assistant.ext || '').trim();
+      if (!pw) return sendJson(res, 200, { success: false, error: '沒有可用的初始密碼（白名單沒填分機），請手動指定' });
+      const fresh = readUsersSync_(config.dataDir);
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail] || {}, {
+        name: assistant.name || '', hash: hashPassword_(pw), disabled: false, mustChangePassword: true,
+      });
+      writeUsersSync_(config.dataDir, fresh);
+      logLine('POST', '/admin/accounts', 200, 'createOrReset ' + targetEmail);
+      return sendJson(res, 200, { success: true, data: { email: targetEmail, usedExtAsPassword: !(body && body.password) } });
+    }
+
+    // enable/disable：停用即無法登入（驗證路徑照跑，結果一律失敗，見 handleLogin）。
+    if (op === 'setDisabled') {
+      const fresh = readUsersSync_(config.dataDir);
+      if (!fresh[targetEmail]) return sendJson(res, 200, { success: false, error: '這個 email 沒有本機帳號' });
+      fresh[targetEmail] = Object.assign({}, fresh[targetEmail], { disabled: (body && body.disabled) === true });
+      writeUsersSync_(config.dataDir, fresh);
+      logLine('POST', '/admin/accounts', 200, 'setDisabled ' + targetEmail);
+      return sendJson(res, 200, { success: true, data: { email: targetEmail, disabled: (body && body.disabled) === true } });
+    }
+
+    return sendJson(res, 200, { success: false, error: 'unknown op: ' + op });
   }
 
   function handleExecPost(req, res, bodyStr, urlObj) {
@@ -253,6 +432,24 @@ function startServer(config) {
         handleLogin(req, res, bodyStr);
       }).catch(function (e) {
         logLine('POST', '/login', 400, e.message);
+        res.writeHead(400); res.end('bad request');
+      });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/change-password') {
+      readBody(req, MAX_LOGIN_BODY_BYTES).then(function (bodyStr) {
+        handleChangePassword(req, res, bodyStr);
+      }).catch(function (e) {
+        logLine('POST', '/change-password', 400, e.message);
+        res.writeHead(400); res.end('bad request');
+      });
+      return;
+    }
+    if (req.method === 'POST' && pathname === '/admin/accounts') {
+      readBody(req, MAX_LOGIN_BODY_BYTES).then(function (bodyStr) {
+        handleAdminAccounts(req, res, bodyStr);
+      }).catch(function (e) {
+        logLine('POST', '/admin/accounts', 400, e.message);
         res.writeHead(400); res.end('bad request');
       });
       return;

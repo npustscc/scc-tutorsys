@@ -47,14 +47,31 @@
 <h1>屏科大導師資訊系統 <span class="env-badge">__ENV_LABEL__</span></h1>
 <p class="hint">此為校內自架伺服器登入；憑證效期至當日 24:00（台北時間）。</p>
 <form id="login-form" autocomplete="on">
-  <label>電子郵件
-    <input type="email" id="email" required autocomplete="username">
+  <label>帳號
+    <!-- type=text 而非 email：帳號允許只打 @ 之前那段（伺服器端 resolveLoginEmail_ 補全），
+         用 type=email 會被瀏覽器原生驗證擋在送出之前。 -->
+    <input type="text" id="email" required autocomplete="username" placeholder="完整 email，或只打 @ 前面那段">
   </label>
   <label>密碼
     <input type="password" id="password" required autocomplete="current-password">
   </label>
   <div class="error" id="error" role="alert"></div>
   <button type="submit" id="submit-btn">登入</button>
+</form>
+
+<!-- 初始密碼（系辦助理＝校內分機）尚未換掉時，登入成功後先停在這一步邀請改密碼。
+     「稍後再做」直接進系統——使用者明確要求可以延後，不擋人做事。 -->
+<form id="change-form" autocomplete="off" style="display:none;">
+  <p class="hint" id="change-hint">您目前使用的是初始密碼（校內分機），建議立即更換。</p>
+  <label>新密碼
+    <input type="password" id="new-password" autocomplete="new-password" placeholder="至少 8 個字元，不能只有數字">
+  </label>
+  <label>再輸入一次
+    <input type="password" id="new-password2" autocomplete="new-password">
+  </label>
+  <div class="error" id="change-error" role="alert"></div>
+  <button type="submit" id="change-btn">更改密碼並進入系統</button>
+  <button type="button" id="skip-btn" style="background:transparent; color:inherit; text-decoration:underline;">稍後再做，先進系統</button>
 </form>
 <script>
 (function () {
@@ -78,6 +95,39 @@
   var form = document.getElementById('login-form');
   var errorEl = document.getElementById('error');
   var btn = document.getElementById('submit-btn');
+  var changeForm = document.getElementById('change-form');
+  var changeError = document.getElementById('change-error');
+  var changeBtn = document.getElementById('change-btn');
+  var loggedInEmail = '';
+  var currentPassword = '';
+
+  document.getElementById('skip-btn').addEventListener('click', function () {
+    location.href = './index.html';
+  });
+
+  changeForm.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    changeError.textContent = '';
+    var pw1 = document.getElementById('new-password').value;
+    var pw2 = document.getElementById('new-password2').value;
+    if (pw1 !== pw2) { changeError.textContent = '兩次輸入的新密碼不一致'; return; }
+    changeBtn.disabled = true;
+    fetch('./change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: loggedInEmail, currentPassword: currentPassword, newPassword: pw1 }),
+    }).then(function (res) { return res.json(); }).then(function (json) {
+      if (!json || json.success !== true) {
+        changeError.textContent = (json && json.error) || '更改失敗，請稍後再試';
+        changeBtn.disabled = false;
+        return;
+      }
+      location.href = './index.html';
+    }).catch(function () {
+      changeError.textContent = '連線失敗，請確認伺服器狀態';
+      changeBtn.disabled = false;
+    });
+  });
 
   form.addEventListener('submit', function (ev) {
     ev.preventDefault();
@@ -101,6 +151,15 @@
         localStorage.setItem(LS_SESSION_KEY, JSON.stringify({ token: data.sessionToken, exp: data.exp, email: data.email }));
         localStorage.setItem(LS_USER_KEY, JSON.stringify({ email: data.email, name: data.name || data.email, picture: BLANK_AVATAR }));
       } catch (e) { /* localStorage 寫入失敗（無痕模式等）：跳轉後前端會偵測到無 session 再導回登入頁 */ }
+      // session 已經發下來了，改密碼與否都不影響能不能進系統——所以這裡只是「邀請」。
+      if (data.mustChangePassword === true) {
+        loggedInEmail = data.email;
+        currentPassword = password;
+        form.style.display = 'none';
+        changeForm.style.display = 'flex';
+        document.getElementById('new-password').focus();
+        return;
+      }
       location.href = './index.html';
     }).catch(function () {
       errorEl.textContent = '連線失敗，請確認伺服器狀態';

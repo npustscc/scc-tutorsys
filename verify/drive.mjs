@@ -655,6 +655,67 @@ await flow('G', async () => {
   });
   await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G-系辦助理看到的導師資料頁.png') });
   console.log('   📸 G-系辦助理看到的導師資料頁');
+
+  // ── Phase 2：新增班級／填手機／刪除，以及手機不得外洩的不變量 ──
+  await check('G2', '新增班級（含導師手機）→ 列表出現該班且顯示電話', async () => {
+    await page2.locator('[data-action="deptroster-new"]').click();
+    await page2.locator('#deptroster-form').waitFor({ timeout: 5000 });
+    await page2.fill('#deptroster-name', '四技五A');
+    await page2.fill('#deptroster-display', '四森林五A');
+    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="name"]', '測試導師');
+    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="phone"]', '0912-345-678');
+    await page2.locator('#deptroster-form button[type=submit]').click();
+    await page2.locator('#deptroster-content table', { hasText: '四森林五A' }).waitFor({ timeout: 10000 });
+    const txt = await page2.locator('#deptroster-content').textContent();
+    expect(/0912-345-678/.test(txt || ''), '列表沒顯示電話');
+  });
+  await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G2-新增班級含手機.png') });
+  console.log('   📸 G2-新增班級含手機');
+
+  await check('G2', '🔒 手機不進 bootstrap：同一帳號的 bootstrap 回應完全沒有 phone 欄位', async () => {
+    const r = await apiCall('bootstrap', {}, deptAsstToken.token);
+    const s = JSON.stringify(r);
+    evid['G2-bootstrap-has-phone'] = String(/"phone"/.test(s));
+    expect(!/"phone"/.test(s), 'bootstrap 回應含 phone 欄位');
+    expect(/四森林五A/.test(s), 'bootstrap 應該看得到這個班（只是不含 phone）');
+  });
+  await check('G2', '🔒 admin 的 bootstrap 也沒有 phone（無例外的不變量）', async () => {
+    const r = await apiCall('bootstrap', {}, adminToken.token);
+    expect(!/"phone"/.test(JSON.stringify(r)), 'admin 的 bootstrap 含 phone 欄位');
+  });
+  await check('G2', '🔒 系辦助理在別系新增班級 → forbidden', async () => {
+    const r = await apiCall('deptRosterUpsertClass', {
+      class: { deptId: '農園系', name: '四技九Z', tutors: [{ name: '壞人' }] },
+    }, deptAsstToken.token);
+    evid['G2-upsert-other-dept'] = JSON.stringify(r);
+    expect(/forbidden/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '🔒 系辦助理刪別系的班 → forbidden', async () => {
+    const r = await apiCall('deptRosterDeleteClass', { classId: '農園系_四技一A' }, deptAsstToken.token);
+    evid['G2-delete-other-dept'] = JSON.stringify(r);
+    expect(/forbidden/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '🔒 同系撞班名 → 拒絕（班級身分是 (系所, 班名)）', async () => {
+    const r = await apiCall('deptRosterUpsertClass', {
+      class: { deptId: '森林系', name: '四技五A', tutors: [{ name: '另一位' }] },
+    }, deptAsstToken.token);
+    expect(/already exists/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '🔒 電話含不允許字元 → 拒絕', async () => {
+    const r = await apiCall('deptRosterUpsertClass', {
+      class: { deptId: '森林系', name: '四技六A', tutors: [{ name: '甲', phone: '<script>x</script>' }] },
+    }, deptAsstToken.token);
+    expect(/電話格式不正確/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '刪除班級 → 列表消失，且是軟刪除（deptRosterGet 不再回它）', async () => {
+    const before = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const target = (before.data.classes || []).find((c) => c.name === '四技五A');
+    expect(!!target, '找不到剛建的班');
+    const r = await apiCall('deptRosterDeleteClass', { classId: target.id }, deptAsstToken.token);
+    expect(r.success === true, '刪除失敗：' + JSON.stringify(r));
+    const after = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    expect(!(after.data.classes || []).some((c) => c.id === target.id), '刪除後仍回傳該班');
+  });
   await ctx2.close();
 });
 

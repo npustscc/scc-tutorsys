@@ -115,6 +115,8 @@ function doPost(e) {
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
+      case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
+      case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -950,8 +952,26 @@ function isValidSemesterId_(semesterId, semesters) {
 // - suggestedTutors 的 by（建議者 email，即上傳學生）與自填 email 屬個資，只有 admin
 //   看得到完整內容；其他人（含該班導師）只拿到 name（前端顯示「待確認」chip 用）。
 // - tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
+// 導師手機（tutors[].phone，Phase 2 由系辦助理填）**一律不進 bootstrap**——
+// bootstrap 的 classes 是每一個登入者（含任何 Google 帳號的學生）都拿得到的，
+// 手機留在裡面就等於全校可讀。要看手機只有一條路：deptRosterGet（後端按系所驗權限）。
+// 這裡對**所有角色含 admin** 都拔掉，讓「bootstrap 的 classes 沒有 phone」成為一條無例外的
+// 不變量——有例外就會有人依賴例外，然後某天例外變成漏洞。
+// 實作刻意**內聯**在 sanitizeClassesForViewer_ 裡而不是抽成 helper：抽出去的話，
+// test/harness.js 每個載入 sanitizeClassesForViewer_ 的測試都得記得一起載那個 helper，
+// 忘了就 ReferenceError——把不變量放在同一個函式裡，就不會有人漏掉它。
 function sanitizeClassesForViewer_(classes, roles) {
-  return (classes || []).map(function (c) {
+  return (classes || []).map(function (c0) {
+    let c = c0;
+    if (c && c.tutors && c.tutors.length) {
+      c = Object.assign({}, c0);
+      c.tutors = c0.tutors.map(function (t) {
+        if (!t || t.phone === undefined) return t;
+        const t2 = Object.assign({}, t);
+        delete t2.phone;
+        return t2;
+      });
+    }
     if (!c) return c;
     if (roles && roles.isAdmin === true) return c;
     const isTutor = !!roles && (roles.tutorOf || []).indexOf(c.id) !== -1;
@@ -2654,8 +2674,131 @@ function projectClassForDeptRoster_(cls) {
     requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
     graduatedSemester: cls.graduatedSemester || null,
     active: cls.active !== false,
-    tutors: (cls.tutors || []).map(function (t) { return { name: (t && t.name) || '', email: (t && t.email) || '' }; }),
+    // phone（導師手機）**只在這條通道出現**：bootstrap 的 classes 是每個登入者都拿得到的，
+    // 手機放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會把它整個拔掉（見該函式）。
+    tutors: (cls.tutors || []).map(function (t) {
+      return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+    }),
   };
+}
+
+// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填手機）。
+// 姓名必填，email/手機選填。手機是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
+// 名冊上會有「0912-345-678」「(08)7703202#1234」這類寫法，硬要正規化只會逼人填假的。
+function normalizeDeptRosterTutors_(tutors) {
+  if (!Array.isArray(tutors)) return { ok: false, error: 'tutors must be an array' };
+  if (tutors.length > 10) return { ok: false, error: 'too many tutors (max 10)' };
+  const out = [];
+  for (let i = 0; i < tutors.length; i++) {
+    const t = tutors[i] || {};
+    const name = String(t.name == null ? '' : t.name).trim();
+    if (!name) return { ok: false, error: '第 ' + (i + 1) + ' 位導師沒有姓名' };
+    if (name.length > 20) return { ok: false, error: '導師姓名過長：' + name };
+    if (!/^[A-Za-z0-9一-鿿·．\s]{1,20}$/.test(name)) return { ok: false, error: '導師姓名含不允許的字元：' + name };
+    const email = String(t.email == null ? '' : t.email).trim().toLowerCase();
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
+    if (email.length > 100) return { ok: false, error: 'email 過長' };
+    const phone = String(t.phone == null ? '' : t.phone).trim();
+    if (phone && !/^[0-9+\-()#\s]{1,20}$/.test(phone)) return { ok: false, error: '電話格式不正確（只接受數字與 + - ( ) # 空白）：' + phone };
+    out.push({ name: name, email: email, phone: phone });
+  }
+  return { ok: true, tutors: out };
+}
+
+// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含手機）。
+// 刻意不開放的欄位：deptId（不能把班搬去別系）、requiredMeetingOverride／graduatedSemester
+// （應繳份數與畢業狀態是中心的事）、uploadWhitelist、suggestedTutors。
+// 既有班級一律先確認「它現在就屬於允許的系所」才准動——不然帶著別系的 classId 就能改到別系。
+function deptRosterUpsertClassAction_(params, ctx, userEmail) {
+  const entry = params.class || {};
+  const tutorsRes = normalizeDeptRosterTutors_(entry.tutors);
+  if (!tutorsRes.ok) throw new Error(tutorsRes.error);
+  const className = String(entry.name == null ? '' : entry.name).trim();
+  if (!isValidClassName_(className)) throw new Error('invalid class name: ' + className);
+  const displayName = String(entry.displayName == null ? '' : entry.displayName).trim().slice(0, 40);
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, entry.deptId, departments);
+    if (!scope.ok) throw new Error(scope.error);
+    const deptId = scope.deptIds.length === 1 ? scope.deptIds[0] : String(entry.deptId || '').trim();
+    if (!deptId || scope.deptIds.indexOf(deptId) === -1) throw new Error('forbidden');
+    const dept = departments.filter(function (d) { return d && d.id === deptId; })[0];
+
+    const now = new Date().toISOString();
+    let next = classes.slice();
+    let target = null;
+
+    if (entry.id) {
+      const idx = next.findIndex(function (c) { return c && c.id === entry.id; });
+      if (idx === -1) throw new Error('class not found: ' + entry.id);
+      const cur = next[idx];
+      // 現況必須落在授權範圍內；已軟刪除的不給改（要先由 admin 復原）。
+      if (scope.deptIds.indexOf(cur.deptId) === -1) throw new Error('forbidden');
+      if (cur.deleted === true) throw new Error('class deleted: ' + cur.id);
+      // 撞名檢查：同系不得有兩個同班名（班級身分＝(deptId, name)）。
+      const clash = next.filter(function (c) {
+        return c && c.id !== cur.id && c.deptId === deptId && c.name === className && c.deleted !== true;
+      })[0];
+      if (clash) throw new Error('class name already exists: ' + className);
+      target = Object.assign({}, cur, {
+        name: className, displayName: displayName || cur.displayName || className,
+        tutors: tutorsRes.tutors, updatedAt: now, updatedBy: userEmail,
+      });
+      next[idx] = target;
+    } else {
+      const clash = next.filter(function (c) {
+        return c && c.deptId === deptId && c.name === className && c.deleted !== true;
+      })[0];
+      if (clash) throw new Error('class name already exists: ' + className);
+      const fused = displayName || fuseClassDisplayName_(className, dept ? dept.name : deptId, null,
+        tutorsRes.tutors.length ? tutorsRes.tutors[0].name : undefined);
+      target = {
+        id: uniqueClassId_(deptId + '_' + slugifyDeptId_(className), next), name: className, deptId: deptId,
+        systemId: null, displayName: fused,
+        requiredMeetingOverride: null, tutors: tutorsRes.tutors, suggestedTutors: [],
+        dualApprovalMode: 'any', uploadWhitelist: [], active: true,
+        createdAt: now, createdBy: userEmail,
+      };
+      next.push(target);
+    }
+
+    writeJsonPath_('classes.json', next, ctx);
+    appendAuditLog_(ctx, {
+      action: entry.id ? 'deptRosterUpdateClass' : 'deptRosterCreateClass',
+      by: userEmail, targetId: target.id, at: now,
+    });
+    return { class: projectClassForDeptRoster_(target) };
+  });
+}
+
+// deptRosterDeleteClass：系辦助理刪除自己系的班級。走**軟刪除**（deleted:true 墓碑），
+// 與系統其他六類實體一致——紀錄與統計靠 classId 關聯，硬刪會讓歷史斷鏈。
+function deptRosterDeleteClassAction_(params, ctx, userEmail) {
+  const classId = String(params.classId || '').trim();
+  if (!classId) throw new Error('classId required');
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, null, departments);
+    if (!scope.ok) throw new Error(scope.error);
+
+    const idx = classes.findIndex(function (c) { return c && c.id === classId; });
+    if (idx === -1) throw new Error('class not found: ' + classId);
+    if (scope.deptIds.indexOf(classes[idx].deptId) === -1) throw new Error('forbidden');
+
+    const now = new Date().toISOString();
+    const next = classes.slice();
+    next[idx] = Object.assign({}, next[idx], { deleted: true, deletedAt: now, deletedBy: userEmail });
+    writeJsonPath_('classes.json', next, ctx);
+    appendAuditLog_(ctx, { action: 'deptRosterDeleteClass', by: userEmail, targetId: classId, at: now });
+    return { classId: classId, deleted: true };
+  });
 }
 
 // deptRosterGet：系辦助理（或 admin）讀自己系的名冊。唯讀，Phase 1 的全部功能。

@@ -167,7 +167,7 @@ test('🔒 班級投影只給名冊欄位：uploadWhitelist / suggestedTutors �
   });
   assert.equal('uploadWhitelist' in out, false);
   assert.equal('suggestedTutors' in out, false);
-  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com' }]);
+  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com', phone: '' }]);
   assert.equal(out.displayName, '四農園一A');
   assert.equal(out.active, true);
 });
@@ -185,4 +185,50 @@ test('班級投影：缺欄位時給明確預設值（displayName 退回 name、
 test('班級投影：active=false 照實回報（助理要知道班被停用了）', () => {
   const S = makeSandbox();
   assert.equal(S.projectClassForDeptRoster_({ id: 'x', name: 'n', deptId: 'd', active: false }).active, false);
+});
+
+// ── Phase 2：導師手機與編輯權限 ───────────────────────────────────────────────
+function makeSandbox2() {
+  return load([
+    'normalizeDeptRosterTutors_', 'sanitizeClassesForViewer_', 'projectClassForDeptRoster_',
+  ], {});
+}
+
+test('導師名單：姓名必填、email/手機選填，回傳三個欄位都在', () => {
+  const S = makeSandbox2();
+  const r = S.normalizeDeptRosterTutors_([{ name: '陳美惠', email: 'A@X.COM', phone: '0912-345-678' }, { name: '王小明' }]);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: 'a@x.com', phone: '0912-345-678' });
+  assert.deepEqual(r.tutors[1], { name: '王小明', email: '', phone: '' });
+});
+
+test('導師名單：沒姓名、email 格式錯、電話含不允許字元、人數超過 10 → 拒絕', () => {
+  const S = makeSandbox2();
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: '  ' }]).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', email: 'not-an-email' }]).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', phone: '0912<script>' }]).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_(new Array(11).fill({ name: 'A' })).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_('nope').ok, false);
+});
+
+test('🔒 bootstrap 的 classes 一律不含 phone——連 admin 也一樣（無例外的不變量）', () => {
+  const S = makeSandbox2();
+  const classes = [{
+    id: 'c1', deptId: 'd', name: 'n', tutors: [{ name: '陳美惠', email: 'a@x.com', phone: '0912345678' }],
+  }];
+  [{ isAdmin: true, tutorOf: [] }, { isAdmin: false, tutorOf: ['c1'] }, { isAdmin: false, tutorOf: [] }].forEach(function (roles) {
+    const out = S.sanitizeClassesForViewer_(classes, roles);
+    assert.equal('phone' in out[0].tutors[0], false, '角色 ' + JSON.stringify(roles) + ' 拿到了 phone');
+    assert.equal(out[0].tutors[0].name, '陳美惠');
+  });
+  // 原始物件不可被就地修改（深拷貝）
+  assert.equal(classes[0].tutors[0].phone, '0912345678');
+});
+
+test('deptRosterGet 的投影**要**帶 phone（那是唯一看得到手機的通道）', () => {
+  const S = makeSandbox2();
+  const out = S.projectClassForDeptRoster_({
+    id: 'c1', name: 'n', deptId: 'd', tutors: [{ name: '陳美惠', phone: '0912345678' }],
+  });
+  assert.equal(out.tutors[0].phone, '0912345678');
 });
