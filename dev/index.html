@@ -2387,8 +2387,78 @@ function renderAdminDeptAssistants() {
         '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
     }).join('') : '<tr><td colspan="6"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
     '</tbody></table></div>' +
-    '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button></div>';
+    '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button> ' +
+    '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button></div>';
 }
+
+// 批次匯入白名單：37 個系所手 key 太痛苦，而名單本身是個資、不能進 repo，
+// 所以做成「貼上 JSON」——資料留在使用者手上，只在匯入當下經過瀏覽器。
+// 同一個 email 出現在多列會自動合併 deptIds（白名單以 email 為鍵），規則與
+// server/scripts/upsert-dept-assistants.js 的 mergeByEmail 一致。
+function mergeDeptAssistantRows(rows) {
+  const byEmail = new Map();
+  rows.forEach(function (r, i) {
+    const email = String((r && r.email) || '').trim().toLowerCase();
+    if (!email) throw new Error('第 ' + (i + 1) + ' 列缺 email');
+    const deptId = String((r && r.deptId) || '').trim();
+    if (!byEmail.has(email)) {
+      byEmail.set(email, { email: email, name: String(r.name || '').trim(), ext: String(r.ext || '').trim(), deptIds: [] });
+    }
+    const e = byEmail.get(email);
+    // 支援兩種輸入形狀：一列一個 deptId，或一列帶 deptIds 陣列
+    const ids = deptId ? [deptId] : (Array.isArray(r.deptIds) ? r.deptIds : []);
+    ids.forEach(function (id) { if (id && e.deptIds.indexOf(id) === -1) e.deptIds.push(String(id).trim()); });
+  });
+  return Array.from(byEmail.values());
+}
+
+function openDeptAssistantBulkForm() {
+  openModal('批次匯入系辦助理白名單',
+    '<p class="field-hint">貼上 JSON 陣列，每列 <code>{"email","name","ext","deptId"}</code>' +
+    '（或用 <code>deptIds:[...]</code> 一次帶多系）。同一個 email 出現多次會自動合併系所。</p>' +
+    '<div class="field"><textarea id="deptasst-bulk-json" rows="10" style="width:100%; font-family:monospace; font-size:.8rem;" ' +
+    'placeholder=\'[{"email":"plant@mail.npust.edu.tw","name":"羅芬芳","ext":"6325","deptId":"農園系"}]\'></textarea></div>' +
+    '<div id="deptasst-bulk-result"></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="button" class="btn btn-primary" data-action="deptasst-bulk-run">開始匯入</button></div>');
+}
+
+document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="deptasst-bulk"]')) { openDeptAssistantBulkForm(); return; }
+  const run = e.target.closest('[data-action="deptasst-bulk-run"]');
+  if (!run) return;
+  const resultEl = $('deptasst-bulk-result');
+  let entries;
+  try {
+    const rows = JSON.parse($('deptasst-bulk-json').value);
+    if (!Array.isArray(rows)) throw new Error('最外層必須是陣列');
+    entries = mergeDeptAssistantRows(rows);
+  } catch (err) {
+    resultEl.innerHTML = '<div class="import-error-box"><div class="import-error-title">JSON 解析失敗</div>' +
+      escapeHtml(err.message) + '</div>';
+    return;
+  }
+  try {
+    await withBtnPending(run, async function () {
+      const failed = [];
+      let ok = 0;
+      // 逐筆送：單筆失敗（例如系所名對不上）不該讓整批停下來，且錯誤要逐筆看得到。
+      for (const entry of entries) {
+        try {
+          const res = await proxyCall('adminUpsertDeptAssistant', { deptAssistant: entry });
+          bootstrapData.deptAssistants = res.deptAssistants;
+          ok++;
+        } catch (err) { failed.push({ email: entry.email, error: err.message }); }
+      }
+      resultEl.innerHTML = '<p class="field-hint">完成：成功 ' + ok + ' 筆、失敗 ' + failed.length + ' 筆。</p>' +
+        (failed.length ? '<div class="import-error-box"><div class="import-error-title">失敗清單</div><ul>' +
+          failed.map(function (f) { return '<li>' + escapeHtml(f.email) + '：' + escapeHtml(f.error) + '</li>'; }).join('') +
+          '</ul></div>' : '');
+      showToast('匯入完成：成功 ' + ok + ' 筆', failed.length ? 'info' : 'success');
+      renderAdminDeptAssistants();
+    });
+  } catch (err) { showToast('匯入失敗：' + err.message, 'error'); }
+});
 
 function openDeptAssistantForm(email) {
   const list = bootstrapData.deptAssistants || [];

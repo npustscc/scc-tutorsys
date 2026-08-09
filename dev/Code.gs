@@ -484,6 +484,86 @@ function adminLocalAccountsAction_(params, ctx, userEmail) {
   throw new Error('unknown op: ' + op);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 維運函式（只能由專案擁有者經 Apps Script API／編輯器呼叫）─────────────────
+// 這幾支**不在 doPost 的 switch 裡**，網頁請求打不到；它們的用途是讓維護者從 comanage
+// 用 `clasp run` 做灌資料、對帳這類一次性工作，不必手動點編輯器。
+//
+// 安全性：呼叫者必須是 BOOTSTRAP_ADMINS 之一（Apps Script API 以呼叫者身分執行，
+// manifest 的 executionApi.access 是 MYSELF）。能呼叫這些的人本來就能直接改這份程式碼，
+// 所以這不是新的攻擊面；但仍然明確擋一道，避免哪天 manifest 被改寬。
+function requireMaintenanceOwner_() {
+  let who = '';
+  try { who = Session.getEffectiveUser().getEmail() || ''; } catch (e) { who = ''; }
+  if (typeof BOOTSTRAP_ADMINS === 'undefined' || BOOTSTRAP_ADMINS.indexOf(who) === -1) {
+    throw new Error('maintenance: 僅限專案擁有者（目前身分：' + (who || '(未知)') + '）');
+  }
+  return who;
+}
+
+// 狀態總覽：確認密鑰有沒有設好、各資料表有幾筆。**不回傳任何密鑰內容**，只回布林。
+function maintenanceStatus() {
+  requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  return JSON.stringify({
+    root: ROOT_FOLDER_ID,
+    hasSessionSecret: !!getSessionSecret_(),
+    hasPasswordPepper: !!getPasswordPepper_(),
+    passwordIterations: PASSWORD_ITERATIONS_,
+    colleges: readJsonSafe_('colleges.json', ctx, []).length,
+    departments: readJsonSafe_('departments.json', ctx, []).length,
+    classes: readJsonSafe_('classes.json', ctx, []).length,
+    deptAssistants: (config.deptAssistants || []).length,
+    localAccounts: Object.keys(accounts).length,
+  });
+}
+
+// 批次寫入系辦助理白名單。輸入 JSON 陣列字串 [{email,name,ext,deptIds:[]}...]，
+// 走與 adminUpsertDeptAssistant 相同的驗證（deptIds 必須是現存且啟用的系所，錯一個整筆拒絕）。
+function maintenanceUpsertDeptAssistants(json) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const rows = JSON.parse(json || '[]');
+  const result = { ok: 0, failed: [] };
+  rows.forEach(function (r) {
+    try {
+      adminUpsertDeptAssistantAction_({ deptAssistant: r }, ctx, who);
+      result.ok++;
+    } catch (e) {
+      result.failed.push({ email: r && r.email, error: e.message });
+    }
+  });
+  return JSON.stringify(result);
+}
+
+// 依白名單的分機建立/重設本機登入帳號（同 adminLocalAccounts 的 createOrReset）。
+// 不帶 email 就是「全部還沒有帳號的都建」。
+function maintenanceResetLocalAccounts(emailsCsv) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const only = String(emailsCsv || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  const targets = (config.deptAssistants || []).filter(function (a) {
+    if (!a || a.deleted === true) return false;
+    const e = String(a.email || '').toLowerCase();
+    if (only.length) return only.indexOf(e) !== -1;
+    return !accounts[e] && !!initialPasswordFromExtGas_(a.ext);
+  });
+  const result = { ok: 0, failed: [] };
+  targets.forEach(function (a) {
+    try {
+      adminLocalAccountsAction_({ op: 'createOrReset', email: a.email }, ctx, who);
+      result.ok++;
+    } catch (e) {
+      result.failed.push({ email: a.email, error: e.message });
+    }
+  });
+  return JSON.stringify(result);
+}
+
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
 // 登出時把 revokedBefore[email] 設為當下秒數；驗證時 iat < revokedBefore 一律拒絕，
 // 等於讓該帳號「登出前簽發的所有 token（不分裝置）」全部失效。存 Script Properties 單一 JSON，
