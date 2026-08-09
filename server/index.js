@@ -131,7 +131,8 @@ function validateNewPassword_(pw) {
   const s = String(pw == null ? '' : pw);
   if (s.length < MIN_PASSWORD_LEN) return '新密碼至少 ' + MIN_PASSWORD_LEN + ' 個字元';
   if (s.length > 200) return '新密碼過長';
-  if (/^\d{1,6}$/.test(s)) return '新密碼不能只有數字（分機那種形式全校查得到）';
+  // 全數字一律擋（不是只擋短的）——初始密碼是 4 碼分機，換成 8 碼數字並沒有離開那個形狀。
+  if (/^\d+$/.test(s)) return '新密碼不能只有數字（分機那種形式全校查得到）';
   return null;
 }
 
@@ -265,8 +266,10 @@ function startServer(config) {
   // 回應**永遠不含 hash**，只回「有沒有帳號、是否停用、是否還在用初始密碼」。
   function requireAdminBySession_(body) {
     const token = String((body && body.sessionToken) || '');
-    const v = host.sandbox.verifySessionToken_(token);
-    if (!v || !v.ok || !v.email) return { ok: false, error: 'Session expired' };
+    // verifySessionToken_ 直接回 email 字串（驗不過回 null），不是 {ok,email} 物件。
+    const verifiedEmail = host.sandbox.verifySessionToken_(token);
+    if (!verifiedEmail) return { ok: false, error: 'Session expired' };
+    const v = { email: verifiedEmail };
     const ctx = { root: host.rootFolderId };
     const cfg = host.sandbox.readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
     const departments = host.sandbox.readJsonSafe_('departments.json', ctx, []);

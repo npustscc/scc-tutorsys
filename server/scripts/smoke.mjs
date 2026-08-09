@@ -158,6 +158,50 @@ async function main() {
     const nowSec = Math.floor(Date.now() / 1000);
     check('5 登入成功取得 token/exp/name', !!adminToken && Number(r.data.exp) > nowSec && r.data.name === '測試管理員', JSON.stringify(r));
 
+    // 5b. 帳號只打 @ 之前那段也能登入（resolveLoginEmail_）；local-part 對不上的一律失敗。
+    r = await login(base, 'admin', 'adminpass123');
+    check('5b 只打 local-part 也能登入', r.success === true && r.data.email === 'admin@test.local', JSON.stringify(r));
+    r = await login(base, 'nosuchlocalpart', 'adminpass123');
+    check('5c 不存在的 local-part → 帳號或密碼錯誤', r.success === false && r.error === '帳號或密碼錯誤', JSON.stringify(r));
+
+    // 5d. 改密碼：新密碼政策擋弱密碼、目前密碼錯要擋、成功後舊密碼失效新密碼可用。
+    const chpw = async function (body) {
+      const res = await fetch(base + '/change-password', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return res.json();
+    };
+    r = await chpw({ email: 'admin@test.local', currentPassword: 'adminpass123', newPassword: '1234' });
+    check('5d 新密碼太短 → 被政策擋下', r.success === false && /至少/.test(r.error || ''), JSON.stringify(r));
+    r = await chpw({ email: 'admin@test.local', currentPassword: 'adminpass123', newPassword: '12345678' });
+    check('5e 新密碼純數字 → 被政策擋下', r.success === false && /只有數字/.test(r.error || ''), JSON.stringify(r));
+    r = await chpw({ email: 'admin@test.local', currentPassword: 'WRONG', newPassword: 'brandnewpass1' });
+    check('5f 目前密碼錯 → 拒絕', r.success === false && /目前密碼錯誤/.test(r.error || ''), JSON.stringify(r));
+    await sleep(1600); // 上一步算一次失敗，避免觸發節流影響後續
+    r = await chpw({ email: 'admin@test.local', currentPassword: 'adminpass123', newPassword: 'brandnewpass1' });
+    check('5g 改密碼成功', r.success === true, JSON.stringify(r));
+    r = await login(base, 'admin@test.local', 'adminpass123');
+    check('5h 舊密碼失效', r.success === false, JSON.stringify(r));
+    await sleep(1600);
+    r = await login(base, 'admin@test.local', 'brandnewpass1');
+    check('5i 新密碼可登入，且 mustChangePassword 已清除',
+      r.success === true && r.data.mustChangePassword === false, JSON.stringify(r));
+    const adminToken2 = r.data && r.data.sessionToken;
+
+    // 5j. /admin/accounts：admin 可列出、非 admin 一律 admin only、壞 token 一律拒絕。
+    const acct = async function (body) {
+      const res = await fetch(base + '/admin/accounts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      return res.json();
+    };
+    r = await acct({ op: 'list', sessionToken: adminToken2 });
+    check('5j admin 可列出系辦助理帳號', r.success === true && Array.isArray(r.data.accounts), JSON.stringify(r).slice(0, 200));
+    r = await acct({ op: 'list', sessionToken: 'garbage.token' });
+    check('5k 壞 token 打 /admin/accounts → 拒絕', r.success === false, JSON.stringify(r));
+    r = await acct({ op: 'createOrReset', email: 'notinwhitelist@test.local', sessionToken: adminToken2 });
+    check('5l 不在白名單的 email 不給建帳號', r.success === false && /白名單/.test(r.error || ''), JSON.stringify(r));
+
     // 6. ping（sessionToken）→ email 正確。
     r = await call(base, { action: 'ping', rootFolderId: rootFolderId, sessionToken: adminToken });
     check('6 ping 帶 sessionToken', r.success === true && r.data.email === 'admin@test.local', JSON.stringify(r));
