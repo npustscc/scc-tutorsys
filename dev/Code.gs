@@ -846,56 +846,6 @@ function maintenanceResetLocalAccounts(emailsCsv) {
   return out;
 }
 
-// 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
-// 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
-// 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。
-function maintenanceSeedTestAssistant() {
-  const who = requireMaintenanceOwner_();
-  const ctx = { root: ROOT_FOLDER_ID };
-  const departments = readJsonSafe_('departments.json', ctx, []);
-  const dept = departments.filter(function (d) { return d && d.active !== false && d.deleted !== true; })[0];
-  if (!dept) { const e = JSON.stringify({ error: '這個環境沒有任何啟用的系所' }); Logger.log(e); return e; }
-  adminUpsertDeptAssistantAction_({
-    deptAssistant: { email: 'test-assistant@example.com', name: '測試系辦助理', ext: '9999', deptIds: [dept.id] },
-  }, ctx, who);
-  adminLocalAccountsAction_({ op: 'createOrReset', email: 'test-assistant@example.com' }, ctx, who);
-  const out = JSON.stringify({
-    seeded: 'test-assistant@example.com', dept: dept.id,
-    帳號: 'test-assistant（或完整 email）', 初始密碼: '9999',
-    note: '首次登入會強制改密碼；啟用期限 ' + ACTIVATION_WINDOW_DAYS_ + ' 天',
-  });
-  Logger.log(out);
-  return out;
-}
-
-// 依白名單的分機建立/重設本機登入帳號（同 adminLocalAccounts 的 createOrReset）。
-// 不帶 email 就是「全部還沒有帳號的都建」。
-function maintenanceResetLocalAccounts(emailsCsv) {
-  const who = requireMaintenanceOwner_();
-  const ctx = { root: ROOT_FOLDER_ID };
-  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
-  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
-  const only = String(emailsCsv || '').split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
-  const targets = (config.deptAssistants || []).filter(function (a) {
-    if (!a || a.deleted === true) return false;
-    const e = String(a.email || '').toLowerCase();
-    if (only.length) return only.indexOf(e) !== -1;
-    return !accounts[e] && !!initialPasswordFromExtGas_(a.ext);
-  });
-  const result = { ok: 0, failed: [] };
-  targets.forEach(function (a) {
-    try {
-      adminLocalAccountsAction_({ op: 'createOrReset', email: a.email }, ctx, who);
-      result.ok++;
-    } catch (e) {
-      result.failed.push({ email: a.email, error: e.message });
-    }
-  });
-  const out = JSON.stringify(result);
-  Logger.log(out);
-  return out;
-}
-
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
 // 登出時把 revokedBefore[email] 設為當下秒數；驗證時 iat < revokedBefore 一律拒絕，
 // 等於讓該帳號「登出前簽發的所有 token（不分裝置）」全部失效。存 Script Properties 單一 JSON，
