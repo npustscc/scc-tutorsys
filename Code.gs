@@ -576,6 +576,86 @@ function maintenanceUpsertDeptAssistants(json) {
   return out;
 }
 
+// 幫管理員本人開一個**帳密**登入帳號。
+// 為什麼需要：登入頁把 Google 登入收起來之後（它只剩中心人員在用，擺前面會誤導系辦助理），
+// 管理員仍要有一條不依賴 Google 的路進後台——尤其 Google 那條路若哪天出狀況，
+// 這就是 break-glass 入口。密碼隨機產生並 log 出來，只此一次，請立刻自行更改。
+function maintenanceCreateAdminAccount() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  // 24 字元隨機密碼（含大小寫與數字，符合「至少 8 字、不得全數字」的政策）
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 24; i++) pw += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  const hash = hashPasswordGas_(pw);   // 慢的一步留在鎖外
+  withLock_(function () {
+    const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+    accounts[who] = Object.assign({}, accounts[who] || {}, {
+      name: '系統管理員', hash: hash, disabled: false,
+      mustChangePassword: false,   // 隨機長密碼，不必強迫改；要改可用登入頁的改密碼流程
+    });
+    writeJsonPath_('localAccounts.json', accounts, ctx);
+  });
+  appendAuditLog_(ctx, { action: 'maintenanceCreateAdminAccount', by: who, targetId: who, at: new Date().toISOString() });
+  const out = JSON.stringify({
+    帳號: who, 密碼: pw,
+    提醒: '這個密碼只顯示這一次，請立刻存到密碼管理器。它是不依賴 Google 的後台入口。',
+  });
+  Logger.log(out);
+  return out;
+}
+
+// importer 專用的服務帳號。校內自架站的排程要來拉名冊，需要一組憑證——
+// **刻意不用 admin**：importer 只需要「讀得到全部系所的名冊」，而那正好是
+// 「系辦助理掛滿所有系所」的權限。用 admin 等於把後台帳號管理、config、稽核一起交出去。
+//
+// 與一般助理帳號的兩個差異，都是因為它是服務帳號而非真人帳號：
+//   - mustChangePassword=false（沒有人會去改它）
+//   - 不設 activationExpiresAt（14 天後過期會讓排程無聲無息地停掉）
+// 要換密碼就再執行一次本函式，舊密碼立即失效。
+const IMPORTER_ACCOUNT_EMAIL_ = 'importer@heartnpust.tw';
+
+function maintenanceCreateImporterAccount() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const allDeptIds = departments.filter(function (d) {
+    return d && d.active !== false && d.deleted !== true;
+  }).map(function (d) { return d.id; });
+  if (!allDeptIds.length) {
+    const e = JSON.stringify({ error: '這個環境沒有任何啟用的系所，先把名冊灌進來再跑' });
+    Logger.log(e);
+    return e;
+  }
+
+  adminUpsertDeptAssistantAction_({
+    deptAssistant: { email: IMPORTER_ACCOUNT_EMAIL_, name: '校內同步服務（importer）', ext: '', deptIds: allDeptIds },
+  }, ctx, who);
+
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  let pw = '';
+  for (let i = 0; i < 32; i++) pw += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+  const hash = hashPasswordGas_(pw);
+  withLock_(function () {
+    const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+    accounts[IMPORTER_ACCOUNT_EMAIL_] = {
+      name: '校內同步服務（importer）', hash: hash, disabled: false,
+      mustChangePassword: false, activationExpiresAt: null,
+    };
+    writeJsonPath_('localAccounts.json', accounts, ctx);
+  });
+  appendAuditLog_(ctx, { action: 'maintenanceCreateImporterAccount', by: who, targetId: IMPORTER_ACCOUNT_EMAIL_, at: new Date().toISOString() });
+
+  const out = JSON.stringify({
+    帳號: IMPORTER_ACCOUNT_EMAIL_, 密碼: pw, 涵蓋系所數: allDeptIds.length,
+    權限: '等同「掛滿所有系所的系辦助理」——讀寫名冊，但不是 admin：碰不到帳號管理、config、稽核',
+    用途: '寫進 scc-server 的 server/.env（GAS_ADMIN_EMAIL/GAS_ADMIN_PASSWORD），給排程 importer 用',
+    輪替: '再執行一次本函式即產生新密碼，舊的立即失效',
+  });
+  Logger.log(out);
+  return out;
+}
+
 // ── 名冊搬運：自架版 → GAS Drive ─────────────────────────────────────────────
 // 為什麼是「上傳檔案 + 零參數函式」這種形狀：
 //   - GAS 編輯器只能執行**零參數**函式，所以資料不能用參數傳。
@@ -599,16 +679,66 @@ function maintenanceImportFromDriveJson() {
   const who = requireMaintenanceOwner_();
   const ctx = { root: ROOT_FOLDER_ID };
   let payload;
+  let sourceNote = '根資料夾';
   try {
     payload = readJson_({ path: 'migration.json' }, ctx);
-  } catch (e) {
-    const err = JSON.stringify({ error: '找不到 migration.json（請先把它上傳到本環境的 Drive 根資料夾）' });
+  } catch (eRoot) {
+    // 不在根資料夾 → 搜尋整個雲端硬碟。實務上最常見的原因是上傳時用了另一個 Google 帳號、
+    // 或拖到別的資料夾；檔案還是同一份，沒必要為了位置讓人重來一次。
+    // 找到多份就取最後修改的那份，並把來源位置與時間一起 log 出來（免得默默吃到舊檔）。
+    try {
+      const found = driveGet_('files', {
+        q: "name='migration.json' and trashed=false",
+        fields: 'files(id,name,modifiedTime,parents)', orderBy: 'modifiedTime desc', pageSize: '10',
+      });
+      if (found.files && found.files.length) {
+        const f = found.files[0];
+        let parentName = '(未知)';
+        try {
+          const p = driveGet_('files/' + (f.parents && f.parents[0]), { fields: 'name' });
+          parentName = p.name || parentName;
+        } catch (e3) { /* 取不到父資料夾名稱不影響匯入 */ }
+        const resDl = UrlFetchApp.fetch(
+          'https://www.googleapis.com/drive/v3/files/' + f.id + '?alt=media&supportsAllDrives=true',
+          { headers: { Authorization: 'Bearer ' + tok_() }, muteHttpExceptions: true }
+        );
+        if (resDl.getResponseCode() >= 400) throw new Error('下載 migration.json 失敗');
+        payload = JSON.parse(resDl.getContentText());
+        sourceNote = '雲端硬碟其他位置：資料夾「' + parentName + '」，最後修改 ' + f.modifiedTime +
+          (found.files.length > 1 ? '（共找到 ' + found.files.length + ' 份，取最新）' : '');
+        Logger.log('注意：migration.json 不在根資料夾，改用 ' + sourceNote);
+      }
+    } catch (eSearch) { /* 落到下面的錯誤回報 */ }
+  }
+  if (!payload) {
+    // 找不到就**直接列出根資料夾實際有什麼**——「找不到」這種錯誤最沒用的形式就是
+    // 只說找不到，讓人去猜是傳錯資料夾還是名字不對。一次執行就把真相印出來。
+    let listing = [];
+    try {
+      const res = driveGet_('files', {
+        q: "'" + ctx.root + "' in parents and trashed=false",
+        fields: 'files(name,mimeType)', pageSize: '100', orderBy: 'name',
+      });
+      listing = (res.files || []).map(function (f) {
+        return f.name + (f.mimeType === 'application/vnd.google-apps.folder' ? '/' : '');
+      });
+    } catch (e2) { listing = ['(列出根資料夾也失敗：' + e2.message + ')']; }
+    const err = JSON.stringify({
+      error: '找不到 migration.json',
+      rootFolderId: ROOT_FOLDER_ID,
+      根資料夾實際內容: listing,
+      提示: '請確認檔案是上傳到上面這個 ID 的資料夾，且檔名正好是 migration.json（結尾有 / 的是子資料夾）',
+    });
     Logger.log(err);
     return err;
   }
 
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const result = { source: payload.source || '(未標示)', generatedAt: payload.generatedAt || '(未標示)', wrote: [], skipped: [], backups: [] };
+  const result = {
+    讀取來源: sourceNote,
+    source: payload.source || '(未標示)', generatedAt: payload.generatedAt || '(未標示)',
+    wrote: [], skipped: [], backups: [],
+  };
   const files = payload.files || {};
 
   MIGRATION_ALLOWED_FILES_.forEach(function (name) {
@@ -635,6 +765,83 @@ function maintenanceImportFromDriveJson() {
 
   appendAuditLog_(ctx, { action: 'maintenanceImportFromDriveJson', by: who, targetId: 'migration.json', at: new Date().toISOString() });
   const out = JSON.stringify(result);
+  Logger.log(out);
+  return out;
+}
+
+// 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
+// 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
+// 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。
+function maintenanceSeedTestAssistant() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const dept = departments.filter(function (d) { return d && d.active !== false && d.deleted !== true; })[0];
+  if (!dept) { const e = JSON.stringify({ error: '這個環境沒有任何啟用的系所' }); Logger.log(e); return e; }
+  adminUpsertDeptAssistantAction_({
+    deptAssistant: { email: 'test-assistant@example.com', name: '測試系辦助理', ext: '9999', deptIds: [dept.id] },
+  }, ctx, who);
+  adminLocalAccountsAction_({ op: 'createOrReset', email: 'test-assistant@example.com' }, ctx, who);
+  const out = JSON.stringify({
+    seeded: 'test-assistant@example.com', dept: dept.id,
+    帳號: 'test-assistant（或完整 email）', 初始密碼: '9999',
+    note: '首次登入會強制改密碼；啟用期限 ' + ACTIVATION_WINDOW_DAYS_ + ' 天',
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 依白名單的分機批次建立/重設本機登入帳號。
+//
+// **刻意不重用 adminLocalAccountsAction_ 逐筆呼叫**：那樣每一筆都要重讀 config／departments／
+// classes.json（107 KB）、各自進一次鎖、各寫一次稽核，實測 47 筆會逼近 GAS 的 6 分鐘上限
+// （使用者 2026-08-10 實際卡住）。這裡改成「讀一次 → 全部算完 → 寫一次」：
+// 雜湊在鎖外算（47 × 約 0.5 秒），鎖裡只做一次讀檔、合併、寫檔。
+// 驗證條件與逐筆版完全一致（必須在白名單內、必須有可用的分機），只是攤平了 I/O。
+function maintenanceResetLocalAccounts(emailsCsv) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const existing = readJsonSafe_('localAccounts.json', ctx, {});
+  const only = String(emailsCsv || '').split(',').map(function (s2) { return s2.trim().toLowerCase(); }).filter(Boolean);
+
+  const targets = (config.deptAssistants || []).filter(function (a) {
+    if (!a || a.deleted === true) return false;
+    const e = String(a.email || '').toLowerCase();
+    if (only.length) return only.indexOf(e) !== -1;
+    return !existing[e];            // 不指名時只補「還沒有帳號」的，不動已改過密碼的人
+  });
+
+  const now = new Date();
+  const expires = new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString();
+  const prepared = [];
+  const skipped = [];
+  targets.forEach(function (a) {
+    const email = String(a.email || '').toLowerCase();
+    const pw = initialPasswordFromExtGas_(a.ext);
+    if (!pw) { skipped.push(email + '（白名單沒填分機）'); return; }
+    prepared.push({ email: email, name: a.name || '', hash: hashPasswordGas_(pw) });   // 雜湊在鎖外
+  });
+
+  withLock_(function () {
+    const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+    prepared.forEach(function (x) {
+      fresh[x.email] = Object.assign({}, fresh[x.email] || {}, {
+        name: x.name, hash: x.hash, disabled: false,
+        mustChangePassword: true, activationExpiresAt: expires,
+      });
+    });
+    writeJsonPath_('localAccounts.json', fresh, ctx);
+  });
+  appendAuditLog_(ctx, {
+    action: 'maintenanceResetLocalAccounts', by: who,
+    targetId: prepared.length + ' accounts', at: now.toISOString(),
+  });
+
+  const out = JSON.stringify({
+    建立或重設: prepared.length, 略過: skipped, 啟用期限: expires,
+    note: '初始密碼＝各自分機第一段數字；首次登入強制改密碼',
+  });
   Logger.log(out);
   return out;
 }
