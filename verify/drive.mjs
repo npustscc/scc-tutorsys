@@ -1166,6 +1166,52 @@ await flow('H', async () => {
     expect(h['系所'] === '森林系', '系所欄=' + h['系所']);
   });
   await shot(page, 'H-系辦助理帳號分頁（學院篩選）');
+
+  // ── 批次套用系所清冊：全名寫進 fullName、助理密碼＝系主任分機 ──
+  const SHEET_ROWS = [{ deptId: '森林系', fullName: '森林學系（全名）', ext: '7157' }];
+  await check('H', '批次套用系所清冊：預演不寫入，且算得出「建立 1、跳過已自訂密碼 1」', async () => {
+    const r = await apiCall('adminBulkApplyDeptSheet', { rows: SHEET_ROWS }, adminToken.token);
+    const s = (r.data || {}).summary || {};
+    evid['H-deptsheet-preview'] = JSON.stringify(s);
+    expect(s['模式'] === '預演（未寫入）', '模式=' + s['模式']);
+    expect(s['將建立帳號'] === 1, '應該要建 deptasst 的帳號：' + JSON.stringify(s));
+    expect(s['跳過已自訂密碼'] === 1, 'h-asst 已自行改過密碼，應被跳過：' + JSON.stringify(s));
+    // 預演真的沒寫：全名還沒出現
+    const boot = await apiCall('bootstrap', {}, adminToken.token);
+    const d = ((boot.data || {}).departments || []).find((x) => x.id === '森林系');
+    expect(!d.fullName, '預演竟然寫進去了：' + JSON.stringify(d));
+  });
+  await check('H', '套用後：fullName 進去了、**內部簡稱 name 不變**（班級顯示名的來源）', async () => {
+    const r = await apiCall('adminBulkApplyDeptSheet', { rows: SHEET_ROWS, apply: true }, adminToken.token);
+    expect(r.success === true, JSON.stringify(r).slice(0, 200));
+    const boot = await apiCall('bootstrap', {}, adminToken.token);
+    const d = ((boot.data || {}).departments || []).find((x) => x.id === '森林系');
+    evid['H-deptsheet-applied'] = JSON.stringify({ id: d.id, name: d.name, fullName: d.fullName });
+    expect(d.fullName === '森林學系（全名）', 'fullName=' + d.fullName);
+    expect(d.name === '森林系', '內部簡稱名被改掉了（會連帶弄壞班級顯示名）：' + d.name);
+  });
+  await check('H', '套用後：沒帳號的助理可用系主任分機登入；已自訂密碼的人不受影響', async () => {
+    const nw = await apiCall('localLogin', { email: 'deptasst@test.local', password: '7157' });
+    evid['H-deptsheet-login'] = JSON.stringify(nw.data && { has: !!nw.data.sessionToken, must: nw.data.mustChangePassword });
+    expect(nw.data && nw.data.sessionToken, '新密碼登不進去：' + JSON.stringify(nw).slice(0, 200));
+    expect(nw.data.mustChangePassword === true, '應要求首次登入改密碼');
+    const keep = await apiCall('localLogin', { email: 'h-asst', password: 'newpass-h1' });
+    expect(keep.data && keep.data.sessionToken, 'h-asst 自訂的密碼被清掉了：' + JSON.stringify(keep).slice(0, 200));
+  });
+  await check('H', '🔒 清冊有不存在的系所 → 整批拒絕（不做半套）', async () => {
+    const r = await apiCall('adminBulkApplyDeptSheet', {
+      rows: [{ deptId: '森林系', fullName: 'A', ext: '1' }, { deptId: '沒這個系', fullName: 'B', ext: '2' }],
+      apply: true,
+    }, adminToken.token);
+    expect(r.success === false && /找不到系所/.test(r.error || ''), '回應=' + JSON.stringify(r));
+    const boot = await apiCall('bootstrap', {}, adminToken.token);
+    const d = ((boot.data || {}).departments || []).find((x) => x.id === '森林系');
+    expect(d.fullName === '森林學系（全名）', '整批拒絕時第一列不該被寫入：' + d.fullName);
+  });
+  await check('H', '🔒 系辦助理打這個 action → admin only 拒絕', async () => {
+    const r = await apiCall('adminBulkApplyDeptSheet', { rows: SHEET_ROWS, apply: true }, deptAsstToken.token);
+    expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
+  });
 });
 
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════

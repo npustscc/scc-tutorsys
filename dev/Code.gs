@@ -131,6 +131,7 @@ function doPost(e) {
       case 'deptRosterDeleteClass':     result = withRosterAftercare_(deptRosterDeleteClassAction_(params, ctx, userEmail), ctx, userEmail); break;
       case 'deptRosterUpsertHead':      result = withRosterAftercare_(deptRosterUpsertHeadAction_(params, ctx, userEmail), ctx, userEmail); break;
       case 'adminBulkUpsertDeptHeads':  result = adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail); break;
+      case 'adminBulkApplyDeptSheet':   result = adminBulkApplyDeptSheetAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -3544,6 +3545,8 @@ function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
 
   const collegeName = {};
   (colleges || []).forEach(function (c) { if (c) collegeName[c.id] = c.name || c.id; });
+  // 對外一律顯示正式全名（fullName，中心的系所清冊）；沒填過就退回內部的簡稱名。
+  const deptLabel = function (d) { return (d && (d.fullName || d.name || d.id)) || ''; };
   const byDept = {};
   (classes || []).forEach(function (c) {
     if (!c || c.deleted === true) return;
@@ -3568,7 +3571,7 @@ function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
     });
 
     if (!list.length) {
-      t.rows.push([d.name || d.id, head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '']);
+      t.rows.push([deptLabel(d), head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '']);
     } else {
       list.forEach(function (c) {
         const state = [];
@@ -3579,7 +3582,7 @@ function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
         const rowsFor = tutors.length ? tutors : [null];
         rowsFor.forEach(function (tu, i) {
           t.rows.push([
-            i === 0 && clsStart === deptStart ? (d.name || d.id) : '',   // 系別只寫在該系第一列
+            i === 0 && clsStart === deptStart ? deptLabel(d) : '',       // 系別只寫在該系第一列
             i === 0 && clsStart === deptStart ? (head.name || '') : '',
             i === 0 && clsStart === deptStart ? (head.ext || '') : '',
             i === 0 ? (c.displayName || c.name) : '',                    // 班級只寫在該班第一列
@@ -3823,6 +3826,123 @@ function afterRosterChange_(ctx, deptId, userEmail, summary) {
   syncRosterSheetSafe_(ctx);
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 批次套用「系所全名 ＋ 系辦助理登入密碼」（來源：中心提供的系所清冊）─────────
+// 兩個發現決定了這裡的做法，都寫下來免得日後有人「簡化」掉：
+//
+// ① **全名存成新欄位 fullName，不改 department.name。**
+//    name 不只是顯示用：deptShortName_ 會把它去掉結尾的「系」當成班級顯示名的系簡稱
+//    （農園系→農園 → 四農園一A），classDisplayNameDeptOverride_ 也是用 name 當鍵
+//    （'材料工程系'→'材料'…）。把 name 換成「農園生產系」會讓之後每次匯入/改名產出
+//    「四農園生產一A」，並讓 7 個 canonical 覆寫全部失配。所以：
+//      name     = 內部命名規則的輸入（簡稱來源），維持現狀
+//      fullName = 對外顯示的正式全名（Sheet 的系別欄、選單、匯出、公文都用它）
+//
+// ② **密碼＝系主任分機，寫進白名單的 ext。**
+//    ext 這個欄位在本系統的定義就是「初始密碼的來源」（見 initialPasswordFromExtGas_），
+//    所以把它設成系主任分機，UI 顯示、匯出的「初始密碼」欄與實際登入密碼才會一致——
+//    只改雜湊不改 ext 會讓後台顯示一個打不開的號碼，是接電話的人最容易被害到的那種不一致。
+//
+// 預設是**預演**（apply!==true 只回計畫不寫入）。已自行改過密碼的帳號預設**跳過**
+// （2026-08-11 使用者剛被「重設為分機」清掉自訂密碼，那個坑不要再踩），
+// 真要一起重設得明確帶 force:true。
+function adminBulkApplyDeptSheetAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const rows = params.rows;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('rows 必須是非空陣列');
+  if (rows.length > 200) throw new Error('一次最多 200 列');
+  const apply = params.apply === true;
+  const force = params.force === true;
+
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const assistants = (config.deptAssistants || []).filter(function (a) { return a && a.deleted !== true; });
+
+  // 先全部驗完再動手：任何一列對不到系所就整批拒絕（半套的名冊比沒有更難查）
+  const plan = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i] || {};
+    const deptId = String(r.deptId || '').trim();
+    const fullName = String(r.fullName == null ? r.name : r.fullName).trim();
+    const ext = String(r.ext == null ? '' : r.ext).trim();
+    const dept = departments.filter(function (d) { return d && d.id === deptId && d.deleted !== true; })[0];
+    if (!dept) throw new Error('第 ' + (i + 1) + ' 列：找不到系所「' + deptId + '」');
+    if (!fullName) throw new Error('第 ' + (i + 1) + ' 列：缺全名');
+    if (fullName.length > 40) throw new Error('第 ' + (i + 1) + ' 列：全名過長');
+    if (ext && !/^[0-9+\-()#\s]{1,20}$/.test(ext)) throw new Error('第 ' + (i + 1) + ' 列：分機格式不正確：' + ext);
+    const mine = assistants.filter(function (a) { return (a.deptIds || []).indexOf(deptId) !== -1; });
+    plan.push({
+      deptId: deptId, fullName: fullName, ext: ext,
+      nameNow: dept.name || deptId, fullNameNow: dept.fullName || '',
+      assistants: mine.map(function (a) {
+        const email = String(a.email || '').toLowerCase();
+        const u = accounts[email];
+        const selfChanged = !!u && u.mustChangePassword !== true;
+        return {
+          email: email, extNow: a.ext || '',
+          hasAccount: !!u, selfChanged: selfChanged,
+          action: !ext ? 'skip-no-ext' : (selfChanged && !force ? 'skip-self-changed' : (u ? 'reset' : 'create')),
+        };
+      }),
+    });
+  }
+
+  const summary = {
+    模式: apply ? '已套用' : '預演（未寫入）',
+    系所數: plan.length,
+    全名有變動: plan.filter(function (p) { return (p.fullNameNow || '') !== p.fullName; }).length,
+    助理筆數: plan.reduce(function (n, p) { return n + p.assistants.length; }, 0),
+    將建立帳號: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'create'; }).length; }, 0),
+    將重設密碼: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'reset'; }).length; }, 0),
+    跳過已自訂密碼: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'skip-self-changed'; }).length; }, 0),
+    沒有助理的系所: plan.filter(function (p) { return !p.assistants.length; }).map(function (p) { return p.deptId; }),
+  };
+  if (!apply) return { plan: plan, summary: summary };
+
+  // 雜湊在鎖外算（每筆約 0.5 秒；47 筆放進鎖裡會讓別人的請求 waitLock 逾時）
+  const hashes = {};
+  plan.forEach(function (p) {
+    p.assistants.forEach(function (a) {
+      if (a.action === 'create' || a.action === 'reset') hashes[a.email] = hashPasswordGas_(initialPasswordFromExtGas_(p.ext));
+    });
+  });
+
+  const now = new Date();
+  const expires = new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString();
+  withLock_(function () {
+    const freshDepts = readJsonSafe_('departments.json', ctx, []);
+    const freshConfig = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const freshAccounts = readJsonSafe_('localAccounts.json', ctx, {});
+    plan.forEach(function (p) {
+      const di = freshDepts.findIndex(function (d) { return d && d.id === p.deptId; });
+      if (di !== -1) freshDepts[di] = Object.assign({}, freshDepts[di], { fullName: p.fullName, updatedAt: now.toISOString(), updatedBy: userEmail });
+      (freshConfig.deptAssistants || []).forEach(function (a, ai) {
+        if (!a || a.deleted === true) return;
+        if ((a.deptIds || []).indexOf(p.deptId) === -1) return;
+        if (p.ext) freshConfig.deptAssistants[ai] = Object.assign({}, a, { ext: p.ext });
+      });
+      p.assistants.forEach(function (a) {
+        if (!hashes[a.email]) return;
+        freshAccounts[a.email] = Object.assign({}, freshAccounts[a.email] || {}, {
+          hash: hashes[a.email], disabled: false,
+          mustChangePassword: true, activationExpiresAt: expires,
+        });
+      });
+    });
+    writeJsonPath_('departments.json', freshDepts, ctx);
+    writeJsonPath_('config.json', freshConfig, ctx);
+    writeJsonPath_('localAccounts.json', freshAccounts, ctx);
+  });
+  appendAuditLog_(ctx, {
+    action: 'adminBulkApplyDeptSheet', by: userEmail,
+    targetId: plan.length + ' depts / ' + summary.將建立帳號 + '+' + summary.將重設密碼 + ' accounts',
+    at: now.toISOString(),
+  });
+  syncRosterSheetSafe_(ctx);
+  return { plan: plan, summary: summary };
+}
+
 // adminBulkUpsertDeptHeads：admin only，一次寫入多系的主任導師（含 email）。
 // 37 個系所逐筆呼叫 adminUpsertDepartment 會各進一次鎖、各寫一次檔，在 GAS 上會逼近 6 分鐘上限
 // （2026-08-10 建 47 個帳號時實際卡住過），所以這裡「讀一次 → 全部算完 → 寫一次」。
@@ -3997,7 +4117,10 @@ function deptRosterGetAction_(params, ctx, userEmail) {
     return d && scope.deptIds.indexOf(d.id) !== -1;
   }).map(function (d) {
     // head（主任導師＝系主任）帶完整聯絡方式，因為這裡就是那條唯一通道。
-    return { id: d.id, name: d.name, collegeId: d.collegeId || null, head: projectDeptHeadForRoster_(d) };
+    return {
+      id: d.id, name: d.name, fullName: d.fullName || '',
+      collegeId: d.collegeId || null, head: projectDeptHeadForRoster_(d),
+    };
   });
 
   return { deptIds: scope.deptIds, departments: depts, classes: rows };
