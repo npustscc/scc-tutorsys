@@ -3523,37 +3523,85 @@ const ROSTER_SHEET_TAB_ = '導師名冊';
 
 // 純函式：攤成試算表的二維陣列（第一列是表頭）。一位導師一列、沒有導師的班級也出一列，
 // 與 Excel 匯出同一套形狀，差別只在**不含私人手機**。
-function buildRosterSheetValues_(departments, classes, colleges) {
+// 純函式：產生每個分頁的內容。版面刻意仿既有統計表：
+//   row0 學院名／row1 說明／row2–4 三列表頭（欄標題垂直合併）／row5 起資料，
+//   系別與主任導師只在該系第一列出現（其餘留白，效果同合併儲存格的視覺）。
+// 欄位是名冊的欄位，不是統計表的「應開/已開/宣導」——那些屬於班會紀錄流程，目前停用；
+// 之後重啟再把欄位補回來即可（表頭是這裡產生的，加欄不影響資料寫入邏輯）。
+function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
+  // 分頁分組：比照既有的「班級、家族會議記錄暨班級業務統計」活頁簿——一個學院一個分頁，
+  // 獸醫／國際／達人三個小學院併成一頁。沒對到的學院各自成頁（不會靜默消失）。
+  // 刻意放在函式**裡面**：測試沙箱只載入具名函式，頂層 const 不會跟著進去
+  // （放外面第一次跑測試就 ReferenceError）。
+  const TAB_MAP = {
+    '農學院': '農學院', '工學院': '工學院', '管理學院': '管理學院',
+    '人文暨社會科學院': '人文學院', '人文社科院': '人文學院',
+    '獸醫學院': '獸醫國際達人', '國際學院': '獸醫國際達人', '達人學院': '獸醫國際達人',
+  };
+  const TAB_ORDER = ['農學院', '工學院', '管理學院', '人文學院', '獸醫國際達人'];
   const collegeName = {};
   (colleges || []).forEach(function (c) { if (c) collegeName[c.id] = c.name || c.id; });
-  const rows = [['學院', '系所', '班級', '班級名稱(原始)', '導師', '校內分機', 'Email', '狀態', '更新時間']];
   const byDept = {};
   (classes || []).forEach(function (c) {
     if (!c || c.deleted === true) return;
     (byDept[c.deptId] = byDept[c.deptId] || []).push(c);
   });
+
+  // 系所 → 分頁
+  const tabs = {};
+  const tabOrder = [];
+  const push = function (tab, row) {
+    if (!tabs[tab]) { tabs[tab] = []; tabOrder.push(tab); }
+    tabs[tab].push(row);
+  };
   (departments || []).forEach(function (d) {
-    if (!d || d.deleted === true) return;
-    const college = collegeName[d.collegeId] || d.collegeId || '未分學院';
+    if (!d || d.deleted === true || d.active === false) return;
+    const cname = collegeName[d.collegeId] || d.collegeId || '未分學院';
+    const tab = TAB_MAP[cname] || cname;
     const head = d.head || {};
-    if (head.name || head.ext) {
-      rows.push([college, d.name || d.id, '（主任導師）', '', head.name || '', head.ext || '', head.email || '', '', d.updatedAt || '']);
-    }
-    (byDept[d.id] || []).slice().sort(function (a, b) {
+    const list = (byDept[d.id] || []).slice().sort(function (a, b) {
       return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
-    }).forEach(function (c) {
+    });
+    let first = true;
+    const deptCell = function () { const v = first ? (d.name || d.id) : ''; return v; };
+    const headCell = function () { return first ? (head.name || '') : ''; };
+    const headExt = function () { return first ? (head.ext || '') : ''; };
+    if (!list.length) {
+      push(tab, [d.name || d.id, head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '']);
+      return;
+    }
+    list.forEach(function (c) {
       const state = [];
       if (c.active === false) state.push('停用');
       if (c.graduatedSemester) state.push('已畢業(' + c.graduatedSemester + ')');
       const tutors = (c.tutors || []).filter(Boolean);
-      const base = [college, d.name || d.id, c.displayName || c.name, c.name];
-      if (!tutors.length) rows.push(base.concat(['', '', '', state.join('／') || '啟用', c.updatedAt || '']));
-      else tutors.forEach(function (t) {
-        rows.push(base.concat([t.name || '', t.ext || '', t.email || '', state.join('／') || '啟用', c.updatedAt || '']));
+      const cls = c.displayName || c.name;
+      if (!tutors.length) {
+        push(tab, [deptCell(), headCell(), headExt(), cls, c.name, '', '', '', state.join('／') || '啟用']);
+        first = false;
+        return;
+      }
+      tutors.forEach(function (t) {
+        push(tab, [deptCell(), headCell(), headExt(), cls, c.name, t.name || '', t.ext || '', t.email || '', state.join('／') || '啟用']);
+        first = false;
       });
     });
   });
-  return rows;
+
+  const ordered = TAB_ORDER.filter(function (t) { return tabs[t]; })
+    .concat(tabOrder.filter(function (t) { return TAB_ORDER.indexOf(t) === -1; }));
+
+  return ordered.map(function (tab) {
+    const values = [];
+    values.push([tab, '', '', '', '', '', '', '', '']);
+    values.push(['資料來源：各系導師名冊（系辦助理維護）。最後同步：' + (stamp || '') +
+      '　※本表不含導師私人手機，需要時請至系統查詢。', '', '', '', '', '', '', '', '']);
+    values.push(['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
+    values.push(['', '姓名', '校內分機', '', '', '', '校內分機', 'Email', '']);
+    values.push(['', '', '', '', '', '', '', '', '']);
+    tabs[tab].forEach(function (r) { values.push(r); });
+    return { tab: tab, values: values, rows: tabs[tab].length };
+  });
 }
 
 function rosterSheetId_() {
@@ -3569,17 +3617,38 @@ function syncRosterSheet_(ctx) {
   const departments = readJsonSafe_('departments.json', ctx, []);
   const classes = readJsonSafe_('classes.json', ctx, []);
   const colleges = readJsonSafe_('colleges.json', ctx, []);
-  const values = buildRosterSheetValues_(departments, classes, colleges);
+  const tabs = buildRosterSheetTabs_(departments, classes, colleges, nowStampTaipei_());
   const ss = SpreadsheetApp.openById(id);
-  let sh = ss.getSheetByName(ROSTER_SHEET_TAB_);
-  if (!sh) sh = ss.insertSheet(ROSTER_SHEET_TAB_);
-  sh.clear();
-  sh.getRange(1, 1, values.length, values[0].length).setValues(values);
-  sh.setFrozenRows(1);
-  // 讓閱讀者一眼知道資料的新鮮度（同步是每次存檔＋每小時校正，但看的人不知道）
-  const stamp = ss.getSheetByName(ROSTER_SHEET_TAB_);
-  stamp.getRange(1, values[0].length + 1).setValue('最後同步：' + nowStampTaipei_());
-  return { ok: true, rows: values.length - 1 };
+  let total = 0;
+  tabs.forEach(function (t, i) {
+    let sh = ss.getSheetByName(t.tab);
+    if (!sh) sh = ss.insertSheet(t.tab);
+    sh.clear();
+    // 舊的合併要先解掉，否則 setValues 會在合併範圍上炸（重寫時尺寸可能變）
+    try { sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart(); } catch (e) {}
+    sh.getRange(1, 1, t.values.length, t.values[0].length).setValues(t.values);
+    // 版面：仿統計表——學院名與說明各佔一列跨欄、欄標題垂直合併、表頭凍結
+    const W = t.values[0].length;
+    try {
+      sh.getRange(1, 1, 1, W).merge().setFontWeight('bold').setFontSize(14);
+      sh.getRange(2, 1, 1, W).merge().setWrap(true).setFontSize(9).setFontColor('#666666');
+      sh.getRange(3, 2, 1, 2).merge();          // 主任導師（姓名／分機）
+      sh.getRange(3, 7, 1, 2).merge();          // 聯絡方式（分機／Email）
+      [1, 4, 5, 6, 9].forEach(function (col) { sh.getRange(3, col, 3, 1).merge(); });
+      sh.getRange(3, 1, 3, W).setFontWeight('bold').setHorizontalAlignment('center')
+        .setBackground('#f2f4f7').setVerticalAlignment('middle');
+      sh.setFrozenRows(5);
+      sh.setColumnWidths(1, W, 110);
+      sh.setColumnWidth(8, 220);               // Email 寬一點
+      sh.setColumnWidth(2, 90); sh.setColumnWidth(3, 80);
+    } catch (e) { /* 版面失敗不影響資料正確性 */ }
+    total += t.rows;
+    if (i === 0) sh.activate();
+  });
+  // 上一版只有一張「導師名冊」總表，改成分學院分頁後把它清掉，免得留著過期資料誤導
+  const legacy = ss.getSheetByName(ROSTER_SHEET_TAB_);
+  if (legacy && tabs.length) { try { ss.deleteSheet(legacy); } catch (e) {} }
+  return { ok: true, tabs: tabs.map(function (t) { return t.tab + '(' + t.rows + ')'; }), rows: total };
 }
 
 function syncRosterSheetSafe_(ctx) {

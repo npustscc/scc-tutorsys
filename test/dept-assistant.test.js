@@ -404,35 +404,62 @@ test('derivePasswordKey_ 全程走 (Byte[],Byte[]) overload，且輸出穩定可
 });
 
 // ── 名冊 → Google Sheet 同步、以及主責通知的合併規則 ────────────────────────
+// harness 的沙箱是另一個 realm，陣列比較前先 JSON 往返（同 test/export-rows.test.js）
+function plain(x) { return JSON.parse(JSON.stringify(x)); }
+
 function makeSandbox4() {
-  return load(['buildRosterSheetValues_', 'selectNotifyBatches_'], {});
+  return load(['buildRosterSheetTabs_', 'selectNotifyBatches_'], {});
 }
 
-test('Sheet 列：一位導師一列、主任導師排最前、**不含私人手機**', () => {
+test('Sheet 版面：一個學院一個分頁、獸醫/國際/達人併成一頁、順序照既有統計表', () => {
   const S = makeSandbox4();
-  const rows = S.buildRosterSheetValues_(
-    [{ id: '森林系', name: '森林系', collegeId: 'agri', head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0955' } }],
-    [{ id: 'c1', name: '四技一A', displayName: '四森林一A', deptId: '森林系', active: true,
-       tutors: [{ name: '甲', email: 'a@x.com', ext: '1', mobile: '0911' }, { name: '乙' }] }],
-    [{ id: 'agri', name: '農學院' }]);
-  assert.deepEqual(rows[0], ['學院', '系所', '班級', '班級名稱(原始)', '導師', '校內分機', 'Email', '狀態', '更新時間']);
-  assert.equal(rows[1][2], '（主任導師）');
-  assert.equal(rows[1][0], '農學院');
-  assert.equal(rows.length, 4, '表頭＋主任導師＋兩位導師');
-  const flat = JSON.stringify(rows);
-  assert.equal(flat.indexOf('0955'), -1, '主任導師的手機不得進 Sheet');
-  assert.equal(flat.indexOf('0911'), -1, '導師的手機不得進 Sheet');
+  const tabs = S.buildRosterSheetTabs_(
+    [{ id: 'd1', name: '農園系', collegeId: 'agri' }, { id: 'd2', name: '獸醫系', collegeId: 'vet' },
+     { id: 'd3', name: '熱農系', collegeId: 'intl' }, { id: 'd4', name: '怪系', collegeId: '沒對到的學院' }],
+    [{ id: 'c1', name: '四技一A', deptId: 'd1', tutors: [{ name: '甲' }] },
+     { id: 'c2', name: '四技一A', deptId: 'd2', tutors: [{ name: '乙' }] },
+     { id: 'c3', name: '四技一A', deptId: 'd3', tutors: [{ name: '丙' }] },
+     { id: 'c4', name: '四技一A', deptId: 'd4', tutors: [{ name: '丁' }] }],
+    [{ id: 'agri', name: '農學院' }, { id: 'vet', name: '獸醫學院' }, { id: 'intl', name: '國際學院' }],
+    '2026-08-11 12:00');
+  assert.deepEqual(plain(tabs.map((t) => t.tab)), ['農學院', '獸醫國際達人', '沒對到的學院']);
+  const vet = tabs.find((t) => t.tab === '獸醫國際達人');
+  assert.equal(vet.rows, 2, '獸醫系與熱農系要併在同一頁');
 });
 
-test('Sheet 列：軟刪除的班級與系所不出現；沒有導師的班級仍出一列', () => {
+test('Sheet 版面：前五列是學院名／說明／三列表頭，資料從第 6 列開始', () => {
   const S = makeSandbox4();
-  const rows = S.buildRosterSheetValues_(
-    [{ id: 'd1', name: 'D1' }, { id: 'd2', name: 'D2', deleted: true }],
-    [{ id: 'a', name: '一', deptId: 'd1', tutors: [] },
-     { id: 'b', name: '二', deptId: 'd1', deleted: true, tutors: [{ name: '甲' }] },
-     { id: 'c', name: '三', deptId: 'd2', tutors: [{ name: '乙' }] }], []);
-  assert.equal(rows.length, 2, '只剩表頭＋d1 的那一班');
-  assert.equal(rows[1][4], '', '沒有導師的班級導師欄留白');
+  const t = S.buildRosterSheetTabs_(
+    [{ id: 'd1', name: '農園系', collegeId: 'agri', head: { name: '梁佑慎', ext: '6247', mobile: '0955' } }],
+    [{ id: 'c1', name: '四技一A', displayName: '四農園一A', deptId: 'd1',
+       tutors: [{ name: '甲', ext: '1', mobile: '0911', email: 'a@x.com' }, { name: '乙' }] }],
+    [{ id: 'agri', name: '農學院' }], '2026-08-11 12:00')[0];
+  assert.equal(t.values[0][0], '農學院');
+  assert.match(t.values[1][0], /最後同步：2026-08-11 12:00/);
+  assert.match(t.values[1][0], /不含導師私人手機/);
+  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
+  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '校內分機', 'Email', '']);
+  // 第 6 列（index 5）起是資料：系別與主任導師只在該系第一列出現
+  assert.deepEqual(plain(t.values[5]), ['農園系', '梁佑慎', '6247', '四農園一A', '四技一A', '甲', '1', 'a@x.com', '啟用']);
+  assert.deepEqual(plain(t.values[6]), ['', '', '', '四農園一A', '四技一A', '乙', '', '', '啟用']);
+  const flat = JSON.stringify(t.values);
+  assert.equal(flat.indexOf('0955'), -1, '主任導師手機不得進 Sheet');
+  assert.equal(flat.indexOf('0911'), -1, '導師手機不得進 Sheet');
+});
+
+test('Sheet 版面：軟刪除/停用的系所不出頁；沒有班級的系所列一行說明', () => {
+  const S = makeSandbox4();
+  const tabs = S.buildRosterSheetTabs_(
+    [{ id: 'd1', name: '有班系', collegeId: 'agri' }, { id: 'd2', name: '空系', collegeId: 'agri' },
+     { id: 'd3', name: '停用系', collegeId: 'agri', active: false },
+     { id: 'd4', name: '刪除系', collegeId: 'agri', deleted: true }],
+    [{ id: 'c1', name: '一', deptId: 'd1', tutors: [{ name: '甲' }] },
+     { id: 'c9', name: '九', deptId: 'd3', tutors: [{ name: '不該出現' }] }],
+    [{ id: 'agri', name: '農學院' }], '');
+  const flat = JSON.stringify(tabs[0].values);
+  assert.equal(flat.indexOf('停用系'), -1);
+  assert.equal(flat.indexOf('刪除系'), -1);
+  assert.ok(flat.indexOf('（此系目前沒有班級）') !== -1, '空系要留一行，才看得出「這系還沒填」');
 });
 
 test('通知合併：停手 10 分鐘就寄；一直在改滿 30 分鐘也要寄；其餘繼續等', () => {
