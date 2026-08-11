@@ -584,6 +584,21 @@ await flow('G', async () => {
   });
   await shot(page, 'G-系辦助理清單');
 
+  await check('G', '系辦助理分頁的學院篩選：選獸醫學院 → 空清單，選農學院 → 這位助理還在', async () => {
+    await page.selectOption('#deptasst-filter-college', '獸醫學院');
+    await page.locator('#admin-tab-content', { hasText: '這個篩選條件下沒有系辦助理' }).waitFor({ timeout: 5000 });
+    const deptOpts = await page.locator('#deptasst-filter-dept option').allTextContents();
+    evid['G-deptasst-filter-獸醫學院'] = deptOpts.join(',');
+    expect(deptOpts[0] === '全部系所' && deptOpts.indexOf('森林系') === -1, '系所選單=' + deptOpts.join(','));
+    await page.selectOption('#deptasst-filter-college', '農學院');
+    await page.locator('#admin-tab-content tr', { hasText: 'deptasst@test.local' }).waitFor({ timeout: 5000 });
+    await page.selectOption('#deptasst-filter-dept', '森林系');
+    await page.locator('#admin-tab-content tr', { hasText: 'deptasst@test.local' }).waitFor({ timeout: 5000 });
+    const shown = await page.locator('#admin-tab-content').textContent();
+    expect(/顯示 1 \/ 1 筆/.test(shown || ''), '筆數列＝' + (shown || '').slice(0, 120));
+    await page.selectOption('#deptasst-filter-college', '');   // 還原，後面的步驟不受影響
+  });
+
   await check('G', '系辦助理不帶 deptId → 只拿到自己那一系的班級', async () => {
     const r = await apiCall('deptRosterGet', {}, deptAsstToken.token);
     evid['G-roster-own'] = JSON.stringify(r).slice(0, 600);
@@ -848,6 +863,26 @@ await flow('H', async () => {
     const r = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: 'nope', newPassword: 'another-pass1' });
     expect(/目前密碼錯誤/.test(r.data.error || ''), JSON.stringify(r));
   });
+  await check('H', '系辦助理帳號分頁：同一組學院篩選生效，列上看得到系所', async () => {
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    await page.locator('[data-admin-tab="deptAccounts"]').click();
+    await page.locator('#deptacct-content table').waitFor({ timeout: 10000 });
+    await page.selectOption('#deptasst-filter-college', '獸醫學院');
+    await page.locator('#deptacct-content', { hasText: '這個篩選條件下沒有系辦助理' }).waitFor({ timeout: 5000 });
+    // 篩選只影響顯示：總人數那行仍以全部白名單計算（「為所有尚無帳號者建立帳號」是全體動作）
+    const filtered = await page.locator('#deptacct-content').textContent();
+    evid['H-account-summary-filtered'] = (filtered || '').replace(/\s+/g, ' ').slice(0, 200);
+    expect(/目前：2 人/.test(filtered || '') && /篩選後顯示 0 人/.test(filtered || ''),
+      '篩選時應同時標示全部與篩選後的人數：' + (filtered || '').slice(0, 160));
+    await page.selectOption('#deptasst-filter-college', '農學院');
+    const row = page.locator('#deptacct-content tr', { hasText: 'h-asst@example.com' });
+    await row.waitFor({ timeout: 5000 });
+    const txt = (await row.textContent() || '').trim();
+    evid['H-account-row'] = txt;
+    expect(/森林系/.test(txt), '系所欄沒顯示：' + txt);
+    await page.selectOption('#deptasst-filter-college', '');
+  });
+  await shot(page, 'H-系辦助理帳號分頁（學院篩選）');
 });
 
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════

@@ -2572,12 +2572,90 @@ function deptNameById(id) {
   return d ? (d.name || d.id) : id;
 }
 
+// ── 系辦助理兩個分頁共用的「學院 → 系所」篩選 ────────────────────────────────
+// 47 筆白名單一次攤平列出，要找某一系得整頁捲——跟導師資料頁同一個毛病。兩個分頁
+// （白名單／帳號）用同一組狀態，切分頁時篩選條件不會跑掉。
+let deptAsstFilterCollege = '';   // '' ＝全部學院；'__none__' ＝未分學院
+let deptAsstFilterDept = '';      // '' ＝該學院全部系所
+
+const COLLEGE_NONE = '__none__';
+
+function deptCollegeKey(deptId) {
+  const d = deptById(deptId);
+  return (d && d.collegeId) || COLLEGE_NONE;
+}
+
+function deptAsstFilterDepts() {
+  const depts = (bootstrapData.departments || []).filter(notDeleted);
+  if (!deptAsstFilterCollege) return depts;
+  return depts.filter(function (d) { return ((d.collegeId || COLLEGE_NONE)) === deptAsstFilterCollege; });
+}
+
+// 一列（一位助理）掛的系所有任一個命中就顯示；沒掛任何系所的只有「不篩選」時才看得到。
+function deptAsstRowMatches(deptIds) {
+  const ids = Array.isArray(deptIds) ? deptIds : [];
+  if (deptAsstFilterDept) return ids.indexOf(deptAsstFilterDept) !== -1;
+  if (!deptAsstFilterCollege) return true;
+  return ids.some(function (id) { return deptCollegeKey(id) === deptAsstFilterCollege; });
+}
+
+function deptAsstFilterHtml() {
+  const depts = (bootstrapData.departments || []).filter(notDeleted);
+  const keys = [];
+  depts.forEach(function (d) {
+    const k = d.collegeId || COLLEGE_NONE;
+    if (keys.indexOf(k) === -1) keys.push(k);
+  });
+  keys.sort(function (a, b) {
+    const ca = collegeById(a);
+    const cb = collegeById(b);
+    const oa = (ca && ca.order != null) ? ca.order : 9999;
+    const ob = (cb && cb.order != null) ? cb.order : 9999;
+    return oa - ob;
+  });
+  const colOpts = '<option value="">全部學院</option>' + keys.map(function (k) {
+    const label = k === COLLEGE_NONE ? '未分學院' : ((collegeById(k) && collegeById(k).name) || k);
+    const n = depts.filter(function (d) { return (d.collegeId || COLLEGE_NONE) === k; }).length;
+    return '<option value="' + escapeHtml(k) + '"' + (k === deptAsstFilterCollege ? ' selected' : '') + '>' +
+      escapeHtml(label) + '（' + n + '）</option>';
+  }).join('');
+  const deptOpts = '<option value="">全部系所</option>' + deptAsstFilterDepts().map(function (d) {
+    return '<option value="' + escapeHtml(d.id) + '"' + (d.id === deptAsstFilterDept ? ' selected' : '') + '>' +
+      escapeHtml(d.name || d.id) + '</option>';
+  }).join('');
+  return '<div class="row">' +
+    '<div class="field" style="max-width:240px;"><label>學院</label><select id="deptasst-filter-college">' + colOpts + '</select></div>' +
+    '<div class="field" style="max-width:240px;"><label>系所</label><select id="deptasst-filter-dept">' + deptOpts + '</select></div>' +
+    '</div>';
+}
+
+// 兩個分頁各自把「重畫自己」的函式傳進來；選單值改了就換條件重畫。
+function bindDeptAsstFilter(rerender) {
+  const colSel = $('deptasst-filter-college');
+  const deptSel = $('deptasst-filter-dept');
+  if (!colSel || !deptSel) return;
+  colSel.addEventListener('change', function () {
+    deptAsstFilterCollege = colSel.value;
+    // 換學院後原本選的系所若不屬於這個學院，就退回「全部系所」
+    const stillThere = deptAsstFilterDepts().some(function (d) { return d.id === deptAsstFilterDept; });
+    if (!stillThere) deptAsstFilterDept = '';
+    rerender();
+  });
+  deptSel.addEventListener('change', function () {
+    deptAsstFilterDept = deptSel.value;
+    rerender();
+  });
+}
+
 function renderAdminDeptAssistants() {
-  const rows = (bootstrapData.deptAssistants || []).filter(notDeleted);
+  const all = (bootstrapData.deptAssistants || []).filter(notDeleted);
+  const rows = all.filter(function (s) { return deptAsstRowMatches(s.deptIds); });
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>系辦助理</h3>' +
     '<p class="field-hint">各系系辦助理維護本系導師名冊用。<b>只看得到自己掛的系所</b>，看不到他系；' +
     '一人可掛多個系所（例如同時兼任兩個單位）。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。</p>' +
+    deptAsstFilterHtml() +
+    '<p class="field-hint">顯示 <b>' + rows.length + '</b> / ' + all.length + ' 筆。</p>' +
     '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     (rows.length ? rows.map(function (s) {
       const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
@@ -2588,10 +2666,12 @@ function renderAdminDeptAssistants() {
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="deptasst-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
-    }).join('') : '<tr><td colspan="6"><div class="empty-hint">尚未建立任何系辦助理。</div></td></tr>') +
+    }).join('') : '<tr><td colspan="6"><div class="empty-hint">' +
+      (all.length ? '這個篩選條件下沒有系辦助理。' : '尚未建立任何系辦助理。') + '</div></td></tr>') +
     '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button> ' +
     '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button></div>';
+  bindDeptAsstFilter(renderAdminDeptAssistants);
 }
 
 // 批次匯入白名單：37 個系所手 key 太痛苦，而名單本身是個資、不能進 repo，
@@ -2754,10 +2834,13 @@ function renderAdminDeptAccounts() {
   loadDeptAccounts();
 }
 
+let deptAccountRows = [];   // 上一次 list 回來的原始列，篩選時直接重畫、不再打一次 API
+
 async function loadDeptAccounts() {
   try {
     const data = await serverAdminCall('list');
-    renderDeptAccountsTable(data.accounts || []);
+    deptAccountRows = data.accounts || [];
+    renderDeptAccountsTable(deptAccountRows);
   } catch (e) {
     $('deptacct-content').innerHTML =
       '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>' +
@@ -2766,21 +2849,30 @@ async function loadDeptAccounts() {
   }
 }
 
-function renderDeptAccountsTable(rows) {
-  if (!rows.length) {
+function renderDeptAccountsTable(all) {
+  if (!all.length) {
     $('deptacct-content').innerHTML = '<div class="empty-hint">白名單還沒有任何系辦助理，請先到「系辦助理」分頁建立。</div>';
     return;
   }
+  const rows = all.filter(function (r) { return deptAsstRowMatches(r.deptIds); });
   const noAccount = rows.filter(function (r) { return !r.hasAccount; }).length;
   const initial = rows.filter(function (r) { return r.hasAccount && r.mustChangePassword; }).length;
   $('deptacct-content').innerHTML =
     '<p class="field-hint">帳號＝白名單的 email（登入時也可以只打 @ 前面那段），' +
     '<b>初始密碼＝該筆的校內分機</b>，第一次登入會被邀請改密碼（可以選擇稍後再做）。' +
     '沒填分機的無法建立帳號——請先到「系辦助理」分頁補上分機。</p>' +
-    '<p class="field-hint">目前：<b>' + rows.length + '</b> 人，其中 <b>' + noAccount + '</b> 人尚無帳號、' +
-    '<b>' + initial + '</b> 人仍在使用初始密碼。</p>' +
+    deptAsstFilterHtml() +
+    // 「為所有尚無帳號者建立帳號」永遠是對**全部**白名單動作，與畫面上的篩選無關，
+    // 所以這裡的統計也照全部算，只多附一行說明目前篩選出幾筆，避免看著小數字按大動作。
+    '<p class="field-hint">目前：<b>' + all.length + '</b> 人，其中 <b>' +
+      all.filter(function (r) { return !r.hasAccount; }).length + '</b> 人尚無帳號、' +
+    '<b>' + all.filter(function (r) { return r.hasAccount && r.mustChangePassword; }).length +
+      '</b> 人仍在使用初始密碼。' +
+    (rows.length === all.length ? '' :
+      '（篩選後顯示 <b>' + rows.length + '</b> 人：' + noAccount + ' 人尚無帳號、' + initial + ' 人用初始密碼）') + '</p>' +
     '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button></div>' +
-    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>帳號狀態</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>系所</th><th>分機</th><th>帳號狀態</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
+    (rows.length ? '' : '<tr><td colspan="7"><div class="empty-hint">這個篩選條件下沒有系辦助理。</div></td></tr>') +
     rows.map(function (r) {
       const acct = !r.hasAccount ? '<span style="color:var(--color-danger);">尚未建立</span>'
         : (r.accountDisabled ? '<span style="color:var(--color-danger);">已停用</span>' : '啟用');
@@ -2794,13 +2886,16 @@ function renderDeptAccountsTable(rows) {
         ops.push('<button class="btn btn-sm" data-action="deptacct-toggle" data-email="' + escapeHtml(r.email) + '" data-disabled="' + (r.accountDisabled ? '0' : '1') + '">' +
           (r.accountDisabled ? '啟用' : '停用') + '</button>');
       }
+      const ids = Array.isArray(r.deptIds) ? r.deptIds : [];
       return '<tr><td data-label="Email">' + escapeHtml(r.email) + '</td>' +
         '<td data-label="姓名">' + escapeHtml(r.name || '') + '</td>' +
+        '<td data-label="系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
         '<td data-label="分機">' + escapeHtml(r.ext || '') + '</td>' +
         '<td data-label="帳號狀態">' + acct + '</td>' +
         '<td data-label="密碼">' + pw + '</td>' +
         '<td data-label="操作">' + ops.join(' ') + '</td></tr>';
     }).join('') + '</tbody></table></div>';
+  bindDeptAsstFilter(function () { renderDeptAccountsTable(deptAccountRows); });
 }
 
 document.body.addEventListener('click', async function (e) {
