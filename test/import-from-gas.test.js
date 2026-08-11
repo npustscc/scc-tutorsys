@@ -141,3 +141,15 @@ test('換版相容：本地是舊的 phone、遠端已改用 mobile → 同一�
   // 寫回去的是新形狀，舊鍵不留著
   assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: 'a@x.com', ext: '', mobile: '0911' }]);
 });
+
+test('系所：正式全名（fullName）也要同步過來，其餘本地欄位不動', () => {
+  const local = [{ id: '農園系', name: '農園系', collegeId: '農學院', headEmail: 'head@x.com', headName: '系主任', active: true }];
+  const remote = [{ id: '農園系', name: '農園系', fullName: '農園生產系', collegeId: '農學院' }];
+  const { departments, report } = mergeDepartments(local, remote);
+  assert.deepEqual(report.updated, ['農園系']);
+  assert.equal(departments[0].fullName, '農園生產系');
+  assert.equal(departments[0].name, '農園系', '內部簡稱名不該被全名蓋掉');
+  assert.equal(departments[0].headEmail, 'head@x.com');
+  // 再跑一次不該再報變動
+  assert.deepEqual(mergeDepartments(departments, remote).report.updated, []);
+});

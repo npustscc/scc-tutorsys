@@ -99,10 +99,17 @@ export function mergeDepartments(localDepts, remoteDepts) {
   for (const r of (remoteDepts || [])) {
     const local = byId.get(r.id);
     if (!local) {
-      out.push({ id: r.id, name: r.name, collegeId: r.collegeId || null, headEmail: '', headName: '', active: true });
+      out.push({
+        id: r.id, name: r.name, fullName: r.fullName || '', collegeId: r.collegeId || null,
+        headEmail: '', headName: '', active: true,
+      });
       report.created.push(r.id);
-    } else if (local.name !== r.name || (local.collegeId || null) !== (r.collegeId || null)) {
+    } else if (local.name !== r.name || (local.collegeId || null) !== (r.collegeId || null) ||
+               (local.fullName || '') !== (r.fullName || '')) {
+      // fullName（正式全名）也要跟：收集端套用中心的系所清冊後，自架站的畫面/匯出才不會
+      // 一邊顯示全名、一邊還是簡稱。headEmail/headName 仍是本地資料，不受投影覆蓋。
       local.name = r.name;
+      local.fullName = r.fullName || '';
       local.collegeId = r.collegeId || null;
       report.updated.push(r.id);
     }
