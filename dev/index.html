@@ -2066,6 +2066,8 @@ async function deleteEntity(opts) {
 // 後端在那裡重驗 deptId、也只投影名冊需要的欄位（Phase 2 的手機欄位只會出現在這條通道）。
 // ══════════════════════════════════════════════════════════════════════════════
 let deptRosterDeptId = null;
+let deptRosterDepts = [];        // deptRosterGet 回的系所（**已受後端權限限制**，前端只拿它做篩選）
+let deptRosterCollegeId = '';    // '' ＝ 全部學院
 
 PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
   $('page-root').innerHTML =
@@ -2073,16 +2075,82 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
       '<h2>導師資料</h2>' +
       '<p class="field-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫聯絡電話。' +
       '<b>導師電話屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
-      '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
+      '<div class="row" id="deptroster-filters">' +
+        '<div class="field" style="max-width:260px;"><label>學院</label><select id="deptroster-college"></select></div>' +
+        '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
+      '</div>' +
       '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button></div>' +
       '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
     '</div>';
   await loadDeptRoster(null);
+  $('deptroster-college').addEventListener('change', function () {
+    deptRosterCollegeId = $('deptroster-college').value;
+    // 換學院後原本選的系所可能不屬於這個學院了，就改指向該學院的第一個系所
+    const list = deptRosterDeptsInCollege(deptRosterCollegeId);
+    const stillThere = list.some(function (d) { return d.id === deptRosterDeptId; });
+    if (!stillThere) deptRosterDeptId = list.length ? list[0].id : null;
+    renderDeptRosterFilters();
+    loadDeptRoster(deptRosterDeptId);
+  });
   $('deptroster-dept').addEventListener('change', function () {
     deptRosterDeptId = $('deptroster-dept').value;
     loadDeptRoster(deptRosterDeptId);
   });
 };
+
+// 學院顯示名：bootstrap 的 colleges 有這一筆就用它的 name。自架站的 store 目前沒有
+// colleges.json（名冊 importer 不搬學院），這時 collegeId 本身就是學院名（例「農學院」），
+// 直接顯示 id 即可——不要因為查不到名字就把整個學院篩選藏起來。
+function deptRosterCollegeLabel(id) {
+  if (!id) return '未分學院';
+  const c = collegeById(id);
+  return (c && c.name) || id;
+}
+
+function deptRosterDeptsInCollege(collegeId) {
+  if (!collegeId) return deptRosterDepts.slice();
+  return deptRosterDepts.filter(function (d) { return (d.collegeId || '') === collegeId; });
+}
+
+// 出現在學院選單的鍵：依後台 order 排，查不到 order 的（含「未分學院」）殿後。
+function deptRosterCollegeKeys() {
+  const keys = [];
+  deptRosterDepts.forEach(function (d) {
+    const k = d.collegeId || '';
+    if (keys.indexOf(k) === -1) keys.push(k);
+  });
+  return keys.sort(function (a, b) {
+    const ca = collegeById(a);
+    const cb = collegeById(b);
+    const oa = (ca && ca.order != null) ? ca.order : 9999;
+    const ob = (cb && cb.order != null) ? cb.order : 9999;
+    if (oa !== ob) return oa - ob;
+    return deptRosterCollegeLabel(a).localeCompare(deptRosterCollegeLabel(b), 'zh-Hant');
+  });
+}
+
+function renderDeptRosterFilters() {
+  const colSel = $('deptroster-college');
+  const sel = $('deptroster-dept');
+  if (!colSel || !sel) return;
+  const keys = deptRosterCollegeKeys();
+  colSel.innerHTML =
+    '<option value="">全部學院（' + deptRosterDepts.length + ' 系所）</option>' +
+    keys.map(function (k) {
+      return '<option value="' + escapeHtml(k) + '">' + escapeHtml(deptRosterCollegeLabel(k)) +
+        '（' + deptRosterDeptsInCollege(k).length + '）</option>';
+    }).join('');
+  colSel.value = deptRosterCollegeId;
+  const list = deptRosterDeptsInCollege(deptRosterCollegeId);
+  sel.innerHTML = list.map(function (d) {
+    return '<option value="' + escapeHtml(d.id) + '">' + escapeHtml(d.name || d.id) + '</option>';
+  }).join('');
+  if (deptRosterDeptId) sel.value = deptRosterDeptId;
+  // 只管一個系所的助理沒有選擇餘地，整列收起來少一個干擾；只有一個學院時也不必露出學院選單。
+  const row = $('deptroster-filters');
+  if (row) row.style.display = deptRosterDepts.length > 1 ? '' : 'none';
+  colSel.parentElement.style.display = keys.length > 1 ? '' : 'none';
+}
 
 async function loadDeptRoster(deptId) {
   $('deptroster-content').innerHTML = '<div class="empty-hint">載入中…</div>';
@@ -2090,16 +2158,14 @@ async function loadDeptRoster(deptId) {
     // deptId 為 null＝不指定，後端回「我管的全部系所」；選單就是用這一趟的回傳建的。
     const res = await proxyCall('deptRosterGet', deptId ? { deptId: deptId } : {});
     const depts = res.departments || [];
-    const sel = $('deptroster-dept');
-    if (sel && !sel.options.length) {
-      sel.innerHTML = depts.map(function (d) {
-        return '<option value="' + escapeHtml(d.id) + '">' + escapeHtml(d.name || d.id) + '</option>';
-      }).join('');
-      // 只有一個系所時選單沒有選擇餘地，收起來少一個干擾
-      sel.parentElement.style.display = depts.length > 1 ? '' : 'none';
-      if (depts.length) { deptRosterDeptId = depts[0].id; sel.value = deptRosterDeptId; }
+    // 系所清單只認第一趟（不帶 deptId）的回傳——之後每趟都帶 deptId，後端只會回那一系，
+    // 拿它覆寫會讓選單縮到剩一個。選單則每趟都重畫：離開頁面再回來時 DOM 是新的。
+    if (!deptRosterDepts.length && depts.length) {
+      deptRosterDepts = depts;
+      if (!deptRosterDeptId) deptRosterDeptId = depts[0].id;
     }
-    renderDeptRosterTable(res.classes || [], deptId || (depts[0] && depts[0].id) || null, depts);
+    renderDeptRosterFilters();
+    renderDeptRosterTable(res.classes || [], deptId || deptRosterDeptId || null, depts);
   } catch (e) {
     $('deptroster-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
   }

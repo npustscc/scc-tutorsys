@@ -650,8 +650,10 @@ await flow('G', async () => {
     const txt = await page2.locator('#deptroster-content').textContent();
     evid['G-deptroster-page'] = (txt || '').trim().slice(0, 300);
     expect(!/四農園/.test(txt || ''), '頁面出現他系班級');
-    const selHidden = await page2.locator('#deptroster-dept').evaluate((el) => getComputedStyle(el.parentElement).display);
-    expect(selHidden === 'none', '單一系所時選單應收起，display=' + selHidden);
+    // 用 isVisible（會考慮祖先）而不是自己的 computed display：單一系所時是整列
+    // #deptroster-filters 收起來，欄位本身的 display 仍是 block。
+    const selVisible = await page2.locator('#deptroster-dept').isVisible();
+    expect(!selVisible, '單一系所時選單應收起');
   });
   await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G-系辦助理看到的導師資料頁.png') });
   console.log('   📸 G-系辦助理看到的導師資料頁');
@@ -717,6 +719,39 @@ await flow('G', async () => {
     expect(!(after.data.classes || []).some((c) => c.id === target.id), '刪除後仍回傳該班');
   });
   await ctx2.close();
+});
+
+// ══ G3：導師資料的「學院 → 系所」兩層篩選（admin 管得到全部系所才看得出效果）══
+await flow('G3', async () => {
+  await check('G3', 'admin 開導師資料頁：學院選單＝全部＋2 學院，系所選單＝3 系', async () => {
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('#deptroster-content table').waitFor({ timeout: 15000 });
+    const colOpts = await page.locator('#deptroster-college option').allTextContents();
+    const deptOpts = await page.locator('#deptroster-dept option').allTextContents();
+    evid['G3-college-options'] = colOpts.join(' | ');
+    expect(colOpts.length === 3, '學院選單應為「全部＋2 學院」，實得 ' + colOpts.join(','));
+    expect(/農學院（2）/.test(colOpts.join('')), '農學院應標示 2 個系所：' + colOpts.join(','));
+    expect(deptOpts.length === 3, '系所選單應有 3 個系，實得 ' + deptOpts.join(','));
+  });
+  await check('G3', '選「農學院」→ 系所選單只剩該學院的兩系', async () => {
+    await page.selectOption('#deptroster-college', '農學院');
+    await page.locator('#deptroster-content table').waitFor({ timeout: 10000 });
+    const deptOpts = await page.locator('#deptroster-dept option').allTextContents();
+    evid['G3-depts-in-農學院'] = deptOpts.join(',');
+    expect(deptOpts.length === 2 && deptOpts.indexOf('獸醫系') === -1, '實得 ' + deptOpts.join(','));
+  });
+  await page.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G3-導師資料學院篩選.png') });
+  console.log('   📸 G3-導師資料學院篩選');
+  await check('G3', '選「獸醫學院」→ 系所自動改指獸醫系，表格跟著換系', async () => {
+    // 班名不寫死：D 的換學期流程會把獸醫系那班改名（四獸醫四A→四獸醫五A），認「獸醫」就好。
+    await page.selectOption('#deptroster-college', '獸醫學院');
+    await page.locator('#deptroster-content table', { hasText: '獸醫' }).waitFor({ timeout: 10000 });
+    const deptVal = await page.locator('#deptroster-dept').inputValue();
+    const txt = await page.locator('#deptroster-content').textContent();
+    evid['G3-獸醫學院-table'] = (txt || '').trim().slice(0, 120);
+    expect(deptVal === '獸醫系', '系所選單值＝' + deptVal);
+    expect(!/四農園/.test(txt || ''), '換學院後仍出現他學院的班級');
+  });
 });
 
 // ══ H：系辦助理帳密登入（GAS 軌專用的路；校內信箱不是 Google 帳號）═══════════
