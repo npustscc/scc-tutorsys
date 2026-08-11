@@ -437,11 +437,18 @@ test('Sheet 版面：前五列是學院名／說明／三列表頭，資料從�
   assert.equal(t.values[0][0], '農學院');
   assert.match(t.values[1][0], /最後同步：2026-08-11 12:00/);
   assert.match(t.values[1][0], /不含導師私人手機/);
-  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
-  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '校內分機', 'Email', '']);
-  // 第 6 列（index 5）起是資料：系別與主任導師只在該系第一列出現
-  assert.deepEqual(plain(t.values[5]), ['農園系', '梁佑慎', '6247', '四農園一A', '四技一A', '甲', '1', 'a@x.com', '啟用']);
-  assert.deepEqual(plain(t.values[6]), ['', '', '', '四農園一A', '四技一A', '乙', '', '', '啟用']);
+  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
+  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '', '']);
+  // 第 6 列（index 5）起是資料：系別／主任導師／班級都只寫在區塊第一列，其餘留白給合併用
+  assert.deepEqual(plain(t.values[5]), ['農園系', '梁佑慎', '6247', '四農園一A', '四技一A', '甲', '1', '啟用']);
+  assert.deepEqual(plain(t.values[6]), ['', '', '', '', '', '乙', '', '啟用']);
+  assert.equal(JSON.stringify(t.values).indexOf('a@x.com'), -1, 'Sheet 不放 email（2026-08-11 決策）');
+  // 合併座標：系別/主任導師兩欄跨該系 2 列（從第 6 列起）、班級兩欄跨同班的 2 位導師
+  const m = plain(t.merges);
+  assert.ok(m.some((x) => x.row === 6 && x.col === 1 && x.numRows === 2), '系別欄沒合併：' + JSON.stringify(m));
+  assert.ok(m.some((x) => x.row === 6 && x.col === 4 && x.numRows === 2), '班級欄沒合併：' + JSON.stringify(m));
+  assert.ok(m.some((x) => x.row === 3 && x.col === 2 && x.numCols === 2), '主任導師表頭沒跨欄：' + JSON.stringify(m));
+  assert.ok(m.some((x) => x.row === 1 && x.numCols === 8), '學院名沒跨滿整列');
   const flat = JSON.stringify(t.values);
   assert.equal(flat.indexOf('0955'), -1, '主任導師手機不得進 Sheet');
   assert.equal(flat.indexOf('0911'), -1, '導師手機不得進 Sheet');
