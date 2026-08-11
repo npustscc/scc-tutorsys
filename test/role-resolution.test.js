@@ -105,6 +105,32 @@ test('config.staffLeads 命中且未停用 → isStaffLead；停用則不算', (
   assert.equal(S.resolveRoles_('old@x.com', config, [], []).isStaffLead, false);
 });
 
+// 2026-08-11 決策：主責＝最大權限。這條是刻意的授權擴張，用測試釘住——哪天有人為了
+// 「縮小 admin 面」把它拿掉，會在這裡紅燈而不是等使用者發現主責看不到後台。
+test('主責同時取得 isAdmin（最大權限）；停用／刪除的主責兩者都不給（fail-closed）', () => {
+  const S = makeSandbox();
+  const config = {
+    staffLeads: [
+      { email: 'lead@x.com', name: 'Lead' },
+      { email: 'off@x.com', name: 'Off', disabled: true },
+      { email: 'gone@x.com', name: 'Gone', deleted: true },
+    ],
+  };
+  const lead = S.resolveRoles_('lead@x.com', config, [], []);
+  assert.equal(lead.isStaffLead, true);
+  assert.equal(lead.isAdmin, true, '主責應取得 admin 權限');
+  ['off@x.com', 'gone@x.com'].forEach(function (e) {
+    const r = S.resolveRoles_(e, config, [], []);
+    assert.equal(r.isStaffLead, false, e);
+    assert.equal(r.isAdmin, false, e + ' 停用/刪除後不得殘留 admin');
+  });
+  // 助理**不會**跟著升級：代為核章是靠 assistantLead，不是靠 admin。
+  const withAssistant = Object.assign({}, config, {
+    staffAssistants: [{ email: 'assist@x.com', name: 'Assist', leadEmail: 'lead@x.com' }],
+  });
+  assert.equal(S.resolveRoles_('assist@x.com', withAssistant, [], []).isAdmin, false);
+});
+
 test('config.staffAssistants 命中且未停用 → isStaffAssistant，assistantLead 綁定對應的未停用主責', () => {
   const S = makeSandbox();
   const config = {

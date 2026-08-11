@@ -76,6 +76,7 @@ async function apiCall(action, params, token) {
 const servers = startServers();
 const adminToken = servers.em.mint('admin@test.local');
 const assistantToken = servers.em.mint('assistant@test.local');
+const leadToken = servers.em.mint('lead@test.local');       // 學諮中心主責＝最大權限（2026-08-11）
 
 const browser = await chromium.launch();
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
@@ -673,32 +674,47 @@ await flow('G', async () => {
   await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G-系辦助理看到的導師資料頁.png') });
   console.log('   📸 G-系辦助理看到的導師資料頁');
 
-  // ── Phase 2：新增班級／填手機／刪除，以及手機不得外洩的不變量 ──
-  await check('G2', '新增班級（含導師手機）→ 列表出現該班且顯示電話', async () => {
+  // ── Phase 2：新增班級／填分機與手機／刪除，以及聯絡方式不得外洩的不變量 ──
+  await check('G2', '新增班級（含校內分機＋私人手機）→ 列表出現該班且兩欄都顯示', async () => {
     await page2.locator('[data-action="deptroster-new"]').click();
     await page2.locator('#deptroster-form').waitFor({ timeout: 5000 });
+    // 表單不該再有 email 欄（2026-08-11 決策：系辦助理不填 email）
+    expect(await page2.locator('#deptroster-tutors input[data-tutor-field="email"]').count() === 0,
+      '導師表單不該有 email 欄位');
     await page2.fill('#deptroster-name', '四技五A');
     await page2.fill('#deptroster-display', '四森林五A');
     await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="name"]', '測試導師');
-    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="phone"]', '0912-345-678');
+    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="ext"]', '7140');
+    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="mobile"]', '0912-345-678');
     await page2.locator('#deptroster-form button[type=submit]').click();
     await page2.locator('#deptroster-content table', { hasText: '四森林五A' }).waitFor({ timeout: 10000 });
     const txt = await page2.locator('#deptroster-content').textContent();
-    expect(/0912-345-678/.test(txt || ''), '列表沒顯示電話');
+    expect(/0912-345-678/.test(txt || ''), '列表沒顯示私人手機');
+    expect(/7140/.test(txt || ''), '列表沒顯示校內分機');
   });
   await page2.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G2-新增班級含手機.png') });
   console.log('   📸 G2-新增班級含手機');
 
-  await check('G2', '🔒 手機不進 bootstrap：同一帳號的 bootstrap 回應完全沒有 phone 欄位', async () => {
-    const r = await apiCall('bootstrap', {}, deptAsstToken.token);
-    const s = JSON.stringify(r);
-    evid['G2-bootstrap-has-phone'] = String(/"phone"/.test(s));
-    expect(!/"phone"/.test(s), 'bootstrap 回應含 phone 欄位');
-    expect(/四森林五A/.test(s), 'bootstrap 應該看得到這個班（只是不含 phone）');
+  // 注意比對範圍：admin 的 bootstrap 本來就帶 config.deptAssistants（那裡的 ext 是**系辦助理
+  // 自己的分機**，屬於後台名單，不是導師聯絡方式）。所以鍵名只在 classes 上驗，
+  // 號碼本身才對整包回應驗。
+  const CONTACT_KEYS = /"(phone|ext|mobile)"/;
+  const bootstrapProbe = async (token, who) => {
+    const r = await apiCall('bootstrap', {}, token);
+    const classesJson = JSON.stringify((r.data || {}).classes || []);
+    const whole = JSON.stringify(r);
+    expect(!CONTACT_KEYS.test(classesJson),
+      who + ' 的 bootstrap classes 含聯絡欄位：' + (classesJson.match(CONTACT_KEYS) || [])[0]);
+    expect(!/0912-345-678/.test(whole), who + ' 的 bootstrap 出現了手機號碼本身');
+    return { r, classesJson };
+  };
+  await check('G2', '🔒 聯絡方式不進 bootstrap：classes 沒有 phone/ext/mobile，號碼也不出現', async () => {
+    const { classesJson } = await bootstrapProbe(deptAsstToken.token, '系辦助理');
+    evid['G2-bootstrap-classes-clean'] = String(!CONTACT_KEYS.test(classesJson));
+    expect(/四森林五A/.test(classesJson), 'bootstrap 應該看得到這個班（只是不含聯絡方式）');
   });
-  await check('G2', '🔒 admin 的 bootstrap 也沒有 phone（無例外的不變量）', async () => {
-    const r = await apiCall('bootstrap', {}, adminToken.token);
-    expect(!/"phone"/.test(JSON.stringify(r)), 'admin 的 bootstrap 含 phone 欄位');
+  await check('G2', '🔒 admin 的 bootstrap 也沒有聯絡方式（無例外的不變量）', async () => {
+    await bootstrapProbe(adminToken.token, 'admin');
   });
   await check('G2', '🔒 系辦助理在別系新增班級 → forbidden', async () => {
     const r = await apiCall('deptRosterUpsertClass', {
@@ -718,11 +734,45 @@ await flow('G', async () => {
     }, deptAsstToken.token);
     expect(/already exists/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
   });
-  await check('G2', '🔒 電話含不允許字元 → 拒絕', async () => {
+  await check('G2', '🔒 手機含不允許字元 → 拒絕', async () => {
     const r = await apiCall('deptRosterUpsertClass', {
-      class: { deptId: '森林系', name: '四技六A', tutors: [{ name: '甲', phone: '<script>x</script>' }] },
+      class: { deptId: '森林系', name: '四技六A', tutors: [{ name: '甲', mobile: '<script>x</script>' }] },
     }, deptAsstToken.token);
-    expect(/電話格式不正確/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+    expect(/私人手機格式不正確/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '🔒 表單沒有 email 欄，存檔後導師的 email 仍在（核章權限不能被清掉）', async () => {
+    const before = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const target = (before.data.classes || []).find((c) => c.name === '家族陳美惠');
+    expect(!!target && target.tutors[0].email === 'chen@test.local', '前置：' + JSON.stringify(target && target.tutors));
+    // 走 UI：編輯該班、只填分機再存檔（表單根本沒有 email 欄可送）
+    await page2.locator('tr', { hasText: '家族陳美惠' }).locator('[data-action="deptroster-edit"]').click();
+    await page2.locator('#deptroster-form').waitFor({ timeout: 5000 });
+    await page2.fill('#deptroster-tutors tbody tr input[data-tutor-field="ext"]', '7141');
+    await page2.locator('#deptroster-form button[type=submit]').click();
+    await page2.locator('#deptroster-content table', { hasText: '7141' }).waitFor({ timeout: 10000 });
+    const after = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const t = (after.data.classes || []).find((c) => c.name === '家族陳美惠').tutors[0];
+    evid['G2-email-preserved'] = JSON.stringify(t);
+    expect(t.email === 'chen@test.local', '存檔後 email 被清掉了：' + JSON.stringify(t));
+    expect(t.ext === '7141', '分機沒存進去：' + JSON.stringify(t));
+  });
+  await check('G2', '🔒 email 保留是靠姓名對應：導師改名後不會把別人的 email 帶過去', async () => {
+    const r = await apiCall('deptRosterUpsertClass', {
+      class: {
+        id: '森林系_家族陳美惠', deptId: '森林系', name: '家族陳美惠',
+        tutors: [{ name: '換人做', ext: '', mobile: '' }],
+      },
+    }, deptAsstToken.token);
+    const t = ((r.data || {}).class || {}).tutors[0];
+    evid['G2-email-not-carried-to-new-name'] = JSON.stringify(t);
+    expect(t && t.email === '', '改名後不該沿用前一位導師的 email：' + JSON.stringify(t));
+    // 還原，後面的步驟仍以 陳美惠 為準
+    await apiCall('deptRosterUpsertClass', {
+      class: {
+        id: '森林系_家族陳美惠', deptId: '森林系', name: '家族陳美惠',
+        tutors: [{ name: '陳美惠', email: 'chen@test.local', ext: '7141', mobile: '' }],
+      },
+    }, deptAsstToken.token);
   });
   await check('G2', '刪除班級 → 列表消失，且是軟刪除（deptRosterGet 不再回它）', async () => {
     const before = await apiCall('deptRosterGet', {}, deptAsstToken.token);
@@ -774,6 +824,69 @@ await flow('G3', async () => {
     expect(deptVal === '獸醫系', '系所選單值＝' + deptVal);
     expect(!/四農園/.test(txt || ''), '換學院後仍出現他學院的班級');
   });
+});
+
+// ══ J：學諮中心主責＝最大權限（2026-08-11 決策）═════════════════════════════
+// 主責看得到 admin 的所有畫面、做得到 admin 的所有動作；助理**不會**跟著升級。
+await flow('J', async () => {
+  await check('J', '主責的 bootstrap 回 isAdmin:true，且拿得到只給 admin 的名單', async () => {
+    const r = await apiCall('bootstrap', {}, leadToken.token);
+    const d = r.data || {};
+    evid['J-lead-roles'] = JSON.stringify(d.roles);
+    expect(d.roles && d.roles.isAdmin === true && d.roles.isStaffLead === true, 'roles=' + JSON.stringify(d.roles));
+    expect(!!d.users && !!d.staffLeads && !!d.deptAssistants, '主責應拿得到 users/staffLeads/deptAssistants 名單');
+  });
+  await check('J', '主責可執行 admin action（adminUpsertCollege）', async () => {
+    const r = await apiCall('adminUpsertCollege', { college: { id: '主責建的學院', name: '主責建的學院' } }, leadToken.token);
+    evid['J-lead-admin-action'] = JSON.stringify(r).slice(0, 160);
+    expect(r.success === true, '回應=' + JSON.stringify(r).slice(0, 200));
+  });
+  await check('J', '主責讀得到全部系所的名冊（deptRosterGet 不指定 deptId）', async () => {
+    const r = await apiCall('deptRosterGet', {}, leadToken.token);
+    const ids = (r.data || {}).deptIds || [];
+    evid['J-lead-roster-scope'] = ids.length + ' depts';
+    expect(ids.length > 1 && ids.indexOf('森林系') !== -1, 'deptIds=' + JSON.stringify(ids).slice(0, 200));
+  });
+  await check('J', '🔒 學諮助理**不會**跟著升級：打 admin action 仍被拒', async () => {
+    const r = await apiCall('adminUpsertCollege', { college: { id: 'x1', name: '助理不該建得出來' } }, assistantToken.token);
+    evid['J-assistant-still-blocked'] = JSON.stringify(r);
+    expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
+  });
+  await check('J', '🔒 系辦助理也不會升級：打 admin action 仍被拒', async () => {
+    const r = await apiCall('adminUpsertCollege', { college: { id: 'x2', name: '系辦助理不該建得出來' } }, deptAsstToken.token);
+    expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
+  });
+  // UI：主責登入後看得到後台管理與導師資料頁籤
+  const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx3.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+    const rq = route.request();
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: rq.postData() || '' });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+  });
+  await ctx3.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript',
+    body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+  }));
+  await ctx3.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+  await ctx3.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+  await ctx3.addInitScript(({ rootId, token, exp }) => {
+    localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email: 'lead@test.local', name: '測試主責', picture: '' }));
+    localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email: 'lead@test.local' }));
+  }, { rootId: ROOT_FOLDER_ID, token: leadToken.token, exp: leadToken.exp });
+  const page3 = await ctx3.newPage();
+  page3.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[J/page3] ' + m.text()); });
+  page3.on('pageerror', (e) => consoleErrors.push('[J/page3] pageerror: ' + e.message));
+  await page3.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await check('J', '主責登入後的導覽列＝admin 看得到的全部頁籤', async () => {
+    await page3.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 15000 });
+    const navs = await page3.locator('.nav-btn').allTextContents();
+    const adminNavs = await page.locator('.nav-btn').allTextContents();
+    evid['J-lead-navs'] = navs.join(',');
+    expect(JSON.stringify(navs.map((s) => s.replace(/\d+$/, ''))) === JSON.stringify(adminNavs.map((s) => s.replace(/\d+$/, ''))),
+      '主責的頁籤與 admin 不一致：' + navs.join(',') + ' vs ' + adminNavs.join(','));
+  });
+  await shot(page3, 'J-主責看到的畫面（與 admin 同）');
+  await ctx3.close();
 });
 
 // ══ I：切頁順暢度（快取先畫）＋ 視窗不該被「拖曳反白到外面放開」關掉 ═══════════

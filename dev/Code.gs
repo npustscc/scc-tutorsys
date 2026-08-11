@@ -1245,7 +1245,18 @@ function resolveRoles_(email, config, departments, classes) {
   const staffLeads = (config && config.staffLeads) || [];
   const staffAssistants = (config && config.staffAssistants) || [];
   const lead = staffLeads.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
-  if (lead) roles.isStaffLead = true;
+  if (lead) {
+    roles.isStaffLead = true;
+    // 學諮中心主責＝系統最大權限（2026-08-11 使用者決策）：主責看得到、也做得到 admin 的一切。
+    // 刻意寫成「主責 ⇒ isAdmin」單一條規則，而不是在每個閘門各補一個 `|| roles.isStaffLead`：
+    // 本系統是 default-deny，逐點補會漏掉日後新增的 action（漏了＝主責少看到一頁），
+    // 也讓「誰有權限」散在幾十處無法一眼確認。代價要講清楚——主責因此同時獲得
+    //   ①resolveActionableStage_ 的 admin override（可代核/代退**任何一關**，含導師關與系主任關）
+    //   ②職員帳號與系辦助理帳號的管理權（可新增管理員、可把助理密碼重設為分機）
+    //   ③全部系所的名冊讀取權（deptRosterGet 走 isAdmin 分支，含私人手機）
+    // 要收回其中任何一項，就不能靠這一行，得改成該閘門自己判斷 isStaffLead。
+    roles.isAdmin = true;
+  }
   const assistant = staffAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
   if (assistant) {
     roles.isStaffAssistant = true;
@@ -1584,9 +1595,12 @@ function isValidSemesterId_(semesterId, semesters) {
 // - suggestedTutors 的 by（建議者 email，即上傳學生）與自填 email 屬個資，只有 admin
 //   看得到完整內容；其他人（含該班導師）只拿到 name（前端顯示「待確認」chip 用）。
 // - tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
-// 導師手機（tutors[].phone，Phase 2 由系辦助理填）**一律不進 bootstrap**——
+// 導師聯絡方式（tutors[].ext 校內分機／tutors[].mobile 私人手機，以及 2026-08-11 之前的
+// 單一欄位 phone）**一律不進 bootstrap**——
 // bootstrap 的 classes 是每一個登入者（含任何 Google 帳號的學生）都拿得到的，
-// 手機留在裡面就等於全校可讀。要看手機只有一條路：deptRosterGet（後端按系所驗權限）。
+// 手機留在裡面就等於全校可讀。要看它們只有一條路：deptRosterGet（後端按系所驗權限）。
+// 分機雖然是校內公開資訊，也一起拔掉：同一組欄位走同一條通道，不留「這欄可以、那欄不行」
+// 的判斷空間。
 // 這裡對**所有角色含 admin** 都拔掉，讓「bootstrap 的 classes 沒有 phone」成為一條無例外的
 // 不變量——有例外就會有人依賴例外，然後某天例外變成漏洞。
 // 實作刻意**內聯**在 sanitizeClassesForViewer_ 裡而不是抽成 helper：抽出去的話，
@@ -1598,9 +1612,11 @@ function sanitizeClassesForViewer_(classes, roles) {
     if (c && c.tutors && c.tutors.length) {
       c = Object.assign({}, c0);
       c.tutors = c0.tutors.map(function (t) {
-        if (!t || t.phone === undefined) return t;
+        if (!t || (t.phone === undefined && t.ext === undefined && t.mobile === undefined)) return t;
         const t2 = Object.assign({}, t);
         delete t2.phone;
+        delete t2.ext;
+        delete t2.mobile;
         return t2;
       });
     }
@@ -3306,20 +3322,33 @@ function projectClassForDeptRoster_(cls) {
     requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
     graduatedSemester: cls.graduatedSemester || null,
     active: cls.active !== false,
-    // phone（導師手機）**只在這條通道出現**：bootstrap 的 classes 是每個登入者都拿得到的，
-    // 手機放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會把它整個拔掉（見該函式）。
+    // ext（校內分機）／mobile（私人手機）**只在這條通道出現**：bootstrap 的 classes 是每個
+    // 登入者都拿得到的，放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會整組拔掉（見該函式）。
+    // 2026-08-11 之前只有單一「電話」欄 phone，沒填過 mobile 的舊資料就把 phone 當私人手機顯示
+    // （當時的欄位標籤就是「電話」，實際填的是手機）。
     tutors: (cls.tutors || []).map(function (t) {
-      return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+      // 存檔時整個 tutors 陣列會被換掉（不留 phone 鍵），所以這個 fallback 只會命中沒編輯過的舊列。
+      return {
+        name: (t && t.name) || '', email: (t && t.email) || '',
+        ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+      };
     }),
   };
 }
 
-// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填手機）。
-// 姓名必填，email/手機選填。手機是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
+// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填聯絡方式）。
+// 姓名必填，其餘選填。聯絡方式是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
 // 名冊上會有「0912-345-678」「(08)7703202#1234」這類寫法，硬要正規化只會逼人填假的。
+//
+// 2026-08-11 起分成兩欄：ext（校內分機）與 mobile（私人手機）；在那之前是單一欄位 phone。
+// 舊鍵 phone 仍當作 mobile 收下（GAS 軌與自架軌各有一份資料，不可能同時換版），
+// 但寫出去的物件只有 ext/mobile，存過一次就沒有 phone 了。
+// email 這裡仍然驗、仍然存：表單雖然不再讓助理填，**它是導師核章權限的身分依據**
+// （resolveRoles_ 的 tutorOf 靠 email 命中），由 deptRosterUpsertClassAction_ 依姓名補回舊值。
 function normalizeDeptRosterTutors_(tutors) {
   if (!Array.isArray(tutors)) return { ok: false, error: 'tutors must be an array' };
   if (tutors.length > 10) return { ok: false, error: 'too many tutors (max 10)' };
+  const CONTACT_RE = /^[0-9+\-()#\s]{1,20}$/;
   const out = [];
   for (let i = 0; i < tutors.length; i++) {
     const t = tutors[i] || {};
@@ -3330,14 +3359,36 @@ function normalizeDeptRosterTutors_(tutors) {
     const email = String(t.email == null ? '' : t.email).trim().toLowerCase();
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
     if (email.length > 100) return { ok: false, error: 'email 過長' };
-    const phone = String(t.phone == null ? '' : t.phone).trim();
-    if (phone && !/^[0-9+\-()#\s]{1,20}$/.test(phone)) return { ok: false, error: '電話格式不正確（只接受數字與 + - ( ) # 空白）：' + phone };
-    out.push({ name: name, email: email, phone: phone });
+    const ext = String(t.ext == null ? '' : t.ext).trim();
+    if (ext && !CONTACT_RE.test(ext)) return { ok: false, error: '校內分機格式不正確（只接受數字與 + - ( ) # 空白）：' + ext };
+    const mobileRaw = (t.mobile === undefined || t.mobile === null) ? t.phone : t.mobile;
+    const mobile = String(mobileRaw == null ? '' : mobileRaw).trim();
+    if (mobile && !CONTACT_RE.test(mobile)) return { ok: false, error: '私人手機格式不正確（只接受數字與 + - ( ) # 空白）：' + mobile };
+    out.push({ name: name, email: email, ext: ext, mobile: mobile });
   }
   return { ok: true, tutors: out };
 }
 
-// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含手機）。
+// 送上來沒有 email 的導師，依**姓名**把既有的 email 補回來（純函式）。
+// 2026-08-11 起導師資料表單不再有 email 欄（系辦助理只填分機與手機），送上來一律是空字串；
+// 直接寫回去等於把 class.tutors[].email 清空，而那是導師核章權限的身分依據
+// （resolveRoles_ 的 tutorOf 用 email 命中 isClassTutor_）——導師會就此失去自己班的核章權。
+// 姓名相同視為同一人（同班同名極罕見；真的撞名就取第一個，寧可補錯也不要清空）。
+// 明確送了 email 的呼叫端（admin 匯入路徑不走這裡，但未來可能有）照送的值為準。
+function carryOverTutorEmails_(incoming, existing) {
+  const byName = {};
+  (existing || []).forEach(function (t) {
+    const k = String((t && t.name) || '').trim();
+    if (k && !byName[k] && t.email) byName[k] = t.email;
+  });
+  return (incoming || []).map(function (t) {
+    if (t.email) return t;
+    const old = byName[String(t.name || '').trim()];
+    return old ? Object.assign({}, t, { email: old }) : t;
+  });
+}
+
+// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含聯絡方式）。
 // 刻意不開放的欄位：deptId（不能把班搬去別系）、requiredMeetingOverride／graduatedSemester
 // （應繳份數與畢業狀態是中心的事）、uploadWhitelist、suggestedTutors。
 // 既有班級一律先確認「它現在就屬於允許的系所」才准動——不然帶著別系的 classId 就能改到別系。
@@ -3378,7 +3429,8 @@ function deptRosterUpsertClassAction_(params, ctx, userEmail) {
       if (clash) throw new Error('class name already exists: ' + className);
       target = Object.assign({}, cur, {
         name: className, displayName: displayName || cur.displayName || className,
-        tutors: tutorsRes.tutors, updatedAt: now, updatedBy: userEmail,
+        tutors: carryOverTutorEmails_(tutorsRes.tutors, cur.tutors),
+        updatedAt: now, updatedBy: userEmail,
       });
       next[idx] = target;
     } else {

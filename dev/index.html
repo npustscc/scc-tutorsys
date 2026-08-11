@@ -2135,8 +2135,8 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
   $('page-root').innerHTML =
     '<div class="card">' +
       '<h2>導師資料</h2>' +
-      '<p class="field-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫聯絡電話。' +
-      '<b>導師電話屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
+      '<p class="field-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫<b>校內分機</b>與<b>私人手機</b>。' +
+      '<b>導師的私人手機屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
       '<div class="row" id="deptroster-filters">' +
         '<div class="field" style="max-width:260px;"><label>學院</label><select id="deptroster-college"></select></div>' +
         '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
@@ -2249,31 +2249,37 @@ function renderDeptRosterTable(classes, deptId, depts) {
     return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
   });
   const tutorCount = sorted.reduce(function (n, c) { return n + (c.tutors || []).length; }, 0);
-  const noPhone = sorted.reduce(function (n, c) {
-    return n + (c.tutors || []).filter(function (t) { return !t.phone; }).length;
+  // 這個平台要收的就是手機，所以待辦數以「還沒有私人手機」計（分機沒填不算缺口）。
+  const noMobile = sorted.reduce(function (n, c) {
+    return n + (c.tutors || []).filter(function (t) { return !t.mobile; }).length;
   }, 0);
   deptRosterCache = sorted;
+  // 每位導師一列（同班多位導師用 <br> 疊在同一格），欄位對齊靠同順序輸出。
+  const stack = function (tutors, pick, missingWarn) {
+    if (!tutors.length) return '<span class="field-hint">—</span>';
+    return tutors.map(function (t) {
+      const v = pick(t);
+      if (v) return escapeHtml(v);
+      return missingWarn
+        ? '<span style="color:var(--color-warning);">（未填）</span>'
+        : '<span class="field-hint">（未填）</span>';
+    }).join('<br>');
+  };
   $('deptroster-content').innerHTML =
     '<p class="field-hint">共 ' + sorted.length + ' 班、' + tutorCount + ' 位導師' +
-      (noPhone ? '，其中 <b>' + noPhone + '</b> 位還沒有電話' : '（電話都填好了）') + '。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>Email</th><th>電話</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+      (noMobile ? '，其中 <b>' + noMobile + '</b> 位還沒有私人手機' : '（私人手機都填好了）') + '。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>校內分機</th><th>私人手機</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     sorted.map(function (c) {
       const tutors = c.tutors || [];
       const names = tutors.length ? tutors.map(function (t) { return escapeHtml(t.name || '（未填姓名）'); }).join('<br>') : '<span class="field-hint">（尚無導師）</span>';
-      const emails = tutors.length
-        ? tutors.map(function (t) { return t.email ? escapeHtml(t.email) : '<span class="field-hint">（未填）</span>'; }).join('<br>')
-        : '<span class="field-hint">—</span>';
-      const phones = tutors.length
-        ? tutors.map(function (t) { return t.phone ? escapeHtml(t.phone) : '<span style="color:var(--color-warning);">（未填）</span>'; }).join('<br>')
-        : '<span class="field-hint">—</span>';
       const state = [];
       if (c.active === false) state.push('停用');
       if (c.graduatedSemester) state.push('已畢業（' + escapeHtml(c.graduatedSemester) + '）');
       return '<tr><td data-label="班級">' + escapeHtml(c.displayName || c.name) + '</td>' +
         '<td data-label="班級名稱(原始)">' + escapeHtml(c.name) + '</td>' +
         '<td data-label="導師">' + names + '</td>' +
-        '<td data-label="Email">' + emails + '</td>' +
-        '<td data-label="電話">' + phones + '</td>' +
+        '<td data-label="校內分機">' + stack(tutors, function (t) { return t.ext; }, false) + '</td>' +
+        '<td data-label="私人手機">' + stack(tutors, function (t) { return t.mobile; }, true) + '</td>' +
         '<td data-label="狀態">' + (state.length ? state.join('／') : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="deptroster-edit" data-class-id="' + escapeHtml(c.id) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="deptroster-delete" data-class-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
@@ -2283,18 +2289,21 @@ function renderDeptRosterTable(classes, deptId, depts) {
 // ── 班級／導師編輯（Phase 2）──────────────────────────────────────────────────
 let deptRosterCache = [];
 
+// 導師一列＝姓名＋校內分機＋私人手機。email 刻意不在表單上（2026-08-11 使用者決策：
+// 系辦助理不用填 email），但**資料裡仍然保留**——它是導師核章權限的身分依據，
+// 後端 carryOverTutorEmails_ 會依姓名把既有的 email 補回存檔的物件。
 function deptRosterTutorRowHtml(t, i) {
   t = t || {};
   return '<tr data-tutor-row="' + i + '">' +
     '<td><input type="text" data-tutor-field="name" value="' + escapeHtml(t.name || '') + '" maxlength="20" placeholder="必填"></td>' +
-    '<td><input type="text" data-tutor-field="email" value="' + escapeHtml(t.email || '') + '" placeholder="選填"></td>' +
-    '<td><input type="text" data-tutor-field="phone" value="' + escapeHtml(t.phone || '') + '" maxlength="20" placeholder="選填，例 0912345678"></td>' +
+    '<td><input type="text" data-tutor-field="ext" value="' + escapeHtml(t.ext || '') + '" maxlength="20" placeholder="選填，例 7140"></td>' +
+    '<td><input type="text" data-tutor-field="mobile" value="' + escapeHtml(t.mobile || '') + '" maxlength="20" placeholder="選填，例 0912345678"></td>' +
     '<td><button type="button" class="btn btn-sm btn-danger" data-action="deptroster-tutor-remove">移除</button></td></tr>';
 }
 
 function openDeptRosterForm(classId) {
   const cls = classId ? deptRosterCache.find(function (c) { return c.id === classId; }) : null;
-  const tutors = (cls && cls.tutors && cls.tutors.length) ? cls.tutors : [{ name: '', email: '', phone: '' }];
+  const tutors = (cls && cls.tutors && cls.tutors.length) ? cls.tutors : [{ name: '', ext: '', mobile: '' }];
   const bodyHtml = '<form id="deptroster-form">' +
     '<div class="field"><label>班級名稱（原始）</label>' +
       '<input type="text" id="deptroster-name" maxlength="20" value="' + escapeHtml(cls ? cls.name : '') + '" required>' +
@@ -2303,10 +2312,10 @@ function openDeptRosterForm(classId) {
       '<input type="text" id="deptroster-display" maxlength="40" value="' + escapeHtml(cls ? (cls.displayName || '') : '') + '" placeholder="留空自動產生">' +
       '<span class="field-hint">這一欄可以用符號，對外看到的就是它。</span></div>' +
     '<div class="field"><label>導師（最多 10 位）</label>' +
-      '<div class="table-wrap"><table id="deptroster-tutors"><thead><tr><th>姓名</th><th>Email</th><th>電話</th><th></th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table id="deptroster-tutors"><thead><tr><th>姓名</th><th>校內分機</th><th>私人手機</th><th></th></tr></thead><tbody>' +
       tutors.map(deptRosterTutorRowHtml).join('') + '</tbody></table></div>' +
       '<button type="button" class="btn btn-sm" data-action="deptroster-tutor-add" style="margin-top:6px;">新增一位導師</button>' +
-      '<span class="field-hint">電話屬於高度個資，只有您與學諮中心看得到。</span></div>' +
+      '<span class="field-hint">私人手機屬於高度個資，只有您與學諮中心看得到。</span></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
     '<button type="submit" class="btn btn-primary">儲存</button></div></form>';
   openModal(cls ? '編輯班級' : '新增班級', bodyHtml);
@@ -2316,8 +2325,8 @@ function openDeptRosterForm(classId) {
     const rows = Array.prototype.slice.call(document.querySelectorAll('#deptroster-tutors tbody tr'));
     const tutorList = rows.map(function (tr) {
       const get = function (f) { const el = tr.querySelector('[data-tutor-field="' + f + '"]'); return el ? el.value.trim() : ''; };
-      return { name: get('name'), email: get('email'), phone: get('phone') };
-    }).filter(function (t) { return t.name || t.email || t.phone; });  // 整列空白＝使用者沒填，不送
+      return { name: get('name'), ext: get('ext'), mobile: get('mobile') };
+    }).filter(function (t) { return t.name || t.ext || t.mobile; });   // 整列空白＝使用者沒填，不送
     const payload = {
       class: {
         id: cls ? cls.id : undefined,

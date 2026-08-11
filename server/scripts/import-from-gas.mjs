@@ -35,13 +35,19 @@ import path from 'node:path';
 // ── 純函式：合併名冊（可單元測試，不碰 I/O）──────────────────────────────────
 const ROSTER_FIELDS = ['name', 'displayName', 'deptId', 'systemId', 'requiredMeetingOverride', 'graduatedSemester', 'active'];
 
-// 比較用的正規化：本地舊資料的 tutors 是 {name,email}（沒有 phone 欄位）、缺欄位是 undefined；
-// 遠端投影一律補成 phone:'' 與 null。不正規化就比較的話，第一次同步會把 375 筆全報成「更新」，
+// 比較用的正規化：本地舊資料的 tutors 是 {name,email}（沒有聯絡欄位）、缺欄位是 undefined；
+// 遠端投影一律補成 ''與 null。不正規化就比較的話，第一次同步會把 375 筆全報成「更新」，
 // 之後每次也一樣——真正的變動就被雜訊淹掉了（2026-08-10 首次預演實際看到）。
+// 2026-08-11 起聯絡欄位由單一 phone 拆成 ext（校內分機）＋mobile（私人手機）；
+// 兩邊都可能還留著舊的 phone（各自的資料是分開的），一律折進 mobile 再比較，
+// 否則換版後第一次同步又會整批報成「更新」。
 function normRosterValue(v) { return v === undefined ? null : v; }
 function normTutors(tutors) {
   return (tutors || []).map(function (t) {
-    return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+    return {
+      name: (t && t.name) || '', email: (t && t.email) || '',
+      ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+    };
   });
 }
 function sameRoster(local, remote) {
@@ -157,8 +163,9 @@ async function main() {
   });
   console.log('[import-from-gas] 取得 ' + (roster.departments || []).length + ' 個系所、' +
     (roster.classes || []).length + ' 個班級');
-  const withPhone = (roster.classes || []).reduce((n, c) => n + (c.tutors || []).filter((t) => t.phone).length, 0);
-  console.log('[import-from-gas] 其中有電話的導師：' + withPhone + ' 位');
+  const count = (pick) => (roster.classes || []).reduce((n, c) => n + (c.tutors || []).filter(pick).length, 0);
+  console.log('[import-from-gas] 其中有私人手機的導師：' + count((t) => t.mobile || t.phone) +
+    ' 位、有校內分機：' + count((t) => t.ext) + ' 位');
 
   const readLocal = (name, fallback) => {
     try { return JSON.parse(fs.readFileSync(path.join(storeDir, name), 'utf8')); } catch (e) { return fallback; }

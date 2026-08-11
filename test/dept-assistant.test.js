@@ -167,7 +167,7 @@ test('🔒 班級投影只給名冊欄位：uploadWhitelist / suggestedTutors �
   });
   assert.equal('uploadWhitelist' in out, false);
   assert.equal('suggestedTutors' in out, false);
-  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com', phone: '' }]);
+  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com', ext: '', mobile: '' }]);
   assert.equal(out.displayName, '四農園一A');
   assert.equal(out.active, true);
 });
@@ -187,50 +187,91 @@ test('班級投影：active=false 照實回報（助理要知道班被停用了�
   assert.equal(S.projectClassForDeptRoster_({ id: 'x', name: 'n', deptId: 'd', active: false }).active, false);
 });
 
-// ── Phase 2：導師手機與編輯權限 ───────────────────────────────────────────────
+// ── Phase 2：導師聯絡方式與編輯權限 ───────────────────────────────────────────
 function makeSandbox2() {
   return load([
     'normalizeDeptRosterTutors_', 'sanitizeClassesForViewer_', 'projectClassForDeptRoster_',
+    'carryOverTutorEmails_',
   ], {});
 }
 
-test('導師名單：姓名必填、email/手機選填，回傳三個欄位都在', () => {
+test('導師名單：姓名必填，分機/手機/email 選填，回傳四個欄位都在', () => {
   const S = makeSandbox2();
-  const r = S.normalizeDeptRosterTutors_([{ name: '陳美惠', email: 'A@X.COM', phone: '0912-345-678' }, { name: '王小明' }]);
+  const r = S.normalizeDeptRosterTutors_([
+    { name: '陳美惠', email: 'A@X.COM', ext: '7140', mobile: '0912-345-678' },
+    { name: '王小明' },
+  ]);
   assert.equal(r.ok, true);
-  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: 'a@x.com', phone: '0912-345-678' });
-  assert.deepEqual(r.tutors[1], { name: '王小明', email: '', phone: '' });
+  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: 'a@x.com', ext: '7140', mobile: '0912-345-678' });
+  assert.deepEqual(r.tutors[1], { name: '王小明', email: '', ext: '', mobile: '' });
 });
 
-test('導師名單：沒姓名、email 格式錯、電話含不允許字元、人數超過 10 → 拒絕', () => {
+test('導師名單：舊鍵 phone 仍收下並折進 mobile（換版時兩軌資料不會同時換）', () => {
+  const S = makeSandbox2();
+  const r = S.normalizeDeptRosterTutors_([{ name: '陳美惠', phone: '0912345678' }]);
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: '', ext: '', mobile: '0912345678' });
+  assert.equal('phone' in r.tutors[0], false, '寫回去的物件不該再有 phone 鍵');
+  // 明確給了 mobile 就以 mobile 為準，不被舊鍵蓋掉
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', phone: '0911', mobile: '0922' }]).tutors[0].mobile, '0922');
+});
+
+test('導師名單：沒姓名、email 格式錯、分機或手機含不允許字元、人數超過 10 → 拒絕', () => {
   const S = makeSandbox2();
   assert.equal(S.normalizeDeptRosterTutors_([{ name: '  ' }]).ok, false);
   assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', email: 'not-an-email' }]).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', mobile: '0912<script>' }]).ok, false);
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', ext: '7140<script>' }]).ok, false);
   assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', phone: '0912<script>' }]).ok, false);
   assert.equal(S.normalizeDeptRosterTutors_(new Array(11).fill({ name: 'A' })).ok, false);
   assert.equal(S.normalizeDeptRosterTutors_('nope').ok, false);
 });
 
-test('🔒 bootstrap 的 classes 一律不含 phone——連 admin 也一樣（無例外的不變量）', () => {
+test('🔒 bootstrap 的 classes 一律不含 ext/mobile/phone——連 admin 也一樣（無例外的不變量）', () => {
   const S = makeSandbox2();
   const classes = [{
-    id: 'c1', deptId: 'd', name: 'n', tutors: [{ name: '陳美惠', email: 'a@x.com', phone: '0912345678' }],
+    id: 'c1', deptId: 'd', name: 'n',
+    tutors: [{ name: '陳美惠', email: 'a@x.com', ext: '7140', mobile: '0912345678', phone: '0987654321' }],
   }];
   [{ isAdmin: true, tutorOf: [] }, { isAdmin: false, tutorOf: ['c1'] }, { isAdmin: false, tutorOf: [] }].forEach(function (roles) {
     const out = S.sanitizeClassesForViewer_(classes, roles);
-    assert.equal('phone' in out[0].tutors[0], false, '角色 ' + JSON.stringify(roles) + ' 拿到了 phone');
+    ['phone', 'ext', 'mobile'].forEach(function (f) {
+      assert.equal(f in out[0].tutors[0], false, '角色 ' + JSON.stringify(roles) + ' 拿到了 ' + f);
+    });
     assert.equal(out[0].tutors[0].name, '陳美惠');
+    assert.equal(out[0].tutors[0].email, 'a@x.com', 'email 要留著（上傳表單與核章顯示需要）');
   });
   // 原始物件不可被就地修改（深拷貝）
-  assert.equal(classes[0].tutors[0].phone, '0912345678');
+  assert.equal(classes[0].tutors[0].mobile, '0912345678');
 });
 
-test('deptRosterGet 的投影**要**帶 phone（那是唯一看得到手機的通道）', () => {
+test('deptRosterGet 的投影**要**帶 ext/mobile（那是唯一看得到聯絡方式的通道），舊 phone 當手機', () => {
   const S = makeSandbox2();
   const out = S.projectClassForDeptRoster_({
-    id: 'c1', name: 'n', deptId: 'd', tutors: [{ name: '陳美惠', phone: '0912345678' }],
+    id: 'c1', name: 'n', deptId: 'd',
+    tutors: [{ name: '陳美惠', ext: '7140', mobile: '0912345678' }, { name: '舊資料', phone: '0987654321' }],
   });
-  assert.equal(out.tutors[0].phone, '0912345678');
+  assert.equal(out.tutors[0].ext, '7140');
+  assert.equal(out.tutors[0].mobile, '0912345678');
+  assert.equal(out.tutors[1].mobile, '0987654321', '2026-08-11 前的單一電話欄要當成私人手機顯示');
+  assert.equal(out.tutors[1].ext, '');
+});
+
+test('🔒 表單不再送 email，存檔時依姓名把既有 email 補回來（否則導師會失去核章權）', () => {
+  const S = makeSandbox2();
+  const existing = [{ name: '陳美惠', email: 'chen@x.com' }, { name: '王小明', email: 'wang@x.com' }];
+  const incoming = [
+    { name: '陳美惠', email: '', ext: '7140', mobile: '' },        // 表單送上來的形狀
+    { name: '新來的', email: '', ext: '', mobile: '0911' },        // 沒有舊值可補
+    { name: '王小明', email: 'typed@x.com', ext: '', mobile: '' }, // 明確給了就以送來的為準
+  ];
+  const out = S.carryOverTutorEmails_(incoming, existing);
+  assert.equal(out[0].email, 'chen@x.com');
+  assert.equal(out[0].ext, '7140', '補 email 不可動到其他欄位');
+  assert.equal(out[1].email, '');
+  assert.equal(out[2].email, 'typed@x.com');
+  // 新增班級（沒有既有名單）時不炸
+  assert.deepEqual(S.carryOverTutorEmails_(incoming, undefined)[0].email, '');
 });
 
 // ── GAS 軌的本機帳密（系辦助理校內信箱不是 Google 帳號，只能走帳密）───────────
