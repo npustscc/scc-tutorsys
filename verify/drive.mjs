@@ -996,6 +996,46 @@ await flow('J', async () => {
   await ctx3.close();
 });
 
+// ══ K：導師端不受「收起上傳頁籤」影響（收的只有 admin／主責）═══════════════════
+await flow('K', async () => {
+  // 用 lee@test.local：E 的匯入會把種子的導師名單換掉（wang 在那之後就不是導師了），
+  // 匯入後農園系_四技一A 的導師是李新師/王助教。
+  const tutorToken = servers.em.mint('lee@test.local');
+  const ctx4 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await ctx4.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+    const rq = route.request();
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: rq.postData() || '' });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+  });
+  await ctx4.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript',
+    body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+  }));
+  await ctx4.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+  await ctx4.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+  await ctx4.addInitScript(({ rootId, token, exp }) => {
+    localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email: 'lee@test.local', name: '李新師', picture: '' }));
+    localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email: 'lee@test.local' }));
+  }, { rootId: ROOT_FOLDER_ID, token: tutorToken.token, exp: tutorToken.exp });
+  const page4 = await ctx4.newPage();
+  page4.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[K/page4] ' + m.text()); });
+  page4.on('pageerror', (e) => consoleErrors.push('[K/page4] pageerror: ' + e.message));
+  await page4.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await check('K', '導師登入後仍看得到「上傳」頁籤，且點得開表單', async () => {
+    await page4.locator('.nav-btn', { hasText: '導師個人後台' }).waitFor({ timeout: 15000 });
+    const navs = await page4.locator('.nav-btn').allTextContents();
+    evid['K-tutor-navs'] = navs.join(',');
+    expect(navs.some((t) => /^上傳$/.test(t)), '導師的導覽列少了「上傳」：' + navs.join(','));
+    await page4.locator('.nav-btn', { hasText: /^上傳$/ }).click();
+    await page4.locator('#page-root', { hasText: '班會紀錄' }).waitFor({ timeout: 10000 });
+  });
+  await check('K', '導師沒有「後台管理」，也看不到導師資料頁籤', async () => {
+    const navs = await page4.locator('.nav-btn').allTextContents();
+    expect(!navs.some((t) => /後台管理|導師資料/.test(t)), '導師不該有這些頁籤：' + navs.join(','));
+  });
+  await ctx4.close();
+});
+
 // ══ I：切頁順暢度（快取先畫）＋ 視窗不該被「拖曳反白到外面放開」關掉 ═══════════
 await flow('I', async () => {
   await check('I', '切到全校總表 → 離開 → 再切回來時直接有表格，不再閃「載入中…」', async () => {
