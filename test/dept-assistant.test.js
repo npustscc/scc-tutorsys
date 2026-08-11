@@ -191,9 +191,54 @@ test('班級投影：active=false 照實回報（助理要知道班被停用了�
 function makeSandbox2() {
   return load([
     'normalizeDeptRosterTutors_', 'sanitizeClassesForViewer_', 'projectClassForDeptRoster_',
-    'carryOverTutorEmails_',
+    'carryOverTutorEmails_', 'normalizeDeptHead_', 'projectDeptHeadForRoster_',
+    'sanitizeDepartmentsForViewer_',
   ], {});
 }
+
+// ── 主任導師（＝系主任）─────────────────────────────────────────────────────
+test('主任導師投影：head 缺欄位時退回 headName/headEmail，舊 phone 當手機', () => {
+  const S = makeSandbox2();
+  const full = S.projectDeptHeadForRoster_({
+    id: 'd', headName: '舊的', headEmail: 'old@x.com',
+    head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0911' },
+  });
+  assert.deepEqual(full, { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0911' });
+  // 還沒有 head 的系所：拿既有的 headName/headEmail 當預設，聯絡方式空白
+  assert.deepEqual(S.projectDeptHeadForRoster_({ id: 'd', headName: '林盈宏', headEmail: 'lin@x.com' }),
+    { name: '林盈宏', email: 'lin@x.com', ext: '', mobile: '' });
+  assert.equal(S.projectDeptHeadForRoster_({ id: 'd', head: { phone: '0922' } }).mobile, '0922');
+  assert.deepEqual(S.projectDeptHeadForRoster_(null), { name: '', email: '', ext: '', mobile: '' });
+});
+
+test('🔒 bootstrap 的 departments 不含主任導師的分機/手機，但保留 headName/headEmail（核章身分）', () => {
+  const S = makeSandbox2();
+  const depts = [{
+    id: '森林系', name: '森林系', headName: '吳羽婷', headEmail: 'wu@x.com',
+    head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0912345678' },
+  }, { id: '無主任系', name: '無主任系' }];
+  const out = S.sanitizeDepartmentsForViewer_(depts);
+  assert.deepEqual(out[0].head, { name: '吳羽婷', email: 'wu@x.com' });
+  assert.equal(out[0].headEmail, 'wu@x.com', 'headEmail 要留著，deptHeadOf 靠它解析');
+  assert.equal(JSON.stringify(out).indexOf('0912345678'), -1, '手機號碼不得出現');
+  assert.equal(out[1].head, undefined, '沒有 head 的系所原樣通過');
+  // 原始物件不可被就地修改
+  assert.equal(depts[0].head.mobile, '0912345678');
+});
+
+test('主任導師欄位驗證：姓名字元、email 格式、分機/手機字元', () => {
+  const S = makeSandbox2();
+  assert.equal(S.normalizeDeptHead_({ name: '吳羽婷', email: 'WU@X.COM', ext: '7149', mobile: '0912-345-678' }).ok, true);
+  assert.equal(S.normalizeDeptHead_({ name: '吳羽婷', email: 'WU@X.COM' }).head.email, 'wu@x.com');
+  assert.equal(S.normalizeDeptHead_({ name: 'A<script>' }).ok, false);
+  assert.equal(S.normalizeDeptHead_({ name: 'A', email: 'not-an-email' }).ok, false);
+  assert.equal(S.normalizeDeptHead_({ name: 'A', ext: '71<49' }).ok, false);
+  assert.equal(S.normalizeDeptHead_({ name: 'A', mobile: '09一二' }).ok, false);
+  // 舊鍵 phone 一樣折進 mobile
+  assert.equal(S.normalizeDeptHead_({ name: 'A', phone: '0911' }).head.mobile, '0911');
+  // 全空也合法（等於清掉聯絡方式）
+  assert.deepEqual(S.normalizeDeptHead_({}).head, { name: '', email: '', ext: '', mobile: '' });
+});
 
 test('導師名單：姓名必填，分機/手機/email 選填，回傳四個欄位都在', () => {
   const S = makeSandbox2();

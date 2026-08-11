@@ -127,6 +127,8 @@ function doPost(e) {
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
       case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
+      case 'deptRosterUpsertHead':      result = deptRosterUpsertHeadAction_(params, ctx, userEmail); break;
+      case 'adminBulkUpsertDeptHeads':  result = adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -1637,6 +1639,19 @@ function sanitizeClassesForViewer_(classes, roles) {
   });
 }
 
+// 系所的「主任導師」（＝系主任）聯絡方式，比照導師的 ext/mobile：**一律不進 bootstrap**。
+// departments 是每個登入者都拿得到的（前端要用它顯示系所名稱），主任的私人手機留在裡面
+// 等於全校可讀。要看它只有 deptRosterGet 一條路。headName/headEmail 照舊保留——
+// 那是核章身分（resolveRoles_ 的 deptHeadOf 靠 headEmail 命中），且是校內公開資訊。
+function sanitizeDepartmentsForViewer_(departments) {
+  return (departments || []).map(function (d) {
+    if (!d || !d.head) return d;
+    const copy = Object.assign({}, d);
+    copy.head = { name: d.head.name || '', email: d.head.email || '' };
+    return copy;
+  });
+}
+
 // 依呼叫者角色過濾單筆 record 的敏感欄位（actualBy：助理代主責核章時的真實身分）。
 // 只有 admin / director / staffLead / staffAssistant 看得到 actualBy；其他人（含導師、系主任、
 // 提交者本人）拿到的 approvals.*.actualBy 與 history[].actualBy / rejection.actualBy 一律移除，
@@ -2616,7 +2631,8 @@ function bootstrapAction_(params, ctx, userEmail) {
   return {
     email: userEmail,
     roles: roles,
-    departments: departments,
+    // 主任導師的分機/手機不在這裡出現（見 sanitizeDepartmentsForViewer_）。
+    departments: sanitizeDepartmentsForViewer_(departments),
     colleges: colleges,
     tutorSystems: tutorSystems,
     // uploadWhitelist（學生 gmail 清單）只給該班導師/admin 看，其他人只拿到 hasWhitelist 布林。
@@ -3038,7 +3054,7 @@ function adminUpsertDepartmentAction_(params, ctx, userEmail) {
     if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('departments.json', data, ctx);
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDepartment' : 'adminUpsertDepartment', by: userEmail, targetId: entry.id, at: now });
-    return { departments: data };
+    return { departments: sanitizeDepartmentsForViewer_(data) };
   });
 }
 
@@ -3153,7 +3169,8 @@ function adminImportRosterAction_(params, ctx, userEmail) {
       count: successCount, errorCount: errors.length, at: now,
     });
     return {
-      colleges: colleges, departments: departments, tutorSystems: tutorSystems, classes: classes,
+      colleges: colleges, departments: sanitizeDepartmentsForViewer_(departments),
+      tutorSystems: tutorSystems, classes: classes,
       successCount: successCount, errors: errors,
     };
   });
@@ -3369,6 +3386,110 @@ function normalizeDeptRosterTutors_(tutors) {
   return { ok: true, tutors: out };
 }
 
+// ── 主任導師（＝系主任）─────────────────────────────────────────────────────
+// 系所層級只有一位，資料放在 department.head = {name,email,ext,mobile}。
+// headName/headEmail 是**核章身分**（resolveRoles_ 的 deptHeadOf 靠 headEmail 命中），
+// 與 head.name/head.email 同步由 admin 維護；系辦助理只能改姓名與聯絡方式，**改不到 email**
+// ——能改 email 就等於能把自己設成系主任、進而核章，那是提權（見 deptRosterUpsertHeadAction_）。
+function projectDeptHeadForRoster_(dept) {
+  const h = (dept && dept.head) || {};
+  return {
+    name: h.name || (dept && dept.headName) || '',
+    email: h.email || (dept && dept.headEmail) || '',
+    ext: h.ext || '',
+    mobile: (h.mobile || h.phone) || '',
+  };
+}
+
+// 主任導師欄位正規化（純函式）。規則刻意與導師名單同一套（同樣的字元白名單與長度）。
+function normalizeDeptHead_(head) {
+  const h = head || {};
+  const CONTACT_RE = /^[0-9+\-()#\s]{1,20}$/;
+  const name = String(h.name == null ? '' : h.name).trim();
+  if (name && !/^[A-Za-z0-9一-鿿·．\s]{1,20}$/.test(name)) return { ok: false, error: '主任導師姓名含不允許的字元：' + name };
+  const email = String(h.email == null ? '' : h.email).trim().toLowerCase();
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
+  if (email.length > 100) return { ok: false, error: 'email 過長' };
+  const ext = String(h.ext == null ? '' : h.ext).trim();
+  if (ext && !CONTACT_RE.test(ext)) return { ok: false, error: '校內分機格式不正確：' + ext };
+  const mobileRaw = (h.mobile === undefined || h.mobile === null) ? h.phone : h.mobile;
+  const mobile = String(mobileRaw == null ? '' : mobileRaw).trim();
+  if (mobile && !CONTACT_RE.test(mobile)) return { ok: false, error: '私人手機格式不正確：' + mobile };
+  return { ok: true, head: { name: name, email: email, ext: ext, mobile: mobile } };
+}
+
+// deptRosterUpsertHead：系辦助理（或 admin）維護自己系的主任導師姓名與聯絡方式。
+// **email 一律沿用既有值**：那是核章身分，助理改得動就等於能指派系主任。要換人請由中心（admin）改。
+function deptRosterUpsertHeadAction_(params, ctx, userEmail) {
+  const wantDeptId = String(params.deptId || '').trim();
+  const headRes = normalizeDeptHead_(params.head);
+  if (!headRes.ok) throw new Error(headRes.error);
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, wantDeptId, departments);
+    if (!scope.ok) throw new Error(scope.error);
+    const deptId = scope.deptIds.length === 1 ? scope.deptIds[0] : wantDeptId;
+    if (!deptId || scope.deptIds.indexOf(deptId) === -1) throw new Error('forbidden');
+
+    const idx = departments.findIndex(function (d) { return d && d.id === deptId; });
+    if (idx === -1) throw new Error('department not found: ' + deptId);
+    const cur = departments[idx];
+    const now = new Date().toISOString();
+    const head = Object.assign({}, headRes.head, {
+      email: (cur.head && cur.head.email) || cur.headEmail || '',   // ← 助理改不到
+    });
+    departments[idx] = Object.assign({}, cur, {
+      head: head, headName: head.name, updatedAt: now, updatedBy: userEmail,
+    });
+    writeJsonPath_('departments.json', departments, ctx);
+    appendAuditLog_(ctx, { action: 'deptRosterUpsertHead', by: userEmail, targetId: deptId, at: now });
+    return { department: { id: deptId, name: cur.name, collegeId: cur.collegeId || null, head: projectDeptHeadForRoster_(departments[idx]) } };
+  });
+}
+
+// adminBulkUpsertDeptHeads：admin only，一次寫入多系的主任導師（含 email）。
+// 37 個系所逐筆呼叫 adminUpsertDepartment 會各進一次鎖、各寫一次檔，在 GAS 上會逼近 6 分鐘上限
+// （2026-08-10 建 47 個帳號時實際卡住過），所以這裡「讀一次 → 全部算完 → 寫一次」。
+// 任一列的系所不存在就整批拒絕，不做部分寫入——半套的名單比沒有更難查。
+function adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const rows = params.heads;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('heads 必須是非空陣列');
+  if (rows.length > 200) throw new Error('一次最多 200 列');
+
+  return withLock_(function () {
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const now = new Date().toISOString();
+    const prepared = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i] || {};
+      const deptId = String(r.deptId || '').trim();
+      const idx = departments.findIndex(function (d) { return d && d.id === deptId && d.deleted !== true; });
+      if (idx === -1) throw new Error('第 ' + (i + 1) + ' 列：找不到系所「' + deptId + '」');
+      const res = normalizeDeptHead_(r);
+      if (!res.ok) throw new Error('第 ' + (i + 1) + ' 列：' + res.error);
+      if (!res.head.name) throw new Error('第 ' + (i + 1) + ' 列：主任導師姓名必填');
+      prepared.push({ idx: idx, head: res.head });
+    }
+    prepared.forEach(function (p) {
+      const cur = departments[p.idx];
+      departments[p.idx] = Object.assign({}, cur, {
+        head: p.head,
+        // headName/headEmail 是核章身分的事實來源，與 head 同步更新。
+        headName: p.head.name, headEmail: p.head.email,
+        updatedAt: now, updatedBy: userEmail,
+      });
+    });
+    writeJsonPath_('departments.json', departments, ctx);
+    appendAuditLog_(ctx, { action: 'adminBulkUpsertDeptHeads', by: userEmail, targetId: prepared.length + ' depts', at: now });
+    return { count: prepared.length, departments: sanitizeDepartmentsForViewer_(departments) };
+  });
+}
+
 // 送上來沒有 email 的導師，依**姓名**把既有的 email 補回來（純函式）。
 // 2026-08-11 起導師資料表單不再有 email 欄（系辦助理只填分機與手機），送上來一律是空字串；
 // 直接寫回去等於把 class.tutors[].email 清空，而那是導師核章權限的身分依據
@@ -3502,7 +3623,10 @@ function deptRosterGetAction_(params, ctx, userEmail) {
 
   const depts = departments.filter(function (d) {
     return d && scope.deptIds.indexOf(d.id) !== -1;
-  }).map(function (d) { return { id: d.id, name: d.name, collegeId: d.collegeId || null }; });
+  }).map(function (d) {
+    // head（主任導師＝系主任）帶完整聯絡方式，因為這裡就是那條唯一通道。
+    return { id: d.id, name: d.name, collegeId: d.collegeId || null, head: projectDeptHeadForRoster_(d) };
+  });
 
   return { deptIds: scope.deptIds, departments: depts, classes: rows };
 }
@@ -3795,7 +3919,7 @@ function classResolveAction_(params, ctx, userEmail) {
     return {
       deptId: res.dept.id,
       classId: res.cls.id,
-      departments: departments,
+      departments: sanitizeDepartmentsForViewer_(departments),
       classes: sanitizeClassesForViewer_(classes, roles),
       suggestionsDropped: res.suggestionsDropped || 0,
     };

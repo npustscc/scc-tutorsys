@@ -687,12 +687,14 @@ async function doLocalLogin(email, password) {
   return res;
 }
 
-// GAS 軌的品牌名：這個平台目前只做一件事——讓各系系辦助理上傳導師電話，
+// GAS 軌的品牌名：這個平台目前只做一件事——讓各系系辦助理維護本系導師名冊（含聯絡方式），
 // 叫「導師資訊系統」會讓人以為班會紀錄/核章也在這裡（那套在校內自架站）。
+// 2026-08-11 由「各系導師電話上傳表單」改名為「導師名冊」：欄位已不只電話，
+// 也不是一次性的「上傳表單」而是持續維護的名冊。
 // 只改 GAS 軌：自架站仍是完整的導師資訊系統，名稱不動。
 // 靜態 <title>／badge 保持原樣不動，改在執行時覆蓋——promote.mjs 的 13 條規則比對的是
 // 原始字串，改動它們會讓推行流程失配。
-const GAS_APP_TITLE_ = '各系導師電話上傳表單';
+const GAS_APP_TITLE_ = '導師名冊';
 function applyTrackBranding() {
   if (isSelfHosted()) return;
   const isDev = /（測試版）/.test(document.title) || !!document.querySelector('.env-badge');
@@ -1033,7 +1035,7 @@ const NAV_PAGES = [
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
 
-// 登入後的第一頁。GAS 軌＝各系導師電話上傳表單，第一眼就該是導師名冊；
+// 登入後的第一頁。GAS 軌＝「導師名冊」平台，第一眼就該是導師資料；
 // 落在「班會紀錄上傳」不只是不對題，對只有系辦助理身分的人更是一個導覽列上根本沒有的頁面
 // （navPagesForRoles 已把其餘頁籤收掉），等於一進來就看到自己點不回去的畫面。
 // 自架站是完整的導師資訊系統，維持原本的「上傳」。
@@ -2141,6 +2143,7 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
         '<div class="field" style="max-width:260px;"><label>學院</label><select id="deptroster-college"></select></div>' +
         '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
       '</div>' +
+      '<div id="deptroster-head"></div>' +
       '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button></div>' +
       '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
     '</div>';
@@ -2233,8 +2236,80 @@ async function loadDeptRoster(deptId) {
         if (!stillThere) deptRosterDeptId = depts[0].id;
       }
       renderDeptRosterFilters();
-      renderDeptRosterTable(res.classes || [], deptId || deptRosterDeptId || null, depts);
+      // 主任導師（＝系主任）是系所層級的一筆，跟著目前選到的系所走。
+      const shownDeptId = deptId || deptRosterDeptId || null;
+      const shownDept = depts.filter(function (d) { return d.id === shownDeptId; })[0] ||
+        deptRosterDepts.filter(function (d) { return d.id === shownDeptId; })[0] || null;
+      // 不帶 deptId 的那趟會一次回全部系所（含各自的 head），順手全部快取起來，
+      // 切系所時就不必等下一趟回來才畫得出主任導師。
+      depts.forEach(function (d) { if (d && d.head) deptRosterHeadCache[d.id] = d.head; });
+      renderDeptRosterHead(shownDeptId);
+      renderDeptRosterTable(res.classes || [], shownDeptId, depts);
     },
+  });
+}
+
+// 主任導師卡片。email 只顯示不可編（那是核章身分，要換人請中心改）——助理能改的是姓名與聯絡方式。
+let deptRosterHeadCache = {};
+function renderDeptRosterHead(deptId) {
+  const box = $('deptroster-head');
+  if (!box) return;
+  if (!deptId) { box.innerHTML = ''; return; }
+  const h = deptRosterHeadCache[deptId] || { name: '', email: '', ext: '', mobile: '' };
+  const miss = '<span style="color:var(--color-warning);">（未填）</span>';
+  box.innerHTML =
+    '<div class="card" style="margin:12px 0; background:var(--color-bg-subtle, #f7f9fc);">' +
+      '<div class="row" style="align-items:baseline; gap:10px;">' +
+        '<b>主任導師（系主任）</b>' +
+        '<span>' + (h.name ? escapeHtml(h.name) : '<span style="color:var(--color-warning);">（尚未設定）</span>') + '</span>' +
+        (h.email ? '<span class="field-hint">' + escapeHtml(h.email) + '</span>' : '') +
+        '<span>校內分機：' + (h.ext ? escapeHtml(h.ext) : miss) + '</span>' +
+        '<span>私人手機：' + (h.mobile ? escapeHtml(h.mobile) : miss) + '</span>' +
+        '<button class="btn btn-sm" data-action="deptroster-head-edit">編輯</button>' +
+      '</div>' +
+    '</div>';
+}
+
+function openDeptRosterHeadForm() {
+  const deptId = deptRosterDeptId;
+  if (!deptId) return;
+  const h = deptRosterHeadCache[deptId] || { name: '', email: '', ext: '', mobile: '' };
+  openModal('主任導師（系主任）',
+    '<form id="deptroster-head-form">' +
+      '<div class="field"><label>姓名</label>' +
+        '<input type="text" id="deptroster-head-name" maxlength="20" value="' + escapeHtml(h.name || '') + '" required></div>' +
+      '<div class="field"><label>Email</label>' +
+        '<input type="text" value="' + escapeHtml(h.email || '') + '" disabled>' +
+        '<span class="field-hint">這一欄是核章身分（系主任那一關認的就是它），只有學諮中心能改。要換系主任請通知中心。</span></div>' +
+      '<div class="field"><label>校內分機</label>' +
+        '<input type="text" id="deptroster-head-ext" maxlength="20" value="' + escapeHtml(h.ext || '') + '" placeholder="選填，例 7140"></div>' +
+      '<div class="field"><label>私人手機</label>' +
+        '<input type="text" id="deptroster-head-mobile" maxlength="20" value="' + escapeHtml(h.mobile || '') + '" placeholder="選填，例 0912345678">' +
+        '<span class="field-hint">私人手機屬於高度個資，只有您與學諮中心看得到。</span></div>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+      '<button type="submit" class="btn btn-primary">儲存</button></div></form>');
+
+  $('deptroster-head-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const submitBtn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(submitBtn, async function () {
+        const res = await proxyCall('deptRosterUpsertHead', {
+          deptId: deptId,
+          head: {
+            name: $('deptroster-head-name').value.trim(),
+            ext: $('deptroster-head-ext').value.trim(),
+            mobile: $('deptroster-head-mobile').value.trim(),
+          },
+        });
+        if (res && res.department && res.department.head) deptRosterHeadCache[deptId] = res.department.head;
+        invalidatePageData('deptRosterGet');
+        showToast('已儲存', 'success');
+        closeModal();
+        renderDeptRosterHead(deptId);
+        await loadDeptRoster(deptRosterDeptId);
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
 }
 
@@ -2350,6 +2425,7 @@ function openDeptRosterForm(classId) {
 }
 
 document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="deptroster-head-edit"]')) { openDeptRosterHeadForm(); return; }
   if (e.target.closest('[data-action="deptroster-new"]')) { openDeptRosterForm(null); return; }
   const edit = e.target.closest('[data-action="deptroster-edit"]');
   if (edit) { openDeptRosterForm(edit.dataset.classId); return; }
@@ -3091,7 +3167,44 @@ function renderAdminDepartments() {
         '<td data-label="操作"><button class="btn btn-sm" data-action="dept-edit" data-id="' + escapeHtml(d.id) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="dept-delete" data-id="' + escapeHtml(d.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
-    '<button class="btn btn-primary" data-action="dept-new" style="margin-top:12px;">新增系所</button></div>';
+    '<button class="btn btn-primary" data-action="dept-new" style="margin-top:12px;">新增系所</button> ' +
+    '<button class="btn" data-action="depthead-bulk" style="margin-top:12px;">批次匯入主任導師（貼上 JSON）</button></div>';
+}
+
+// 批次匯入各系主任導師（＝系主任）。37 個系所逐筆存太痛苦，而名單含 email／分機，
+// 比照系辦助理白名單的做法：資料留在使用者手上，只在匯入當下經過瀏覽器，不進 repo。
+function openDeptHeadBulkForm() {
+  openModal('批次匯入主任導師（系主任）',
+    '<p class="field-hint">貼上 JSON 陣列，每列 <code>{"deptId","name","email","ext"}</code>（ext 選填）。' +
+    '<b>email 是核章身分</b>——系主任那一關認的就是它，請填本人可登入的信箱。' +
+    '任一列的系所不存在會整批拒絕，不會寫入一半。</p>' +
+    '<div class="field"><textarea id="depthead-bulk-json" rows="10" style="width:100%; font-family:monospace; font-size:.8rem;" ' +
+    'placeholder=\'[{"deptId":"森林系","name":"吳羽婷","email":"yutingwu@mail.npust.edu.tw","ext":"7149"}]\'></textarea></div>' +
+    '<div id="depthead-bulk-result"></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="button" class="btn btn-primary" id="depthead-bulk-submit">匯入</button></div>');
+
+  $('depthead-bulk-submit').addEventListener('click', async function (e) {
+    let rows;
+    try {
+      rows = JSON.parse($('depthead-bulk-json').value);
+      if (!Array.isArray(rows) || !rows.length) throw new Error('要是一個非空的陣列');
+    } catch (err) {
+      $('depthead-bulk-result').innerHTML = '<div class="import-error-box">JSON 解析失敗：' + escapeHtml(err.message) + '</div>';
+      return;
+    }
+    try {
+      await withBtnPending(e.target, async function () {
+        const res = await proxyCall('adminBulkUpsertDeptHeads', { heads: rows });
+        bootstrapData.departments = res.departments;
+        showToast('已匯入 ' + res.count + ' 位主任導師', 'success');
+        closeModal();
+        renderAdminDepartments();
+      });
+    } catch (err) {
+      $('depthead-bulk-result').innerHTML = '<div class="import-error-box">匯入失敗：' + escapeHtml(err.message) + '</div>';
+    }
+  });
 }
 
 function openDeptForm(dept) {
@@ -3126,6 +3239,7 @@ function openDeptForm(dept) {
 
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="dept-new"]')) { openDeptForm(); return; }
+  if (e.target.closest('[data-action="depthead-bulk"]')) { openDeptHeadBulkForm(); return; }
   const editBtn = e.target.closest('[data-action="dept-edit"]');
   if (editBtn) { openDeptForm(deptById(editBtn.dataset.id)); return; }
   const delBtn = e.target.closest('[data-action="dept-delete"]');

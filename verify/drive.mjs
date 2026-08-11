@@ -774,6 +774,52 @@ await flow('G', async () => {
       },
     }, deptAsstToken.token);
   });
+  // ── 主任導師（＝系主任）：助理可維護姓名與聯絡方式，但改不到 email（那是核章身分）──
+  await check('G2', '主任導師：助理填分機與手機 → deptRosterGet 讀得到', async () => {
+    await page2.locator('[data-action="deptroster-head-edit"]').click();
+    await page2.locator('#deptroster-head-form').waitFor({ timeout: 5000 });
+    expect(await page2.locator('#deptroster-head-form input[disabled]').count() === 1, 'email 欄應為唯讀');
+    await page2.fill('#deptroster-head-name', '吳羽婷');
+    await page2.fill('#deptroster-head-ext', '7149');
+    await page2.fill('#deptroster-head-mobile', '0955-111-222');
+    await page2.locator('#deptroster-head-form button[type=submit]').click();
+    await page2.locator('#deptroster-head', { hasText: '0955-111-222' }).waitFor({ timeout: 10000 });
+    const r = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const d = (r.data.departments || [])[0];
+    evid['G2-head'] = JSON.stringify(d && d.head);
+    expect(d && d.head && d.head.ext === '7149' && d.head.mobile === '0955-111-222', 'head=' + JSON.stringify(d && d.head));
+  });
+  await shot(page2, 'G2-主任導師（系辦助理視角）');
+  await check('G2', '🔒 助理改不到主任導師的 email（改得到＝可以把自己設成系主任來核章）', async () => {
+    const r = await apiCall('deptRosterUpsertHead', {
+      deptId: '森林系', head: { name: '壞人', email: 'deptasst@test.local', ext: '', mobile: '' },
+    }, deptAsstToken.token);
+    const after = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const head = ((after.data.departments || [])[0] || {}).head || {};
+    evid['G2-head-email-locked'] = JSON.stringify(head);
+    expect(r.success === true, '這個呼叫本身是允許的（改姓名/聯絡方式）：' + JSON.stringify(r).slice(0, 160));
+    expect(head.email !== 'deptasst@test.local', 'email 被助理改掉了：' + JSON.stringify(head));
+    // 角色不得因此變成系主任
+    const boot = await apiCall('bootstrap', {}, deptAsstToken.token);
+    expect(JSON.stringify(((boot.data || {}).roles || {}).deptHeadOf || []) === '[]',
+      '助理取得了 deptHeadOf：' + JSON.stringify((boot.data.roles || {}).deptHeadOf));
+    // 還原姓名
+    await apiCall('deptRosterUpsertHead', {
+      deptId: '森林系', head: { name: '吳羽婷', ext: '7149', mobile: '0955-111-222' },
+    }, deptAsstToken.token);
+  });
+  await check('G2', '🔒 助理改別系的主任導師 → forbidden', async () => {
+    const r = await apiCall('deptRosterUpsertHead', {
+      deptId: '農園系', head: { name: '壞人' },
+    }, deptAsstToken.token);
+    expect(/forbidden/.test(JSON.stringify(r)), '回應=' + JSON.stringify(r));
+  });
+  await check('G2', '🔒 主任導師的手機不進 bootstrap 的 departments', async () => {
+    const r = await apiCall('bootstrap', {}, deptAsstToken.token);
+    const s = JSON.stringify((r.data || {}).departments || []);
+    evid['G2-bootstrap-depts-clean'] = String(!/0955-111-222/.test(s));
+    expect(!/0955-111-222/.test(s) && !/"mobile"/.test(s) && !/"ext"/.test(s), 'departments 含聯絡欄位：' + s.slice(0, 200));
+  });
   await check('G2', '刪除班級 → 列表消失，且是軟刪除（deptRosterGet 不再回它）', async () => {
     const before = await apiCall('deptRosterGet', {}, deptAsstToken.token);
     const target = (before.data.classes || []).find((c) => c.name === '四技五A');
@@ -846,6 +892,35 @@ await flow('J', async () => {
     const ids = (r.data || {}).deptIds || [];
     evid['J-lead-roster-scope'] = ids.length + ' depts';
     expect(ids.length > 1 && ids.indexOf('森林系') !== -1, 'deptIds=' + JSON.stringify(ids).slice(0, 200));
+  });
+  await check('J', 'admin 批次匯入主任導師：一次寫多系，headEmail 同步（系主任那一關才認得出人）', async () => {
+    const r = await apiCall('adminBulkUpsertDeptHeads', {
+      heads: [
+        { deptId: '農園系', name: '梁佑慎', email: 'justinliang@test.local', ext: '6247' },
+        { deptId: '獸醫系', name: '蔡宜倫', email: 'yltsai@test.local', ext: '5081' },
+      ],
+    }, adminToken.token);
+    evid['J-bulk-heads'] = JSON.stringify(r).slice(0, 120);
+    expect(r.success === true && r.data.count === 2, '回應=' + JSON.stringify(r).slice(0, 200));
+    const boot = await apiCall('bootstrap', {}, adminToken.token);
+    const d = ((boot.data || {}).departments || []).find((x) => x.id === '農園系');
+    expect(d && d.headEmail === 'justinliang@test.local', 'headEmail 沒同步：' + JSON.stringify(d));
+    expect(!/"ext"/.test(JSON.stringify(boot.data.departments)), 'bootstrap 的 departments 不該有 ext');
+  });
+  await check('J', '🔒 批次匯入遇到不存在的系所 → 整批拒絕（不做部分寫入）', async () => {
+    const r = await apiCall('adminBulkUpsertDeptHeads', {
+      heads: [{ deptId: '森林系', name: '照理說會被寫入' }, { deptId: '沒這個系', name: '壞列' }],
+    }, adminToken.token);
+    expect(r.success === false && /找不到系所/.test(r.error || ''), '回應=' + JSON.stringify(r));
+    const after = await apiCall('deptRosterGet', {}, deptAsstToken.token);
+    const head = ((after.data.departments || [])[0] || {}).head || {};
+    expect(head.name === '吳羽婷', '整批拒絕時第一列不該被寫進去：' + JSON.stringify(head));
+  });
+  await check('J', '🔒 系辦助理打 adminBulkUpsertDeptHeads → admin only 拒絕', async () => {
+    const r = await apiCall('adminBulkUpsertDeptHeads', {
+      heads: [{ deptId: '森林系', name: '壞人', email: 'deptasst@test.local' }],
+    }, deptAsstToken.token);
+    expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
   });
   await check('J', '🔒 學諮助理**不會**跟著升級：打 admin action 仍被拒', async () => {
     const r = await apiCall('adminUpsertCollege', { college: { id: 'x1', name: '助理不該建得出來' } }, assistantToken.token);
