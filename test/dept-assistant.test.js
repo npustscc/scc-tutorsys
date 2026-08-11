@@ -402,3 +402,70 @@ test('derivePasswordKey_ 全程走 (Byte[],Byte[]) overload，且輸出穩定可
   assert.notEqual(a, S.derivePasswordKey_('9999', 'aabb', 50, 'other-pepper'), 'pepper 不同要不同雜湊');
   assert.notEqual(a, S.derivePasswordKey_('9999', 'ccdd', 50, 'pepper-value'), 'salt 不同要不同雜湊');
 });
+
+// ── 名冊 → Google Sheet 同步、以及主責通知的合併規則 ────────────────────────
+function makeSandbox4() {
+  return load(['buildRosterSheetValues_', 'selectNotifyBatches_'], {});
+}
+
+test('Sheet 列：一位導師一列、主任導師排最前、**不含私人手機**', () => {
+  const S = makeSandbox4();
+  const rows = S.buildRosterSheetValues_(
+    [{ id: '森林系', name: '森林系', collegeId: 'agri', head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0955' } }],
+    [{ id: 'c1', name: '四技一A', displayName: '四森林一A', deptId: '森林系', active: true,
+       tutors: [{ name: '甲', email: 'a@x.com', ext: '1', mobile: '0911' }, { name: '乙' }] }],
+    [{ id: 'agri', name: '農學院' }]);
+  assert.deepEqual(rows[0], ['學院', '系所', '班級', '班級名稱(原始)', '導師', '校內分機', 'Email', '狀態', '更新時間']);
+  assert.equal(rows[1][2], '（主任導師）');
+  assert.equal(rows[1][0], '農學院');
+  assert.equal(rows.length, 4, '表頭＋主任導師＋兩位導師');
+  const flat = JSON.stringify(rows);
+  assert.equal(flat.indexOf('0955'), -1, '主任導師的手機不得進 Sheet');
+  assert.equal(flat.indexOf('0911'), -1, '導師的手機不得進 Sheet');
+});
+
+test('Sheet 列：軟刪除的班級與系所不出現；沒有導師的班級仍出一列', () => {
+  const S = makeSandbox4();
+  const rows = S.buildRosterSheetValues_(
+    [{ id: 'd1', name: 'D1' }, { id: 'd2', name: 'D2', deleted: true }],
+    [{ id: 'a', name: '一', deptId: 'd1', tutors: [] },
+     { id: 'b', name: '二', deptId: 'd1', deleted: true, tutors: [{ name: '甲' }] },
+     { id: 'c', name: '三', deptId: 'd2', tutors: [{ name: '乙' }] }], []);
+  assert.equal(rows.length, 2, '只剩表頭＋d1 的那一班');
+  assert.equal(rows[1][4], '', '沒有導師的班級導師欄留白');
+});
+
+test('通知合併：停手 10 分鐘就寄；一直在改滿 30 分鐘也要寄；其餘繼續等', () => {
+  const S = makeSandbox4();
+  const now = Date.parse('2026-08-11T10:00:00Z');
+  const at = function (minAgo) { return new Date(now - minAgo * 60000).toISOString(); };
+  const res = S.selectNotifyBatches_([
+    { deptId: '停手系', at: at(12) }, { deptId: '停手系', at: at(11) },      // 最後一筆 11 分鐘前 → 寄
+    { deptId: '狂改系', at: at(40) }, { deptId: '狂改系', at: at(1) },        // 最早 40 分鐘前 → 也要寄
+    { deptId: '剛改系', at: at(2) },                                          // 才剛改 → 繼續等
+  ], now, 10 * 60000, 30 * 60000);
+  assert.deepEqual(res.ready.map((b) => b.deptId), ['停手系', '狂改系']);
+  assert.equal(res.ready[0].events.length, 2);
+  assert.deepEqual(res.keep.map((e) => e.deptId), ['剛改系']);
+});
+
+test('通知合併：同一系的事件依時間排序；沒有 deptId 的髒資料直接丟掉', () => {
+  const S = makeSandbox4();
+  const now = Date.parse('2026-08-11T10:00:00Z');
+  const res = S.selectNotifyBatches_([
+    { deptId: 'A', at: '2026-08-11T09:30:00Z', summary: '後' },
+    { deptId: 'A', at: '2026-08-11T09:20:00Z', summary: '先' },
+    { at: '2026-08-11T09:20:00Z' }, null,
+  ], now, 10 * 60000, 30 * 60000);
+  assert.equal(res.ready.length, 1);
+  assert.deepEqual(res.ready[0].events.map((e) => e.summary), ['先', '後']);
+  assert.equal(res.keep.length, 0);
+});
+
+test('通知合併：空佇列不炸、也不會產生空批次', () => {
+  const S = makeSandbox4();
+  const res = S.selectNotifyBatches_([], Date.now(), 1000, 2000);
+  assert.equal(res.ready.length, 0);
+  assert.equal(res.keep.length, 0);
+  assert.equal(S.selectNotifyBatches_(null, Date.now(), 1000, 2000).ready.length, 0);
+});

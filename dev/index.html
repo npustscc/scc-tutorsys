@@ -2150,7 +2150,8 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
         '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
       '</div>' +
       '<div id="deptroster-head"></div>' +
-      '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button></div>' +
+      '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button> ' +
+      '<button class="btn btn-sm" data-action="deptroster-export">匯出 Excel</button></div>' +
       '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
     '</div>';
   // 監聽器在 await 之前就掛：等資料回來才掛的話，使用者在載入中切走頁面時 page-root
@@ -2253,6 +2254,109 @@ async function loadDeptRoster(deptId) {
       renderDeptRosterTable(res.classes || [], shownDeptId, depts);
     },
   });
+}
+
+// __ROSTER_EXPORT_START__
+// 導師名冊匯出用的列（純函式，無 DOM/全域相依，供 test/roster-export.test.js 就地抽出測試）。
+// 一位導師一列；一班多位導師就多列（Excel 要能直接排序/篩選，合併儲存格只會擋路）。
+// 沒有導師的班級仍出一列（導師欄留白）——「這班還沒有導師」正是中心要看見的缺口。
+// 主任導師（系主任）每個系一列，班級欄寫「（主任導師）」，排在該系最前面。
+function buildRosterExportRows(classes, depts, opts) {
+  opts = opts || {};
+  const deptById = {};
+  (depts || []).forEach(function (d) { if (d) deptById[d.id] = d; });
+  const collegeName = opts.collegeName || function (id) { return id || ''; };
+  const withMobile = opts.withMobile !== false;
+  const out = [];
+  const row = function (d, cls, tutor, isHead) {
+    const r = {
+      '學院': collegeName(d ? d.collegeId : ''),
+      '系所': (d && d.name) || (cls && cls.deptId) || '',
+      '班級': isHead ? '（主任導師）' : (cls ? (cls.displayName || cls.name) : ''),
+      '班級名稱(原始)': isHead ? '' : (cls ? cls.name : ''),
+      '導師': (tutor && tutor.name) || '',
+      '校內分機': (tutor && tutor.ext) || '',
+    };
+    if (withMobile) r['私人手機'] = (tutor && tutor.mobile) || '';
+    r['Email'] = (tutor && tutor.email) || '';
+    r['狀態'] = isHead ? '' : classStateLabelForExport(cls);
+    return r;
+  };
+  // 依系所分組，系內先出主任導師再出班級（班級以顯示名排序）
+  const byDept = {};
+  (classes || []).forEach(function (c) {
+    if (!c) return;
+    (byDept[c.deptId] = byDept[c.deptId] || []).push(c);
+  });
+  const deptIds = (depts || []).map(function (d) { return d.id; })
+    .filter(function (id) { return byDept[id] || (deptById[id] && deptById[id].head && deptById[id].head.name); });
+  Object.keys(byDept).forEach(function (id) { if (deptIds.indexOf(id) === -1) deptIds.push(id); });
+  deptIds.forEach(function (id) {
+    const d = deptById[id] || { id: id, name: id, collegeId: '' };
+    const head = d.head || null;
+    if (head && (head.name || head.ext || head.mobile)) out.push(row(d, null, head, true));
+    (byDept[id] || []).slice().sort(function (a, b) {
+      return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
+    }).forEach(function (c) {
+      const tutors = (c.tutors || []).filter(Boolean);
+      if (!tutors.length) out.push(row(d, c, null, false));
+      else tutors.forEach(function (t) { out.push(row(d, c, t, false)); });
+    });
+  });
+  return out;
+}
+
+function classStateLabelForExport(cls) {
+  if (!cls) return '';
+  const s = [];
+  if (cls.active === false) s.push('停用');
+  if (cls.graduatedSemester) s.push('已畢業(' + cls.graduatedSemester + ')');
+  return s.join('／') || '啟用';
+}
+// __ROSTER_EXPORT_END__
+
+// 匯出目前看得到的名冊。管超過一個系所時先問要匯出哪個範圍——admin／主責管全校 38 系，
+// 每次都整包匯出未必是想要的。
+async function exportDeptRoster(scope) {
+  const many = deptRosterDepts.length > 1;
+  if (!scope && many) {
+    openModal('匯出 Excel',
+      '<p class="field-hint">要匯出哪些系所？私人手機也會寫進檔案裡，下載後請比照個資保管。</p>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+      '<button type="button" class="btn" data-action="deptroster-export-one">只匯出目前系所</button>' +
+      '<button type="button" class="btn btn-primary" data-action="deptroster-export-all">匯出全部系所</button></div>');
+    return;
+  }
+  const all = scope === 'all';
+  try {
+    showLoading('準備檔案…');
+    await ensureSheetJsLoaded();
+    // 一律重新抓一次：畫面上的是目前這個系所的快取，而且匯出要的是當下最新資料。
+    const res = await proxyCall('deptRosterGet', all ? {} : { deptId: deptRosterDeptId });
+    const depts = (res.departments || []).length ? res.departments : deptRosterDepts;
+    const rows = buildRosterExportRows(res.classes || [], depts, {
+      collegeName: function (id) { const c = collegeById(id); return (c && c.name) || id || '未分學院'; },
+    });
+    if (!rows.length) { showToast('沒有可匯出的資料', 'error'); return; }
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 28 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '導師名冊');
+    const who = all ? '全校' : ((depts[0] && depts[0].name) || deptRosterDeptId || '');
+    XLSX.writeFile(wb, '導師名冊_' + who + '_' + todayStamp() + '.xlsx');
+    showToast('已匯出 ' + rows.length + ' 列', 'success');
+  } catch (e) {
+    showToast('匯出失敗：' + e.message, 'error');
+  } finally {
+    hideLoading();
+    closeModal();
+  }
+}
+
+function todayStamp() {
+  const d = new Date();
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
 }
 
 // 主任導師卡片。email 只顯示不可編（那是核章身分，要換人請中心改）——助理能改的是姓名與聯絡方式。
@@ -2432,6 +2536,9 @@ function openDeptRosterForm(classId) {
 
 document.body.addEventListener('click', async function (e) {
   if (e.target.closest('[data-action="deptroster-head-edit"]')) { openDeptRosterHeadForm(); return; }
+  if (e.target.closest('[data-action="deptroster-export"]')) { exportDeptRoster(null); return; }
+  if (e.target.closest('[data-action="deptroster-export-one"]')) { exportDeptRoster('one'); return; }
+  if (e.target.closest('[data-action="deptroster-export-all"]')) { exportDeptRoster('all'); return; }
   if (e.target.closest('[data-action="deptroster-new"]')) { openDeptRosterForm(null); return; }
   const edit = e.target.closest('[data-action="deptroster-edit"]');
   if (edit) { openDeptRosterForm(edit.dataset.classId); return; }

@@ -125,9 +125,11 @@ function doPost(e) {
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
-      case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
-      case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
-      case 'deptRosterUpsertHead':      result = deptRosterUpsertHeadAction_(params, ctx, userEmail); break;
+      // 這三個是名冊異動：回傳後要做收尾（排入主責通知佇列＋同步 Google Sheet），
+      // 收尾一律在 action 的 withLock_ 之外，見 withRosterAftercare_。
+      case 'deptRosterUpsertClass':     result = withRosterAftercare_(deptRosterUpsertClassAction_(params, ctx, userEmail), ctx, userEmail); break;
+      case 'deptRosterDeleteClass':     result = withRosterAftercare_(deptRosterDeleteClassAction_(params, ctx, userEmail), ctx, userEmail); break;
+      case 'deptRosterUpsertHead':      result = withRosterAftercare_(deptRosterUpsertHeadAction_(params, ctx, userEmail), ctx, userEmail); break;
       case 'adminBulkUpsertDeptHeads':  result = adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
@@ -846,6 +848,58 @@ function maintenanceResetLocalAccounts(emailsCsv) {
   });
   Logger.log(out);
   return out;
+}
+
+// 建立（或綁定）名冊同步用的 Google 試算表，並立刻同步一次。零參數，從 GAS 編輯器執行。
+// 已經有 ROSTER_SHEET_ID 就沿用那一份，不會重建——重建會讓已分享出去的網址失效。
+// **分享設定要人工做**：這份表不含私人手機（決策如此），但仍是全校導師名單，
+// 請只分享給需要的人，不要用「知道連結的人」。
+function maintenanceSetupRosterSheet() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const props = PropertiesService.getScriptProperties();
+  let id = props.getProperty(ROSTER_SHEET_PROP_) || '';
+  let created = false;
+  if (!id) {
+    const ss = SpreadsheetApp.create('各系導師名冊（自動同步）');
+    id = ss.getId();
+    props.setProperty(ROSTER_SHEET_PROP_, id);
+    created = true;
+    // 放進系統的根資料夾，跟其他資料檔擺一起，之後好找
+    try { DriveApp.getFileById(id).moveTo(DriveApp.getFolderById(ROOT_FOLDER_ID)); } catch (e) {}
+  }
+  const res = syncRosterSheet_(ctx);
+  const out = JSON.stringify({
+    建立: created, sheetId: id,
+    網址: 'https://docs.google.com/spreadsheets/d/' + id + '/edit',
+    同步結果: res, by: who,
+    提醒: '請手動設定共用對象（不含私人手機，但仍是全校導師名單）',
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 安裝兩個時間觸發器：每小時全量校正 Sheet、每 10 分鐘出清通知佇列。
+// 重複執行不會裝出兩份（先刪同名的舊觸發器）。零參數，從 GAS 編輯器執行。
+function maintenanceInstallRosterTriggers() {
+  const who = requireMaintenanceOwner_();
+  const wanted = ['hourlyRosterSheetSync', 'flushRosterNotifications'];
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (wanted.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('hourlyRosterSheetSync').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('flushRosterNotifications').timeBased().everyMinutes(10).create();
+  const out = JSON.stringify({ installed: wanted, by: who });
+  Logger.log(out);
+  return out;
+}
+
+// 每小時的全量校正（時間觸發器用，零參數）。存檔即同步已經涵蓋 99% 的情況，
+// 這一趟是為了修掉漏寫、手動亂改、或某次同步剛好失敗的殘留。
+function hourlyRosterSheetSync() {
+  const res = syncRosterSheetSafe_({ root: ROOT_FOLDER_ID });
+  Logger.log(JSON.stringify(res));
+  return JSON.stringify(res);
 }
 
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
@@ -3447,8 +3501,220 @@ function deptRosterUpsertHeadAction_(params, ctx, userEmail) {
     });
     writeJsonPath_('departments.json', departments, ctx);
     appendAuditLog_(ctx, { action: 'deptRosterUpsertHead', by: userEmail, targetId: deptId, at: now });
-    return { department: { id: deptId, name: cur.name, collegeId: cur.collegeId || null, head: projectDeptHeadForRoster_(departments[idx]) } };
+    return {
+      department: { id: deptId, name: cur.name, collegeId: cur.collegeId || null, head: projectDeptHeadForRoster_(departments[idx]) },
+      _notify: { deptId: deptId, summary: '更新主任導師（' + (head.name || '未填姓名') + '）的聯絡方式' },
+    };
   });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 導師名冊 → Google Sheet 同步 ─────────────────────────────────────────────
+// 使用者決策（2026-08-11）：**存檔即同步＋每小時全量校正**、**Sheet 不含私人手機**。
+// - 不含手機是刻意的：Sheet 一旦分享出去，權限就由 Google 的共用設定決定，系統管不到；
+//   外洩時外流的頂多是校內分機。要看手機一律回系統（deptRosterGet）。
+// - 兩條路徑都是「整張重寫」而不是只補該系那幾列：名冊只有幾百列，一次 setValues 就寫完，
+//   而部分更新要處理列位移／刪除，錯了會留下幽靈列——重寫沒有這個問題。
+// - 只有 GAS 軌有 SpreadsheetApp；自架軌（server/gas-host.js）沒有這個全域，
+//   所以一律先 typeof 檢查，缺了就當作「沒設定同步」安靜跳過，不能讓存檔失敗。
+// ══════════════════════════════════════════════════════════════════════════════
+const ROSTER_SHEET_PROP_ = 'ROSTER_SHEET_ID';
+const ROSTER_SHEET_TAB_ = '導師名冊';
+
+// 純函式：攤成試算表的二維陣列（第一列是表頭）。一位導師一列、沒有導師的班級也出一列，
+// 與 Excel 匯出同一套形狀，差別只在**不含私人手機**。
+function buildRosterSheetValues_(departments, classes, colleges) {
+  const collegeName = {};
+  (colleges || []).forEach(function (c) { if (c) collegeName[c.id] = c.name || c.id; });
+  const rows = [['學院', '系所', '班級', '班級名稱(原始)', '導師', '校內分機', 'Email', '狀態', '更新時間']];
+  const byDept = {};
+  (classes || []).forEach(function (c) {
+    if (!c || c.deleted === true) return;
+    (byDept[c.deptId] = byDept[c.deptId] || []).push(c);
+  });
+  (departments || []).forEach(function (d) {
+    if (!d || d.deleted === true) return;
+    const college = collegeName[d.collegeId] || d.collegeId || '未分學院';
+    const head = d.head || {};
+    if (head.name || head.ext) {
+      rows.push([college, d.name || d.id, '（主任導師）', '', head.name || '', head.ext || '', head.email || '', '', d.updatedAt || '']);
+    }
+    (byDept[d.id] || []).slice().sort(function (a, b) {
+      return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
+    }).forEach(function (c) {
+      const state = [];
+      if (c.active === false) state.push('停用');
+      if (c.graduatedSemester) state.push('已畢業(' + c.graduatedSemester + ')');
+      const tutors = (c.tutors || []).filter(Boolean);
+      const base = [college, d.name || d.id, c.displayName || c.name, c.name];
+      if (!tutors.length) rows.push(base.concat(['', '', '', state.join('／') || '啟用', c.updatedAt || '']));
+      else tutors.forEach(function (t) {
+        rows.push(base.concat([t.name || '', t.ext || '', t.email || '', state.join('／') || '啟用', c.updatedAt || '']));
+      });
+    });
+  });
+  return rows;
+}
+
+function rosterSheetId_() {
+  try { return PropertiesService.getScriptProperties().getProperty(ROSTER_SHEET_PROP_) || ''; } catch (e) { return ''; }
+}
+
+// 整張重寫。回 {ok:true,rows} 或 {ok:false,reason}——reason 是「沒設定/沒有這個環境」這類
+// 預期內的跳過，例外才 throw（由 syncRosterSheetSafe_ 吞掉）。
+function syncRosterSheet_(ctx) {
+  if (typeof SpreadsheetApp === 'undefined') return { ok: false, reason: '這個環境沒有 SpreadsheetApp（自架軌）' };
+  const id = rosterSheetId_();
+  if (!id) return { ok: false, reason: 'ROSTER_SHEET_ID 未設定（請先跑 maintenanceSetupRosterSheet）' };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const colleges = readJsonSafe_('colleges.json', ctx, []);
+  const values = buildRosterSheetValues_(departments, classes, colleges);
+  const ss = SpreadsheetApp.openById(id);
+  let sh = ss.getSheetByName(ROSTER_SHEET_TAB_);
+  if (!sh) sh = ss.insertSheet(ROSTER_SHEET_TAB_);
+  sh.clear();
+  sh.getRange(1, 1, values.length, values[0].length).setValues(values);
+  sh.setFrozenRows(1);
+  // 讓閱讀者一眼知道資料的新鮮度（同步是每次存檔＋每小時校正，但看的人不知道）
+  const stamp = ss.getSheetByName(ROSTER_SHEET_TAB_);
+  stamp.getRange(1, values[0].length + 1).setValue('最後同步：' + nowStampTaipei_());
+  return { ok: true, rows: values.length - 1 };
+}
+
+function syncRosterSheetSafe_(ctx) {
+  try { return syncRosterSheet_(ctx); } catch (e) {
+    // 同步失敗**不能**讓名冊存檔失敗——助理填的資料已經寫進 Drive 了，
+    // 這裡只是把它抄一份到 Sheet，抄失敗下一次存檔或每小時校正就會補上。
+    try { Logger.log('syncRosterSheet failed: ' + e.message); } catch (_) {}
+    return { ok: false, reason: e.message };
+  }
+}
+
+function nowStampTaipei_() {
+  const d = new Date(Date.now() + 8 * 3600000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' +
+    p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 名冊異動通知學諮主責 ──────────────────────────────────────────────────────
+// 使用者決策（2026-08-11）：**即時，但同一系 30 分鐘內合併成一封**。
+// GAS 沒有「延後執行一次」的機制，所以做法是：異動先進佇列（Drive JSON），
+// 由每 10 分鐘的時間觸發器決定哪些系所該寄了——
+//   ①該系已經停手（最後一筆距今 ≥ 靜默期 10 分鐘）→ 寄
+//   ②該系一直在改（最早一筆距今 ≥ 30 分鐘）→ 也寄，不能無限延後
+// 這樣連續編輯十幾筆只會收到一封，而停手後最多 10 分鐘內就會收到。
+// ══════════════════════════════════════════════════════════════════════════════
+const ROSTER_NOTIFY_QUEUE_ = 'rosterNotifyQueue.json';
+const ROSTER_NOTIFY_QUIET_MS_ = 10 * 60 * 1000;
+const ROSTER_NOTIFY_MAX_WAIT_MS_ = 30 * 60 * 1000;
+
+// 純函式：決定哪些系所的事件現在該寄出、哪些繼續等。
+function selectNotifyBatches_(events, nowMs, quietMs, maxWaitMs) {
+  const byDept = {};
+  (events || []).forEach(function (e) {
+    if (!e || !e.deptId) return;
+    (byDept[e.deptId] = byDept[e.deptId] || []).push(e);
+  });
+  const ready = [];
+  const keep = [];
+  Object.keys(byDept).forEach(function (deptId) {
+    const list = byDept[deptId].slice().sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
+    const first = new Date(list[0].at).getTime();
+    const last = new Date(list[list.length - 1].at).getTime();
+    if ((nowMs - last) >= quietMs || (nowMs - first) >= maxWaitMs) ready.push({ deptId: deptId, events: list });
+    else list.forEach(function (e) { keep.push(e); });
+  });
+  ready.sort(function (a, b) { return a.deptId.localeCompare(b.deptId); });
+  return { ready: ready, keep: keep };
+}
+
+function enqueueRosterChange_(ctx, deptId, userEmail, summary) {
+  try {
+    withLock_(function () {
+      const q = readJsonSafe_(ROSTER_NOTIFY_QUEUE_, ctx, { events: [] });
+      const events = (q && q.events) || [];
+      // 佇列只是通知用的暫存，不是稽核（稽核在 audit_log）。爆量時丟掉最舊的，
+      // 寧可少寄一封也不要讓這個檔無限長大。
+      if (events.length >= 500) events.splice(0, events.length - 499);
+      events.push({ deptId: deptId, by: userEmail, at: new Date().toISOString(), summary: summary });
+      writeJsonPath_(ROSTER_NOTIFY_QUEUE_, { events: events }, ctx);
+    });
+  } catch (e) {
+    try { Logger.log('enqueueRosterChange failed: ' + e.message); } catch (_) {}
+  }
+}
+
+// 零參數，供每 10 分鐘的時間觸發器呼叫。
+function flushRosterNotifications() {
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const leads = (config.staffLeads || []).filter(function (s) {
+    return s && s.email && s.disabled !== true && s.deleted !== true;
+  }).map(function (s) { return s.email; });
+
+  const picked = withLock_(function () {
+    const q = readJsonSafe_(ROSTER_NOTIFY_QUEUE_, ctx, { events: [] });
+    const res = selectNotifyBatches_((q && q.events) || [], Date.now(), ROSTER_NOTIFY_QUIET_MS_, ROSTER_NOTIFY_MAX_WAIT_MS_);
+    if (res.ready.length) writeJsonPath_(ROSTER_NOTIFY_QUEUE_, { events: res.keep }, ctx);
+    return res.ready;
+  });
+
+  if (!picked.length) return 'nothing to send';
+  // 沒有主責就別把佇列吃掉——上面已經寫回去了，所以這裡直接回報，事件已消失是可接受的
+  // （通知是輔助，不是稽核；稽核在 audit_log）。
+  if (!leads.length) return 'no staffLead to notify';
+
+  let sent = 0;
+  picked.forEach(function (batch) {
+    const dept = departments.filter(function (d) { return d && d.id === batch.deptId; })[0];
+    const deptName = (dept && dept.name) || batch.deptId;
+    const lines = batch.events.map(function (e) {
+      return '・' + stampToTaipei_(e.at) + '　' + (e.summary || '（未記錄內容）') + '　— ' + (e.by || '');
+    });
+    const body = deptName + ' 的導師名冊有 ' + batch.events.length + ' 筆更新：\n\n' + lines.join('\n') +
+      '\n\n（同一系所 ' + (ROSTER_NOTIFY_QUIET_MS_ / 60000) + ' 分鐘內的連續編輯會合併成一封）\n' +
+      '系統：各系導師名冊';
+    try {
+      MailApp.sendEmail({
+        to: leads.join(','),
+        subject: '【各系導師名冊】' + deptName + ' 有 ' + batch.events.length + ' 筆更新',
+        body: body,
+      });
+      sent++;
+    } catch (e) {
+      try { Logger.log('notify failed for ' + batch.deptId + ': ' + e.message); } catch (_) {}
+    }
+  });
+  return 'sent ' + sent + ' mail(s)';
+}
+
+function stampToTaipei_(iso) {
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return String(iso || '');
+  const d = new Date(t + 8 * 3600000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getUTCMonth() + 1) + '/' + p(d.getUTCDate()) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+}
+
+// action 回傳裡的 _notify 是給 dispatcher 看的內部欄位：取出來做收尾，再從回應拿掉。
+// 收尾失敗（寄信佇列寫不進去、Sheet 同步掛掉）不影響這次存檔的成功回應——資料已經落地了。
+function withRosterAftercare_(result, ctx, userEmail) {
+  if (!result || !result._notify) return result;
+  const n = result._notify;
+  delete result._notify;
+  afterRosterChange_(ctx, n.deptId, userEmail, n.summary);
+  return result;
+}
+
+// 名冊異動的共同收尾：同步 Sheet ＋ 排入通知佇列。**一定在 withLock_ 外面呼叫**——
+// 這兩件事都是對外 I/O（Sheets API／Drive 寫檔），放在鎖裡會讓別人的存檔等到 waitLock 逾時。
+function afterRosterChange_(ctx, deptId, userEmail, summary) {
+  enqueueRosterChange_(ctx, deptId, userEmail, summary);
+  syncRosterSheetSafe_(ctx);
 }
 
 // adminBulkUpsertDeptHeads：admin only，一次寫入多系的主任導師（含 email）。
@@ -3576,7 +3842,7 @@ function deptRosterUpsertClassAction_(params, ctx, userEmail) {
       action: entry.id ? 'deptRosterUpdateClass' : 'deptRosterCreateClass',
       by: userEmail, targetId: target.id, at: now,
     });
-    return { class: projectClassForDeptRoster_(target) };
+    return { class: projectClassForDeptRoster_(target), _notify: { deptId: deptId, summary: (entry.id ? '修改班級「' : '新增班級「') + className + '」（導師 ' + tutorsRes.tutors.length + ' 位）' } };
   });
 }
 
@@ -3602,7 +3868,7 @@ function deptRosterDeleteClassAction_(params, ctx, userEmail) {
     next[idx] = Object.assign({}, next[idx], { deleted: true, deletedAt: now, deletedBy: userEmail });
     writeJsonPath_('classes.json', next, ctx);
     appendAuditLog_(ctx, { action: 'deptRosterDeleteClass', by: userEmail, targetId: classId, at: now });
-    return { classId: classId, deleted: true };
+    return { classId: classId, deleted: true, _notify: { deptId: classes[idx].deptId, summary: '刪除班級「' + (classes[idx].displayName || classes[idx].name) + '」' } };
   });
 }
 

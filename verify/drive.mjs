@@ -808,6 +808,17 @@ await flow('G', async () => {
       deptId: '森林系', head: { name: '吳羽婷', ext: '7149', mobile: '0955-111-222' },
     }, deptAsstToken.token);
   });
+  await check('G2', '名冊異動會排進主責通知佇列（實際寄信由每 10 分鐘的觸發器合併後送出）', async () => {
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/state?path=rosterNotifyQueue.json`);
+    const q = await res.json();
+    const events = (q && q.events) || [];
+    evid['G2-notify-queue'] = JSON.stringify(events.slice(-2));
+    expect(events.length > 0, '佇列是空的：' + JSON.stringify(q).slice(0, 200));
+    expect(events.every((e) => e.deptId === '森林系' && e.by === 'deptasst@test.local'),
+      '佇列內容不對：' + JSON.stringify(events).slice(0, 300));
+    expect(events.some((e) => /主任導師/.test(e.summary || '')), '主任導師的異動沒進佇列');
+    expect(events.some((e) => /新增班級/.test(e.summary || '')), '新增班級的異動沒進佇列');
+  });
   await check('G2', '🔒 助理改別系的主任導師 → forbidden', async () => {
     const r = await apiCall('deptRosterUpsertHead', {
       deptId: '農園系', head: { name: '壞人' },
@@ -860,6 +871,25 @@ await flow('G3', async () => {
   });
   await page.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G3-導師資料學院篩選.png') });
   console.log('   📸 G3-導師資料學院篩選');
+  await check('G3', '匯出 Excel：選「全部系所」→ 真的下載得到檔案，內容含主任導師與手機欄', async () => {
+    await page.locator('[data-action="deptroster-export"]').click();
+    await page.locator('[data-action="deptroster-export-all"]').waitFor({ timeout: 5000 });
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 60000 }),
+      page.locator('[data-action="deptroster-export-all"]').click(),
+    ]);
+    const file = path.join(SHOTS, 'roster-export.xlsx');
+    await download.saveAs(file);
+    const XLSX = requireScratch('xlsx');
+    const wb = XLSX.read(fs.readFileSync(file));
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['導師名冊'], { defval: '' });
+    evid['G3-export'] = download.suggestedFilename() + '：' + rows.length + ' 列，欄位=' + Object.keys(rows[0] || {}).join('/');
+    expect(/^導師名冊_全校_\d{8}\.xlsx$/.test(download.suggestedFilename()), '檔名=' + download.suggestedFilename());
+    expect(rows.length > 300, '列數不對：' + rows.length);
+    expect(['學院', '系所', '班級', '導師', '校內分機', '私人手機'].every((k) => k in (rows[0] || {})),
+      '缺欄位：' + Object.keys(rows[0] || {}).join('/'));
+    expect(rows.some((r) => r['班級'] === '（主任導師）'), '沒有主任導師列');
+  });
   await check('G3', '選「獸醫學院」→ 系所自動改指獸醫系，表格跟著換系', async () => {
     // 班名不寫死：D 的換學期流程會把獸醫系那班改名（四獸醫四A→四獸醫五A），認「獸醫」就好。
     await page.selectOption('#deptroster-college', '獸醫學院');
