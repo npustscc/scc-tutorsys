@@ -952,10 +952,12 @@ await flow('J', async () => {
   page3.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[J/page3] ' + m.text()); });
   page3.on('pageerror', (e) => consoleErrors.push('[J/page3] pageerror: ' + e.message));
   await page3.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
-  await check('J', '主責登入後的導覽列＝admin 看得到的全部頁籤', async () => {
+  await check('J', '主責登入後的導覽列＝admin 看得到的全部頁籤（且兩者都沒有「上傳」）', async () => {
     await page3.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 15000 });
     const navs = await page3.locator('.nav-btn').allTextContents();
     const adminNavs = await page.locator('.nav-btn').allTextContents();
+    expect(!navs.some((t) => /^上傳/.test(t)) && !adminNavs.some((t) => /^上傳/.test(t)),
+      '上傳頁籤應對 admin／主責收起：' + navs.join(',') + ' / ' + adminNavs.join(','));
     evid['J-lead-navs'] = navs.join(',');
     expect(JSON.stringify(navs.map((s) => s.replace(/\d+$/, ''))) === JSON.stringify(adminNavs.map((s) => s.replace(/\d+$/, ''))),
       '主責的頁籤與 admin 不一致：' + navs.join(',') + ' vs ' + adminNavs.join(','));
@@ -969,7 +971,8 @@ await flow('I', async () => {
   await check('I', '切到全校總表 → 離開 → 再切回來時直接有表格，不再閃「載入中…」', async () => {
     await page.locator('.nav-btn', { hasText: '全校總表' }).click();
     await page.locator('#overview-content table').first().waitFor({ timeout: 15000 });
-    await page.locator('.nav-btn', { hasText: /^上傳$/ }).click();   // 「我的上傳」也含「上傳」
+    // 用「我的上傳」離開再回來：「上傳」頁對 admin 已收起（2026-08-11 決策）。
+    await page.locator('.nav-btn', { hasText: '我的上傳' }).click();
     await page.locator('#page-root .card').first().waitFor({ timeout: 10000 });
     await page.locator('.nav-btn', { hasText: '全校總表' }).click();
     // 不等任何東西，立刻讀：有快取時是同一個 tick 內畫好的，沒快取則還停在「載入中…」

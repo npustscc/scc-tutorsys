@@ -689,12 +689,12 @@ async function doLocalLogin(email, password) {
 
 // GAS 軌的品牌名：這個平台目前只做一件事——讓各系系辦助理維護本系導師名冊（含聯絡方式），
 // 叫「導師資訊系統」會讓人以為班會紀錄/核章也在這裡（那套在校內自架站）。
-// 2026-08-11 由「各系導師電話上傳表單」改名為「導師名冊」：欄位已不只電話，
+// 2026-08-11 由「各系導師電話上傳表單」改名為「各系導師名冊」：欄位已不只電話，
 // 也不是一次性的「上傳表單」而是持續維護的名冊。
 // 只改 GAS 軌：自架站仍是完整的導師資訊系統，名稱不動。
 // 靜態 <title>／badge 保持原樣不動，改在執行時覆蓋——promote.mjs 的 13 條規則比對的是
 // 原始字串，改動它們會讓推行流程失配。
-const GAS_APP_TITLE_ = '導師名冊';
+const GAS_APP_TITLE_ = '各系導師名冊';
 function applyTrackBranding() {
   if (isSelfHosted()) return;
   const isDev = /（測試版）/.test(document.title) || !!document.querySelector('.env-badge');
@@ -1022,7 +1022,9 @@ async function loadPageData(o) {
 // ── 導覽 / 路由 ──────────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 const NAV_PAGES = [
-  { id: 'upload', label: '上傳', show: function () { return true; } },
+  // 2026-08-11：班會紀錄與導生活動紀錄的上傳目前不啟用，admin／學諮主責的畫面先收起這個頁籤
+  // （導師與學生端不受影響）。要重啟就把這個 show 改回 return true。
+  { id: 'upload', label: '上傳', show: function (r) { return !r.isAdmin && !r.isStaffLead; } },
   { id: 'mine',   label: '我的上傳', show: function () { return true; } },
   { id: 'myclasses', label: '導師個人後台', show: function (r) { return r.tutorOf.length > 0; } },
   { id: 'queue',  label: '核章匣', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant; } },
@@ -1040,11 +1042,15 @@ const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
 // （navPagesForRoles 已把其餘頁籤收掉），等於一進來就看到自己點不回去的畫面。
 // 自架站是完整的導師資訊系統，維持原本的「上傳」。
 function defaultPageId() {
+  const roles = (bootstrapData && bootstrapData.roles) || {};
   if (!isSelfHosted()) {
-    const roles = bootstrapData && bootstrapData.roles;
-    if (roles && ((roles.deptAssistantOf || []).length > 0 || roles.isAdmin)) return 'deptroster';
+    if ((roles.deptAssistantOf || []).length > 0 || roles.isAdmin) return 'deptroster';
   }
-  return 'upload';
+  // 「上傳」現在對 admin／主責是收起來的，落在那裡等於一進來就看到導覽列上沒有的頁面；
+  // 拿不到就退回這個角色導覽列上的第一頁。
+  const navs = navPagesForRoles(roles);
+  if (navs.some(function (p) { return p.id === 'upload'; })) return 'upload';
+  return navs.length ? navs[0].id : 'upload';
 }
 
 // 全校待確認導師建議總數（admin 後台導覽 badge 用）。
