@@ -982,12 +982,15 @@ await flow('J', async () => {
   page3.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[J/page3] ' + m.text()); });
   page3.on('pageerror', (e) => consoleErrors.push('[J/page3] pageerror: ' + e.message));
   await page3.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
-  await check('J', '主責登入後的導覽列＝admin 看得到的全部頁籤（且兩者都沒有「上傳」）', async () => {
+  await check('J', '主責的導覽列＝admin 的導覽列，且兩者都只剩「導師資料／後台管理」', async () => {
     await page3.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 15000 });
     const navs = await page3.locator('.nav-btn').allTextContents();
     const adminNavs = await page.locator('.nav-btn').allTextContents();
-    expect(!navs.some((t) => /^上傳/.test(t)) && !adminNavs.some((t) => /^上傳/.test(t)),
-      '上傳頁籤應對 admin／主責收起：' + navs.join(',') + ' / ' + adminNavs.join(','));
+    const RECORD_TABS = /上傳|核章匣|班級統計|全校總表/;
+    expect(!navs.some((t) => RECORD_TABS.test(t)) && !adminNavs.some((t) => RECORD_TABS.test(t)),
+      '紀錄流程的頁籤應對 admin／主責全部收起：' + navs.join(',') + ' / ' + adminNavs.join(','));
+    expect(navs.some((t) => /導師資料/.test(t)) && navs.some((t) => /後台管理/.test(t)),
+      '主責該留的兩個頁籤不見了：' + navs.join(','));
     evid['J-lead-navs'] = navs.join(',');
     expect(JSON.stringify(navs.map((s) => s.replace(/\d+$/, ''))) === JSON.stringify(adminNavs.map((s) => s.replace(/\d+$/, ''))),
       '主責的頁籤與 admin 不一致：' + navs.join(',') + ' vs ' + adminNavs.join(','));
@@ -1039,15 +1042,16 @@ await flow('K', async () => {
 // ══ I：切頁順暢度（快取先畫）＋ 視窗不該被「拖曳反白到外面放開」關掉 ═══════════
 await flow('I', async () => {
   await check('I', '切到全校總表 → 離開 → 再切回來時直接有表格，不再閃「載入中…」', async () => {
-    await page.locator('.nav-btn', { hasText: '全校總表' }).click();
-    await page.locator('#overview-content table').first().waitFor({ timeout: 15000 });
-    // 用「我的上傳」離開再回來：「上傳」頁對 admin 已收起（2026-08-11 決策）。
-    await page.locator('.nav-btn', { hasText: '我的上傳' }).click();
-    await page.locator('#page-root .card').first().waitFor({ timeout: 10000 });
-    await page.locator('.nav-btn', { hasText: '全校總表' }).click();
+    // admin 的紀錄流程頁籤全收起了（2026-08-11 決策），改用「導師資料 ↔ 後台管理」來回，
+    // 導師資料同樣走 loadPageData 的快取路徑。
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('#deptroster-content table').first().waitFor({ timeout: 15000 });
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    await page.locator('#admin-tab-content').waitFor({ timeout: 10000 });
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
     // 不等任何東西，立刻讀：有快取時是同一個 tick 內畫好的，沒快取則還停在「載入中…」
     const now = await page.evaluate(() => {
-      const el = document.getElementById('overview-content');
+      const el = document.getElementById('deptroster-content');
       return { hasTable: !!(el && el.querySelector('table')), text: (el && el.textContent || '').slice(0, 20) };
     });
     evid['I-instant-render'] = JSON.stringify(now);

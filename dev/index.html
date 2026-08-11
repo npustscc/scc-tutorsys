@@ -1022,20 +1022,30 @@ async function loadPageData(o) {
 // ── 導覽 / 路由 ──────────────────────────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
 const NAV_PAGES = [
-  // 2026-08-11：班會紀錄與導生活動紀錄的上傳目前不啟用，admin／學諮主責的畫面先收起這個頁籤
-  // （導師與學生端不受影響）。要重啟就把這個 show 改回 return true。
-  { id: 'upload', label: '上傳', show: function (r) { return !r.isAdmin && !r.isStaffLead; } },
-  { id: 'mine',   label: '我的上傳', show: function () { return true; } },
+  { id: 'upload', label: '上傳', show: function (r) { return recordFlowVisible_(r); } },
+  { id: 'mine',   label: '我的上傳', show: function (r) { return recordFlowVisible_(r); } },
   { id: 'myclasses', label: '導師個人後台', show: function (r) { return r.tutorOf.length > 0; } },
-  { id: 'queue',  label: '核章匣', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant; } },
-  { id: 'stats',  label: '班級統計', show: function (r) { return r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin; } },
-  { id: 'overview', label: '全校總表', show: function (r) { return r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0; } },
+  { id: 'queue',  label: '核章匣', show: function (r) { return recordFlowVisible_(r) && (r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin || r.isStaffLead || r.isStaffAssistant); } },
+  { id: 'stats',  label: '班級統計', show: function (r) { return recordFlowVisible_(r) && (r.tutorOf.length > 0 || r.deptHeadOf.length > 0 || r.isDirector || r.isAdmin); } },
+  { id: 'overview', label: '全校總表', show: function (r) { return recordFlowVisible_(r) && (r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0); } },
   // 系辦助理的導師名冊頁（Phase 1 唯讀）。roles.deptAssistantOf 是後端算好的授權集合，
   // 前端只拿它決定「顯不顯示這個頁籤」；能不能真的讀到資料由後端 deptRosterGet 再驗一次。
   { id: 'deptroster', label: '導師資料', show: function (r) { return (r.deptAssistantOf || []).length > 0 || r.isAdmin; } },
   { id: 'admin',  label: '後台管理', show: function (r) { return r.isAdmin; } },
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
+
+// 2026-08-11 使用者決策：班會紀錄／導生活動紀錄**整條流程暫不啟用**，所以 admin 與學諮主責
+// 的畫面把相關頁籤全部收起（上傳、我的上傳、核章匣、班級統計、全校總表），只留導師資料與
+// 後台管理。導師／系主任／學生端不受影響——他們的頁籤照舊。
+// **要重啟只要把這個常數改成 true**，五個頁籤的原本條件都原封不動留在 NAV_PAGES 裡。
+// 注意這只是前端閘門：紀錄相關的 action 在後端一個都沒關，直接打 API 照樣能用（刻意如此，
+// 之後重啟不必動後端；真的要封鎖得在 doPost 各 action 內加判斷）。
+const RECORD_FLOW_ENABLED_FOR_STAFF_ = false;
+function recordFlowVisible_(roles) {
+  if (RECORD_FLOW_ENABLED_FOR_STAFF_) return true;
+  return !roles.isAdmin && !roles.isStaffLead;
+}
 
 // 登入後的第一頁。GAS 軌＝「導師名冊」平台，第一眼就該是導師資料；
 // 落在「班會紀錄上傳」不只是不對題，對只有系辦助理身分的人更是一個導覽列上根本沒有的頁面
