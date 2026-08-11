@@ -446,7 +446,16 @@ function openModal(title, bodyHtml, opts) {
   $('modal-overlay').classList.add('open');
 }
 function closeModal() { $('modal-overlay').classList.remove('open'); }
-$('modal-overlay').addEventListener('click', (e) => { if (e.target.id === 'modal-overlay') closeModal(); });
+// 點空白處關閉視窗：**必須是 mousedown 與 mouseup 都落在遮罩上**才算數。
+// 只認 click 的話，在輸入框裡拖曳反白、滑鼠拖出視窗外才放開，click 事件的 target 會是
+// 兩者的共同祖先（＝遮罩），視窗就被關掉、填到一半的內容全沒了——這是實際回報的災情。
+let modalPressOnOverlay = false;
+$('modal-overlay').addEventListener('mousedown', (e) => { modalPressOnOverlay = e.target.id === 'modal-overlay'; });
+$('modal-overlay').addEventListener('click', (e) => {
+  const wasPress = modalPressOnOverlay;
+  modalPressOnOverlay = false;
+  if (wasPress && e.target.id === 'modal-overlay') closeModal();
+});
 
 // ── 系所/班級/導師 前端驗證與 id 衍生（規則與 dev/Code.gs 的 classResolve 純函式一致；
 //    前端只是 UI 閘門，後端 classResolveCore_ 才是安全邊界）──
@@ -952,11 +961,58 @@ async function afterLogin() {
 async function refreshBootstrap(semester) {
   showLoading('重新整理資料…');
   try {
+    // 資料剛被改動（上傳/核章/退件…）才會走到這裡，各頁的快取一律作廢，不要拿舊的先畫。
+    pageDataCache.clear();
     await loadBootstrap(semester || (bootstrapData && bootstrapData.semester));
     renderNav();
     if (currentPage) showPage(currentPage);
   } finally {
     hideLoading();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 分頁資料快取（stale-while-revalidate）─────────────────────────────────────
+// 「我的上傳／導師個人後台／全校總表／導師資料」四頁的資料不在 bootstrap 裡，每次切頁
+// 都要各自打一趟 API。GAS 軌光是一次往返就要 1.3–1.5 秒，切回剛看過的頁還要再等一次，
+// 使用者回報「切頁很不順」。做法：**先把上一次的結果畫出來，同時在背景重抓**，內容有變
+// 才重畫（JSON 字串比對），沒變就完全不動畫面。第一次進入該頁仍照舊顯示「載入中…」。
+//
+// 一致性：任何會改資料的動作都走 refreshBootstrap（上面已整批清空），導師資料頁的增刪
+// 則在該頁自己清；讀到的最舊也只舊到「上次看的那一眼」，而且背景那趟一定會校正回來。
+// ══════════════════════════════════════════════════════════════════════════════
+const pageDataCache = new Map();   // key → { json, data }
+
+// 某個 action 的資料剛被自己改過（不走 refreshBootstrap 的那些）：把它全部參數組合的
+// 快取丟掉，下一趟一定重抓，不會先閃一下改動前的舊表。
+function invalidatePageData(action) {
+  Array.from(pageDataCache.keys()).forEach(function (k) {
+    if (k.indexOf(action + ':') === 0) pageDataCache.delete(k);
+  });
+}
+
+async function loadPageData(o) {
+  const key = o.action + ':' + JSON.stringify(o.params || {});
+  const cached = pageDataCache.get(key);
+  // 回應回來時使用者可能已經切走（或換了學期/系所）：slot 節點已從畫面上被換掉，
+  // 這時硬寫 innerHTML 會炸 null。o.valid 讓呼叫端補「選單條件有沒有變」的判斷。
+  const stillWanted = function () {
+    const el = $(o.slot);
+    return !!el && el.isConnected && (!o.valid || o.valid());
+  };
+  if (cached) o.render(cached.data);
+  else { const el = $(o.slot); if (el) el.innerHTML = '<div class="empty-hint">載入中…</div>'; }
+  try {
+    const res = await proxyCall(o.action, o.params);
+    if (!stillWanted()) return;
+    const json = JSON.stringify(res);
+    if (!cached || cached.json !== json) o.render(res);
+    pageDataCache.set(key, { json: json, data: res });
+  } catch (e) {
+    if (!stillWanted()) return;
+    // 畫面上已經有（舊的）資料時不要清掉改成錯誤訊息——背景更新失敗用 toast 講就好。
+    if (cached) showToast('更新失敗：' + e.message, 'error');
+    else $(o.slot).innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -1476,15 +1532,17 @@ PAGE_RENDERERS.mine = async function renderMinePage() {
 let mineTutorClassRecords = [];
 
 async function loadMineList() {
-  $('mine-list').innerHTML = '<div class="empty-hint">載入中…</div>';
-  try {
-    const res = await proxyCall('recordGetMine', { semester: mineSemester });
-    mineRecords = res.records || [];
-    mineTutorClassRecords = res.tutorClassRecords || [];
-    renderMineList();
-  } catch (e) {
-    $('mine-list').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
-  }
+  const sem = mineSemester;
+  await loadPageData({
+    action: 'recordGetMine', params: { semester: sem },
+    slot: 'mine-list',
+    valid: function () { return mineSemester === sem; },
+    render: function (res) {
+      mineRecords = res.records || [];
+      mineTutorClassRecords = res.tutorClassRecords || [];
+      renderMineList();
+    },
+  });
 }
 
 function renderMineList() {
@@ -1651,9 +1709,16 @@ PAGE_RENDERERS.myclasses = async function renderMyClassesPage() {
 };
 
 async function loadMyClassesList() {
-  $('myclasses-list').innerHTML = '<div class="empty-hint">載入中…</div>';
-  try {
-    const res = await proxyCall('recordGetMine', { semester: myClassesSemester });
+  const sem = myClassesSemester;
+  await loadPageData({
+    action: 'recordGetMine', params: { semester: sem },
+    slot: 'myclasses-list',
+    valid: function () { return myClassesSemester === sem; },
+    render: renderMyClassesList,
+  });
+}
+
+function renderMyClassesList(res) {
     const records = res.tutorClassRecords || [];
     if (!records.length) { $('myclasses-list').innerHTML = '<div class="empty-hint">您帶的班級本學期還沒有任何紀錄。</div>'; return; }
     $('myclasses-list').innerHTML =
@@ -1672,9 +1737,6 @@ async function loadMyClassesList() {
           '</td>' +
         '</tr>';
       }).join('') + '</tbody></table>';
-  } catch (e) {
-    $('myclasses-list').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
-  }
 }
 
 document.body.addEventListener('click', async function (e) {
@@ -1984,13 +2046,13 @@ PAGE_RENDERERS.overview = async function renderOverviewPage() {
 };
 
 async function loadOverview() {
-  $('overview-content').innerHTML = '<div class="empty-hint">載入中…</div>';
-  try {
-    const res = await proxyCall('overviewStats', { semester: overviewSemester });
-    renderOverviewTable(res.rows || []);
-  } catch (e) {
-    $('overview-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
-  }
+  const sem = overviewSemester;
+  await loadPageData({
+    action: 'overviewStats', params: { semester: sem },
+    slot: 'overview-content',
+    valid: function () { return overviewSemester === sem; },
+    render: function (res) { renderOverviewTable(res.rows || []); },
+  });
 }
 
 function renderOverviewTable(rows) {
@@ -2082,7 +2144,8 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
       '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button></div>' +
       '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
     '</div>';
-  await loadDeptRoster(null);
+  // 監聽器在 await 之前就掛：等資料回來才掛的話，使用者在載入中切走頁面時 page-root
+  // 已被換掉，$('deptroster-college') 是 null 而丟 TypeError（e2e 的 console error 抓到過）。
   $('deptroster-college').addEventListener('change', function () {
     deptRosterCollegeId = $('deptroster-college').value;
     // 換學院後原本選的系所可能不屬於這個學院了，就改指向該學院的第一個系所
@@ -2096,6 +2159,7 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
     deptRosterDeptId = $('deptroster-dept').value;
     loadDeptRoster(deptRosterDeptId);
   });
+  await loadDeptRoster(null);
 };
 
 // 學院顯示名：bootstrap 的 colleges 有這一筆就用它的 name。自架站的 store 目前沒有
@@ -2153,22 +2217,25 @@ function renderDeptRosterFilters() {
 }
 
 async function loadDeptRoster(deptId) {
-  $('deptroster-content').innerHTML = '<div class="empty-hint">載入中…</div>';
-  try {
-    // deptId 為 null＝不指定，後端回「我管的全部系所」；選單就是用這一趟的回傳建的。
-    const res = await proxyCall('deptRosterGet', deptId ? { deptId: deptId } : {});
-    const depts = res.departments || [];
-    // 系所清單只認第一趟（不帶 deptId）的回傳——之後每趟都帶 deptId，後端只會回那一系，
-    // 拿它覆寫會讓選單縮到剩一個。選單則每趟都重畫：離開頁面再回來時 DOM 是新的。
-    if (!deptRosterDepts.length && depts.length) {
-      deptRosterDepts = depts;
-      if (!deptRosterDeptId) deptRosterDeptId = depts[0].id;
-    }
-    renderDeptRosterFilters();
-    renderDeptRosterTable(res.classes || [], deptId || deptRosterDeptId || null, depts);
-  } catch (e) {
-    $('deptroster-content').innerHTML = '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>';
-  }
+  // deptId 為 null＝不指定，後端回「我管的全部系所」；選單就是用這一趟的回傳建的。
+  const want = deptId || null;
+  await loadPageData({
+    action: 'deptRosterGet', params: deptId ? { deptId: deptId } : {},
+    slot: 'deptroster-content',
+    valid: function () { return (deptRosterDeptId || null) === want || want === null; },
+    render: function (res) {
+      const depts = res.departments || [];
+      // 只有「不帶 deptId」那趟拿得到我管的全部系所，用它更新篩選清單（同一次登入中匯入了
+      // 新系所也會跟上）；帶了 deptId 的回傳只有那一系，拿它覆寫會讓選單縮到剩一個。
+      if (!deptId && depts.length) {
+        deptRosterDepts = depts;
+        const stillThere = depts.some(function (d) { return d.id === deptRosterDeptId; });
+        if (!stillThere) deptRosterDeptId = depts[0].id;
+      }
+      renderDeptRosterFilters();
+      renderDeptRosterTable(res.classes || [], deptId || deptRosterDeptId || null, depts);
+    },
+  });
 }
 
 function renderDeptRosterTable(classes, deptId, depts) {
@@ -2264,6 +2331,7 @@ function openDeptRosterForm(classId) {
     try {
       await withBtnPending(submitBtn, async function () {
         await proxyCall('deptRosterUpsertClass', payload);
+        invalidatePageData('deptRosterGet');
         showToast('已儲存', 'success');
         closeModal();
         await loadDeptRoster(deptRosterDeptId);
@@ -2293,6 +2361,7 @@ document.body.addEventListener('click', async function (e) {
     try {
       await withBtnPending(del, async function () {
         await proxyCall('deptRosterDeleteClass', { classId: cls.id });
+        invalidatePageData('deptRosterGet');
         showToast('已刪除', 'success');
         await loadDeptRoster(deptRosterDeptId);
       });

@@ -723,22 +723,29 @@ await flow('G', async () => {
 
 // ══ G3：導師資料的「學院 → 系所」兩層篩選（admin 管得到全部系所才看得出效果）══
 await flow('G3', async () => {
-  await check('G3', 'admin 開導師資料頁：學院選單＝全部＋2 學院，系所選單＝3 系', async () => {
+  // 系所數不寫死：跑到這裡時 E 已經把 xlsx 的系所匯進去了，數字會跟著 fixture 走。
+  await check('G3', 'admin 開導師資料頁：學院選單列出各學院＋「全部學院」，數字與系所選單一致', async () => {
     await page.locator('.nav-btn', { hasText: '導師資料' }).click();
     await page.locator('#deptroster-content table').waitFor({ timeout: 15000 });
     const colOpts = await page.locator('#deptroster-college option').allTextContents();
     const deptOpts = await page.locator('#deptroster-dept option').allTextContents();
     evid['G3-college-options'] = colOpts.join(' | ');
-    expect(colOpts.length === 3, '學院選單應為「全部＋2 學院」，實得 ' + colOpts.join(','));
-    expect(/農學院（2）/.test(colOpts.join('')), '農學院應標示 2 個系所：' + colOpts.join(','));
-    expect(deptOpts.length === 3, '系所選單應有 3 個系，實得 ' + deptOpts.join(','));
+    expect(/^全部學院（\d+ 系所）$/.test(colOpts[0] || ''), '第一項應為「全部學院（N 系所）」，實得 ' + colOpts[0]);
+    expect(Number((colOpts[0].match(/（(\d+) 系所）/) || [])[1]) === deptOpts.length,
+      '「全部學院」的系所數應等於系所選單項數：' + colOpts[0] + ' vs ' + deptOpts.length);
+    expect(/農學院（\d+）/.test(colOpts.join('')) && /獸醫學院（1）/.test(colOpts.join('')),
+      '學院選單應含農學院與獸醫學院（1）：' + colOpts.join(','));
   });
-  await check('G3', '選「農學院」→ 系所選單只剩該學院的兩系', async () => {
+  await check('G3', '選「農學院」→ 系所選單只剩該學院的系（獸醫系消失）', async () => {
     await page.selectOption('#deptroster-college', '農學院');
     await page.locator('#deptroster-content table').waitFor({ timeout: 10000 });
     const deptOpts = await page.locator('#deptroster-dept option').allTextContents();
+    const colOpts = await page.locator('#deptroster-college option').allTextContents();
+    const n = Number((colOpts.find((t) => t.startsWith('農學院')) || '').match(/（(\d+)）/)[1]);
     evid['G3-depts-in-農學院'] = deptOpts.join(',');
-    expect(deptOpts.length === 2 && deptOpts.indexOf('獸醫系') === -1, '實得 ' + deptOpts.join(','));
+    expect(deptOpts.length === n, '系所選單項數應等於學院選項標的數字 ' + n + '，實得 ' + deptOpts.length);
+    expect(deptOpts.indexOf('獸醫系') === -1, '不該出現他學院的系：' + deptOpts.join(','));
+    expect(deptOpts.indexOf('農園系') !== -1 && deptOpts.indexOf('森林系') !== -1, '缺農學院的系：' + deptOpts.join(','));
   });
   await page.screenshot({ path: path.join(SHOTS, String(++shotNo).padStart(2, '0') + '-G3-導師資料學院篩選.png') });
   console.log('   📸 G3-導師資料學院篩選');
@@ -751,6 +758,46 @@ await flow('G3', async () => {
     evid['G3-獸醫學院-table'] = (txt || '').trim().slice(0, 120);
     expect(deptVal === '獸醫系', '系所選單值＝' + deptVal);
     expect(!/四農園/.test(txt || ''), '換學院後仍出現他學院的班級');
+  });
+});
+
+// ══ I：切頁順暢度（快取先畫）＋ 視窗不該被「拖曳反白到外面放開」關掉 ═══════════
+await flow('I', async () => {
+  await check('I', '切到全校總表 → 離開 → 再切回來時直接有表格，不再閃「載入中…」', async () => {
+    await page.locator('.nav-btn', { hasText: '全校總表' }).click();
+    await page.locator('#overview-content table').first().waitFor({ timeout: 15000 });
+    await page.locator('.nav-btn', { hasText: /^上傳$/ }).click();   // 「我的上傳」也含「上傳」
+    await page.locator('#page-root .card').first().waitFor({ timeout: 10000 });
+    await page.locator('.nav-btn', { hasText: '全校總表' }).click();
+    // 不等任何東西，立刻讀：有快取時是同一個 tick 內畫好的，沒快取則還停在「載入中…」
+    const now = await page.evaluate(() => {
+      const el = document.getElementById('overview-content');
+      return { hasTable: !!(el && el.querySelector('table')), text: (el && el.textContent || '').slice(0, 20) };
+    });
+    evid['I-instant-render'] = JSON.stringify(now);
+    expect(now.hasTable && !/載入中/.test(now.text), '切回來的當下畫面＝' + JSON.stringify(now));
+  });
+  await check('I', '在輸入框裡拖曳反白、放開時滑鼠已在視窗外 → 視窗不可被關掉', async () => {
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('[data-action="deptroster-new"]').click();
+    await page.locator('#deptroster-form').waitFor({ timeout: 5000 });
+    await page.fill('#deptroster-name', '四技七A');
+    const box = await page.locator('#deptroster-name').boundingBox();
+    await page.mouse.move(box.x + box.width - 4, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 4, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.move(8, 8, { steps: 10 });      // 拖到遮罩上（視窗外）才放開
+    await page.mouse.up();
+    const open = await page.locator('#modal-overlay.open').count();
+    const kept = await page.inputValue('#deptroster-name');
+    evid['I-drag-out-modal-open'] = String(open === 1) + ' / 內容=' + kept;
+    expect(open === 1, '視窗被拖曳放開誤關了');
+    expect(kept === '四技七A', '填到一半的內容不見了：' + kept);
+  });
+  await check('I', '單純點視窗外的空白處 → 照樣關閉（原本的行為要留著）', async () => {
+    await page.mouse.click(8, 8);
+    await page.waitForTimeout(200);
+    expect(await page.locator('#modal-overlay.open').count() === 0, '點空白處應該關閉視窗');
   });
 });
 
