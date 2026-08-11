@@ -2267,7 +2267,7 @@ async function loadDeptRoster(deptId) {
 }
 
 // __ROSTER_EXPORT_START__
-// 導師名冊匯出用的列（純函式，無 DOM/全域相依，供 test/roster-export.test.js 就地抽出測試）。
+// 導師名冊匯出用的列（純函式，無 DOM/全域相依，供 test/export-rows.test.js 就地抽出測試）。
 // 一位導師一列；一班多位導師就多列（Excel 要能直接排序/篩選，合併儲存格只會擋路）。
 // 沒有導師的班級仍出一列（導師欄留白）——「這班還沒有導師」正是中心要看見的缺口。
 // 主任導師（系主任）每個系一列，班級欄寫「（主任導師）」，排在該系最前面。
@@ -2322,6 +2322,28 @@ function classStateLabelForExport(cls) {
   if (cls.active === false) s.push('停用');
   if (cls.graduatedSemester) s.push('已畢業(' + cls.graduatedSemester + ')');
   return s.join('／') || '啟用';
+}
+// 系辦助理帳號的匯出列（純函式）。用途是「寄通知信給各系」：要的就是帳號＋分機。
+// 初始密碼＝分機的第一段數字（與後端 initialPasswordFromExtGas_ 同規則），但**只在該帳號
+// 仍是初始密碼時才填**——已自行改過的人再列出分機會誤導收信的人去打一個沒用的密碼。
+function buildDeptAccountExportRows(rows, deptNameById) {
+  const nameOf = deptNameById || function (id) { return id; };
+  return (rows || []).map(function (r) {
+    const ext = String(r.ext == null ? '' : r.ext).trim();
+    const first = (ext.match(/\d+/) || [''])[0];
+    const acct = String(r.email || '').split('@')[0].toLowerCase();
+    const state = !r.hasAccount ? '尚未建立' : (r.accountDisabled ? '已停用' : '啟用');
+    return {
+      '系所': (r.deptIds || []).map(nameOf).join('、'),
+      '姓名': r.name || '',
+      '登入帳號': acct,
+      'Email': r.email || '',
+      '分機': ext,
+      '初始密碼': (r.hasAccount && r.mustChangePassword) ? first : (!r.hasAccount ? first : ''),
+      '帳號狀態': state,
+      '密碼': !r.hasAccount ? '—' : (r.mustChangePassword ? '仍是初始密碼' : '已自行更改'),
+    };
+  });
 }
 // __ROSTER_EXPORT_END__
 
@@ -3078,7 +3100,8 @@ function renderDeptAccountsTable(all) {
       '</b> 人仍在使用初始密碼。' +
     (rows.length === all.length ? '' :
       '（篩選後顯示 <b>' + rows.length + '</b> 人：' + noAccount + ' 人尚無帳號、' + initial + ' 人用初始密碼）') + '</p>' +
-    '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button></div>' +
+    '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button> ' +
+    '<button class="btn btn-sm" data-action="deptacct-export">匯出 Excel</button></div>' +
     '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>系所</th><th>分機</th><th>帳號狀態</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
     (rows.length ? '' : '<tr><td colspan="7"><div class="empty-hint">這個篩選條件下沒有系辦助理。</div></td></tr>') +
     rows.map(function (r) {
@@ -3106,7 +3129,27 @@ function renderDeptAccountsTable(all) {
   bindDeptAsstFilter(function () { renderDeptAccountsTable(deptAccountRows); });
 }
 
+// 匯出目前**篩選後**看到的那些列——畫面上看到幾筆就匯出幾筆，不會偷偷多給。
+async function exportDeptAccounts() {
+  const shown = (deptAccountRows || []).filter(function (r) { return deptAsstRowMatches(r.deptIds); });
+  if (!shown.length) { showToast('目前篩選條件下沒有資料可匯出', 'error'); return; }
+  try {
+    showLoading('準備檔案…');
+    await ensureSheetJsLoaded();
+    const rows = buildDeptAccountExportRows(shown, deptNameById);
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [{ wch: 18 }, { wch: 16 }, { wch: 14 }, { wch: 28 }, { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 12 }];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, '系辦助理帳號');
+    XLSX.writeFile(wb, '系辦助理帳號_' + todayStamp() + '.xlsx');
+    showToast('已匯出 ' + rows.length + ' 筆', 'success');
+  } catch (err) {
+    showToast('匯出失敗：' + err.message, 'error');
+  } finally { hideLoading(); }
+}
+
 document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="deptacct-export"]')) { exportDeptAccounts(); return; }
   const createAll = e.target.closest('[data-action="deptacct-create-all"]');
   if (createAll) {
     if (!confirm('將為所有「尚未建立帳號」且有填分機的系辦助理建立帳號，初始密碼＝各自的分機。確定？')) return;

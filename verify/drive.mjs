@@ -1147,6 +1147,24 @@ await flow('H', async () => {
     expect(/森林系/.test(txt), '系所欄沒顯示：' + txt);
     await page.selectOption('#deptasst-filter-college', '');
   });
+  await check('H', '系辦助理帳號分頁可匯出 Excel（帳號＋分機，供通知信使用）', async () => {
+    const [download] = await Promise.all([
+      page.waitForEvent('download', { timeout: 60000 }),
+      page.locator('[data-action="deptacct-export"]').click(),
+    ]);
+    const file = path.join(SHOTS, 'dept-accounts.xlsx');
+    await download.saveAs(file);
+    const XLSX = requireScratch('xlsx');
+    const wb = XLSX.read(fs.readFileSync(file));
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets['系辦助理帳號'], { defval: '' });
+    evid['H-account-export'] = download.suggestedFilename() + '：' + JSON.stringify(rows);
+    expect(/^系辦助理帳號_\d{8}\.xlsx$/.test(download.suggestedFilename()), '檔名=' + download.suggestedFilename());
+    const h = rows.find((r) => r['登入帳號'] === 'h-asst');
+    expect(!!h, '找不到 h-asst 那列：' + JSON.stringify(rows));
+    expect(h['分機'] === 7788 || h['分機'] === '7788', '分機欄=' + h['分機']);
+    expect(String(h['初始密碼']) === '', 'h-asst 已自行改過密碼，不該列出初始密碼：' + h['初始密碼']);
+    expect(h['系所'] === '森林系', '系所欄=' + h['系所']);
+  });
   await shot(page, 'H-系辦助理帳號分頁（學院篩選）');
 });
 
