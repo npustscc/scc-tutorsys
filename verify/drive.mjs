@@ -301,67 +301,110 @@ await flow('C2', async () => {
   await page.locator('[data-class-expand-all]').click();  // 還原展開，避免影響後續流程
 });
 
-// ══ D：換學期升級 ═══════════════════════════════════════════════════════════════
+// ══ D：換學期升級（席位式，2026-08-11 事故後改版）══════════════════════════════
+// 種子只有 農園系_四技一A／農園系_四技四A（沒有二A/三A），刻意保留這個「section 不齊」
+// 現況：去處守門（gate 4）應該擋下這兩班（找不到目標/來源班），標 keep+uncertain，
+// 而不是悄悄讓導師消失。為了同時驗到「一年級班 vacate、二年級班 inherit 且來源正確」，
+// 先用班級管理 UI 補一個「農園系_四技二A」（不填導師）——這正是真實情境：admin 發現
+// section 不齊，先建好席位再執行升級。
 await flow('D', async () => {
+await page.locator('[data-admin-tab="classes"]').click();
+await page.locator('[data-action="class-new"]').click();
+await page.locator('#class-form').waitFor();
+await page.selectOption('#class-dept', '農園系');
+await page.fill('#class-name', '四技二A');
+await page.locator('#class-form button[type=submit]').click();
+await check('D', '補齊「農園系_四技二A」（不填導師）成功', async () => {
+  // .last()：前面 C2 的編輯儲存也剛送出「已儲存」toast，4200ms 自動移除前兩個可能並存
+  // （同一句在後面 F 段也留了註解），用 tr 級的定位確認新班真的出現在清單裡更直接。
+  await page.locator('.toast', { hasText: '已儲存' }).last().waitFor({ timeout: 8000 });
+  await page.locator('#admin-tab-content tr', { hasText: '農園系_四技二A' }).waitFor({ timeout: 5000 });
+});
+await shot(page, 'D-補齊四技二A');
+
 await page.locator('[data-admin-tab="semesters"]').click();
 await page.locator('[data-action="rollover-open"]').click();
 await page.locator('#roll-from').waitFor();
 await page.selectOption('#roll-from', '114-2');
 await page.selectOption('#roll-to', '115-1');
 await page.locator('#roll-preview-btn').click();
-await check('D', '預覽產生：農園四技一A→四技二A（帶入升級）', async () => {
+await check('D', '預覽：農園四技一A → 釋出（待指派；導師隨學生升上四技二A）', async () => {
   const row = page.locator('#roll-preview tr', { hasText: '四農園一A' });
   await row.waitFor({ timeout: 10000 });
-  expect(await row.locator('select').inputValue() === 'advance', 'action 非 advance');
-  expect(await row.locator('input[data-roll-newname]').inputValue() === '四技二A', 'newName 非四技二A');
+  expect(await row.locator('select').inputValue() === 'vacate', 'action 非 vacate：' + await row.locator('select').inputValue());
 });
-await check('D', '農園四技四A→畢業；碩二→畢業', async () => {
-  expect(await page.locator('#roll-preview tr', { hasText: '四農園四A' }).locator('select').inputValue() === 'graduate', '四技四A 非 graduate');
-  expect(await page.locator('#roll-preview tr', { hasText: '碩農園二' }).locator('select').inputValue() === 'graduate', '碩二 非 graduate');
+await check('D', '預覽：新補的四技二A → 接手（來源＝四技一A），沒有改名也沒有畢業', async () => {
+  // 新班沒填顯示名稱，這裡直接用原始班名「四技二A」比對——不能對整列 tr 用 hasText，
+  // 因為一A 那列的「說明」欄本身就會提到「升上四技二A」，整列比對會同時命中兩列；
+  // 縮小到「班級」這一欄再取其所在列，才是唯一命中新班的那一列。
+  // 導師姓名比對用「李新師」而非種子原始值「王小明」——流程 C 已經把 農園系_四技一A
+  // 的導師期中更換成李新師、又加了王助教，D 這裡看到的是 C 跑完之後的當下狀態。
+  const row = page.locator('#roll-preview tr').filter({ has: page.locator('td[data-label="班級"]', { hasText: '四技二A' }) });
+  await row.waitFor({ timeout: 5000 });
+  expect(await row.locator('select').inputValue() === 'inherit', 'action 非 inherit');
+  const rowText = await row.textContent();
+  expect(rowText.includes('四農園一A') || rowText.includes('四技一A'), '接手來源未顯示四技一A：' + rowText);
+  expect(rowText.includes('李新師'), '新導師未顯示李新師：' + rowText);
 });
-await check('D', '獸醫四技四A→四技五A（graduationGrade=5 覆寫）', async () => {
-  const row = page.locator('#roll-preview tr', { hasText: '四獸醫四A' });
-  expect(await row.locator('select').inputValue() === 'advance', '非 advance');
-  expect(await row.locator('input[data-roll-newname]').inputValue() === '四技五A', 'newName 非四技五A');
+await check('D', '預覽：section 不齊的兩班（農園四技四A／獸醫四技四A）keep＋標黃，不是改名也不是畢業', async () => {
+  const r1 = page.locator('#roll-preview tr', { hasText: '四農園四A' });
+  expect(await r1.locator('select').inputValue() === 'keep', '農園四技四A 非 keep');
+  expect((await r1.getAttribute('style') || '').includes('warning-bg'), '農園四技四A 未標黃');
+  const r2 = page.locator('#roll-preview tr', { hasText: '四獸醫四A' });
+  expect(await r2.locator('select').inputValue() === 'keep', '獸醫四技四A 非 keep');
+  expect((await r2.getAttribute('style') || '').includes('warning-bg'), '獸醫四技四A 未標黃');
 });
-await check('D', '家族陳美惠→keep＋標黃（uncertain）', async () => {
+await check('D', '預覽：家族陳美惠→keep 且不標黃（非年級班，導師不隨學年異動）', async () => {
   const row = page.locator('#roll-preview tr', { hasText: '森林家族(陳美惠)' });
   expect(await row.locator('select').inputValue() === 'keep', '非 keep');
-  const style = await row.getAttribute('style');
-  expect(style && style.includes('warning-bg'), '未標黃：' + style);
+  expect(!(await row.getAttribute('style') || '').includes('warning-bg'), '不該標黃卻標黃了');
 });
-await shot(page, 'D-升級預覽整表');
+await shot(page, 'D-升級預覽整表（席位式）');
 
-// 🔍 撞名探針：把四技一A的新班名改成既有「碩二」→ 套用 → 該列 error、其他列成功
-const rowA = page.locator('#roll-preview tr', { hasText: '四農園一A' });
-await rowA.locator('input[data-roll-newname]').fill('碩二');
+// 🔍 全有全無探針：直打 API 送一個「1 列非法＋1 列合法」的批次，斷言整批不寫——
+// 這正是 2026-08-11 事故的形狀（撞名列進 errors 但不中斷整批，104 列已經寫入）反過來驗證。
+await check('D', '🔍 全有全無：非法批次（action:advance 已不支援）→ ok:false，合法列（四技二A 接手）也沒被寫入', async () => {
+  const bad = await apiCall('adminRolloverApply', {
+    fromSemester: '114-2', toSemester: '115-1',
+    rows: [
+      { classId: '農園系_四技一A', action: 'advance' },   // 舊動作，新版不支援，必須整批擋下
+      { classId: '農園系_四技二A', action: 'inherit' },   // 這列本身合法
+    ],
+  }, adminToken.token);
+  evid['D-rollover-reject-all-or-nothing'] = JSON.stringify(bad);
+  expect(bad.data && bad.data.ok === false, '回應=' + JSON.stringify(bad));
+  expect(Array.isArray(bad.data.errors) && bad.data.errors.some((e) => /invalid action: advance/.test(e.error)), 'errors=' + JSON.stringify(bad.data && bad.data.errors));
+
+  // 重新 preview 確認四技二A 仍然沒有導師（合法列真的沒被寫進去）
+  const again = await apiCall('adminRolloverPreview', { fromSemester: '114-2', toSemester: '115-1' }, adminToken.token);
+  const row = (again.data.rows || []).find((r) => r.classId === '農園系_四技二A');
+  evid['D-rollover-after-reject'] = JSON.stringify(row);
+  expect(row && Array.isArray(row.tutors) && row.tutors.length === 0, '四技二A 導師不該有變動：' + JSON.stringify(row));
+});
+
+// 走 UI 正常套用（用預覽表的預設動作：一A 釋出／二A 接手／其餘保留）
 await page.locator('#roll-apply-btn').click();
-await check('D', '🔍 套用：撞名列進 errors、其他列成功（改名1/畢業2/保留1/失敗1）', async () => {
+await check('D', '套用成功：接手 1 班、釋出 1 班、維持 4 班不變', async () => {
   await page.locator('#roll-preview', { hasText: '套用完成' }).waitFor({ timeout: 10000 });
   const txt = await page.locator('#roll-preview').textContent();
-  expect(txt.includes('改名 1 班'), '摘要=' + txt.slice(0, 200));
-  expect(txt.includes('畢業 2 班'), '畢業數不符');
-  expect(/already exists|failed|失敗 1/.test(txt), '無失敗列');
+  evid['D-apply-summary'] = txt;
+  expect(txt.includes('接手 1 班'), '摘要=' + txt.slice(0, 200));
+  expect(txt.includes('釋出 1 班'), '摘要=' + txt.slice(0, 200));
+  expect(txt.includes('維持 4 班'), '摘要=' + txt.slice(0, 200));
 });
-await shot(page, 'D-套用結果摘要含撞名失敗');
+await shot(page, 'D-套用結果摘要（全有全無成功）');
 await page.locator('#modal-box [data-action="close-modal"]').last().click();
 
 await page.locator('[data-admin-tab="classes"]').click();
-await page.locator('[data-class-tab="獸醫學院"]').click();  // 獸醫班在獸醫學院分頁
-await check('D', '班級列表（獸醫學院 tab）：獸醫班已改名四技五A', async () => {
-  await page.locator('#admin-tab-content tr', { hasText: '四技五A' }).waitFor({ timeout: 5000 });
+await check('D', '班級列表：四技二A 已接手李新師；四技一A 已釋出（無導師）；班名兩班都沒有改變', async () => {
+  const rowNew = page.locator('#admin-tab-content tr', { hasText: '四技二A' });
+  await rowNew.waitFor({ timeout: 5000 });
+  expect((await rowNew.textContent() || '').includes('李新師'), '四技二A 未顯示李新師');
+  const rowOld = page.locator('#admin-tab-content tr', { hasText: '四農園一A' });
+  await rowOld.waitFor({ timeout: 5000 });
+  expect(!(await rowOld.textContent() || '').includes('李新師'), '四技一A 導師應已釋出，卻仍顯示李新師');
 });
-await shot(page, 'D-班級列表改名生效');
-await check('D', '🔍 overviewStats(114-2) 回舊班名（nameHistory 生效）', async () => {
-  const r = await apiCall('overviewStats', { semester: '114-2' }, adminToken.token);
-  evid['D-overviewStats-114-2'] = JSON.stringify(r).slice(0, 800);
-  const row = (r.data.rows || []).find((x) => x.classId === '獸醫系_四技四A');
-  expect(row && row.displayName === '四獸醫四A', '114-2 顯示=' + (row && row.displayName));
-  const r2 = await apiCall('overviewStats', { semester: '115-1' }, adminToken.token);
-  const row2 = (r2.data.rows || []).find((x) => x.classId === '獸醫系_四技四A');
-  evid['D-overviewStats-115-1-row'] = JSON.stringify(row2);
-  expect(row2 && /五/.test(row2.displayName), '115-1 顯示=' + (row2 && row2.displayName));
-});
+await shot(page, 'D-班級列表-導師搬移生效（班名不變）');
 });
 
 // ══ E：匯入 v3（真實統計表，仿 Excel 樣態預覽：學院 tabs＋系所分組＋全欄位可修）═══
@@ -509,12 +552,25 @@ await shot(page, 'E-二次上傳冪等摘要');
 });
 
 // ══ F：畢業／停用班補匯被拒＋補救提示（Ticket 3）═══════════════════════════════
-// 流程 D 的 rollover 套用已把「農園系_碩二」畢業（active:false + graduatedSemester）。
-// 用標準範本 CSV 直打匯入該班（class disabled fail-closed），連帶一列仍在學的
-// 「森林系_家族陳美惠」驗證同批次「單列失敗不中斷整批」＋前端補救提示文字正確出現。
+// 改版後的 rollover（席位式）不會讓任何班畢業/停用，所以流程 D 不再提供現成的停用班——
+// 這裡自己動手：走班級管理最貼近真實使用者的路徑（「編輯」表單取消「啟用」勾選），把
+// 「農園系_碩二」停用。用標準範本 CSV 直打匯入該班（class disabled fail-closed），連帶
+// 一列仍在學的「森林系_家族陳美惠」驗證同批次「單列失敗不中斷整批」＋前端補救提示文字。
 await flow('F', async () => {
+  await page.locator('[data-admin-tab="classes"]').click();
+  const master2Row = page.locator('#admin-tab-content tr', { hasText: '碩農園二' });
+  await master2Row.waitFor({ timeout: 5000 });
+  await master2Row.locator('[data-action="class-edit"]').click();
+  await page.locator('#class-form').waitFor();
+  await page.locator('#class-active').uncheck();
+  await page.locator('#class-form button[type=submit]').click();
+  await check('F', '停用「農園系_碩二」成功（改版 rollover 不再自動畢業任何班，這裡改用班級管理手動停用）', async () => {
+    await page.locator('.toast', { hasText: '已儲存' }).waitFor({ timeout: 8000 });
+  });
+  await shot(page, 'F-手動停用農園系碩二');
+
   const header = ['學院', '系所', '導師制度', '班級名稱(原始)', '班級顯示名稱(可修改)', '應繳班會份數', '導師1姓名', '導師1email', '導師2姓名', '導師2email'];
-  const row1 = ['農學院', '農園系', '', '碩二', '', '', '', '', '', ''];      // 已畢業班 → 預期 class disabled
+  const row1 = ['農學院', '農園系', '', '碩二', '', '', '', '', '', ''];      // 已停用班 → 預期 class disabled
   const row2 = ['', '森林系', '', '家族陳美惠', '', '', '', '', '', ''];     // 仍在學班 → 預期成功
   const csv = '﻿' + [header, row1, row2].map((r) => r.join(',')).join('\n');
   const csvPath = path.join(SCRATCH, 'verify-disabled-class-import.csv');

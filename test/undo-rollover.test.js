@@ -4,8 +4,10 @@
 // 「有沒有復原」，而是「有沒有多做」：本來就停用的班不可以被救活、別的學期的升級不可以
 // 被牽連、沒有痕跡的資料要一個字都不動。
 //
-// 最後一條是往返：跑一次真的 computeRolloverPlan_/adminRolloverApply 的寫入形狀，再復原，
-// 結果要與原檔逐位元一致。
+// 最後一條是往返：模擬 2026-08-11 那次事故實際落地的寫入形狀（當時的 cohort 式 rollover——
+// advance 改名／graduate 停用；rollover 本身已在同一批修改中改為席位式，不再有這兩個動作，
+// 這裡刻意保留歷史形狀只是為了驗證復原函式，不代表 computeRolloverPlan_/adminRolloverApply
+// 現在還會產生這種寫入），再復原，結果要與原檔逐位元一致。
 
 const { test } = require('node:test');
 const assert = require('node:assert');
