@@ -774,6 +774,119 @@ function maintenanceImportFromDriveJson() {
   return out;
 }
 
+// ── 復原一次「換學期升級」的部分套用（2026-08-11 事故）───────────────────────
+// adminRolloverApply 的失敗列只收進 errors、**不中斷整批**，而這份資料是席位式的
+// （每個系四技一/二/三/四同時存在），所以 advance 幾乎全部撞名失敗、graduate 全部成功
+// → 結果是「每個系的最高年級被停用，其他一個都沒升」。114-2→115-1 那次：99 筆停用 + 5 筆改名。
+//
+// 邏輯與 scripts/undo-rollover.mjs 完全相同（那支只能對本機檔案動手，而權威資料在 Drive）：
+//   1. graduatedSemester === from 的班 → 還原成 **null**（不是 delete：顯式 null 才是這份資料
+//      的正規形狀，欄位刪掉會讓 import-from-gas 每次同步都判定「有更新」）、active 改回 true。
+//      **以 graduatedSemester 當鍵，不是以 active** —— 本來就停用的班不會被誤救活。
+//   2. nameHistory 最後一筆的 upToSemester === from → 還原 name/displayName 並把那筆 pop 掉。
+//   3. **tutorHistory 不動**：append-only 的稽核軌跡，那次升級確實發生過。
+const UNDO_ROLLOVER_FROM_ = '114-2';   // 要復原哪一次升級的「來源學期」；換事故要改這裡
+
+function undoRolloverInPlace_(classes, fromSemester) {
+  const unGraduated = [];
+  const renamed = [];
+  (classes || []).forEach(function (c) {
+    if (!c) return;
+    if (c.graduatedSemester === fromSemester) {
+      unGraduated.push({ id: c.id, dept: c.deptId, name: c.name, wasActive: c.active });
+      c.graduatedSemester = null;
+      c.active = true;
+    }
+    const nh = Array.isArray(c.nameHistory) ? c.nameHistory : null;
+    const last = nh && nh.length ? nh[nh.length - 1] : null;
+    if (last && last.upToSemester === fromSemester) {
+      renamed.push({ id: c.id, dept: c.deptId, from: c.name, to: last.name });
+      c.name = last.name;
+      if (last.displayName !== undefined) c.displayName = last.displayName;
+      nh.pop();
+      if (!nh.length) delete c.nameHistory;
+    }
+  });
+  return { unGraduated: unGraduated, renamed: renamed };
+}
+
+// 摘要做成純函式，預覽與套用共用同一份文字——兩邊各寫一次的話，看到的與寫下去的會分岔。
+function undoRolloverSummary_(plan, total, fromSemester) {
+  const byName = {};
+  plan.unGraduated.forEach(function (x) { byName[x.name] = (byName[x.name] || 0) + 1; });
+  return {
+    學期: fromSemester,
+    班級總數: total,
+    復原停用: plan.unGraduated.length,
+    停用班級分布: Object.keys(byName).sort(function (a, b) { return byName[b] - byName[a]; })
+      .map(function (n) { return n + '×' + byName[n]; }).join('、'),
+    復原改名: plan.renamed.length,
+    改名清單: plan.renamed.map(function (r) { return r.dept + '：' + r.from + ' → 還原成 ' + r.to; }),
+  };
+}
+
+// 預覽（零參數，不寫入）。先跑這支，數字對了再跑 Apply 那支。
+function maintenanceUndoRollover() {
+  requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const classes = readJsonSafe_('classes.json', ctx, null);
+  if (!Array.isArray(classes)) {
+    const err = JSON.stringify({ error: 'classes.json 不是陣列或讀不到，拒絕處理' });
+    Logger.log(err);
+    return err;
+  }
+  const plan = undoRolloverInPlace_(classes, UNDO_ROLLOVER_FROM_);   // 只動記憶體裡的副本，不寫回
+  const out = JSON.stringify(Object.assign(
+    { 模式: '預覽（未寫入）' },
+    undoRolloverSummary_(plan, classes.length, UNDO_ROLLOVER_FROM_),
+    (!plan.unGraduated.length && !plan.renamed.length)
+      ? { 結論: '沒有找到 ' + UNDO_ROLLOVER_FROM_ + ' 的升級痕跡，這份資料不需要復原（也可能是跑錯環境）' }
+      : { 下一步: '數字無誤才執行 maintenanceUndoRolloverApply（會先備份再寫入）' }
+  ));
+  Logger.log(out);
+  return out;
+}
+
+// 實際套用（零參數）。寫入前把原檔備份成 classes.json.bak-undorollover-<時間戳>。
+function maintenanceUndoRolloverApply() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  return withLock_(function () {
+    const classes = readJsonSafe_('classes.json', ctx, null);
+    if (!Array.isArray(classes)) {
+      const err = JSON.stringify({ error: 'classes.json 不是陣列或讀不到，拒絕處理' });
+      Logger.log(err);
+      return err;
+    }
+    // 備份要的是「改之前」的樣子，所以在 undo 之前先拷一份——事後再讀一次 Drive 看似也行，
+    // 但那是把備份的正確性押在「兩次讀到的是同一份」上，沒必要。
+    const original = JSON.parse(JSON.stringify(classes));
+    const plan = undoRolloverInPlace_(classes, UNDO_ROLLOVER_FROM_);
+    if (!plan.unGraduated.length && !plan.renamed.length) {
+      // 什麼都不必改就不要寫檔——白寫一次等於平白多一個「資料變動過」的事實。
+      const out = JSON.stringify({ 模式: '未寫入', 結論: '沒有找到 ' + UNDO_ROLLOVER_FROM_ + ' 的升級痕跡' });
+      Logger.log(out);
+      return out;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const bak = 'classes.json.bak-undorollover-' + stamp;
+    writeJsonPath_(bak, original, ctx);
+    writeJsonPath_('classes.json', classes, ctx);
+    appendAuditLog_(ctx, {
+      action: 'maintenanceUndoRollover', by: who,
+      targetId: UNDO_ROLLOVER_FROM_ + '：復原停用 ' + plan.unGraduated.length + '、復原改名 ' + plan.renamed.length,
+      at: new Date().toISOString(),
+    });
+    const out = JSON.stringify(Object.assign(
+      { 模式: '已寫入', 備份: bak, by: who },
+      undoRolloverSummary_(plan, classes.length, UNDO_ROLLOVER_FROM_),
+      { 提醒: 'tutorHistory 沒有動（append-only 稽核軌跡），裡面仍留著那次升級的紀錄' }
+    ));
+    Logger.log(out);
+    return out;
+  });
+}
+
 // 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
 // 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
 // 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。

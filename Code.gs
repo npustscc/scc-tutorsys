@@ -125,8 +125,13 @@ function doPost(e) {
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
-      case 'deptRosterUpsertClass':     result = deptRosterUpsertClassAction_(params, ctx, userEmail); break;
-      case 'deptRosterDeleteClass':     result = deptRosterDeleteClassAction_(params, ctx, userEmail); break;
+      // 這三個是名冊異動：回傳後要做收尾（排入主責通知佇列＋同步 Google Sheet），
+      // 收尾一律在 action 的 withLock_ 之外，見 withRosterAftercare_。
+      case 'deptRosterUpsertClass':     result = withRosterAftercare_(deptRosterUpsertClassAction_(params, ctx, userEmail), ctx, userEmail); break;
+      case 'deptRosterDeleteClass':     result = withRosterAftercare_(deptRosterDeleteClassAction_(params, ctx, userEmail), ctx, userEmail); break;
+      case 'deptRosterUpsertHead':      result = withRosterAftercare_(deptRosterUpsertHeadAction_(params, ctx, userEmail), ctx, userEmail); break;
+      case 'adminBulkUpsertDeptHeads':  result = adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail); break;
+      case 'adminBulkApplyDeptSheet':   result = adminBulkApplyDeptSheetAction_(params, ctx, userEmail); break;
       case 'adminChangeTutorMidterm':   result = adminChangeTutorMidtermAction_(params, ctx, userEmail); break;
       case 'tutorHistoryGet':           result = tutorHistoryGetAction_(params, ctx, userEmail); break;
       case 'adminRolloverPreview':      result = adminRolloverPreviewAction_(params, ctx, userEmail); break;
@@ -769,6 +774,119 @@ function maintenanceImportFromDriveJson() {
   return out;
 }
 
+// ── 復原一次「換學期升級」的部分套用（2026-08-11 事故）───────────────────────
+// adminRolloverApply 的失敗列只收進 errors、**不中斷整批**，而這份資料是席位式的
+// （每個系四技一/二/三/四同時存在），所以 advance 幾乎全部撞名失敗、graduate 全部成功
+// → 結果是「每個系的最高年級被停用，其他一個都沒升」。114-2→115-1 那次：99 筆停用 + 5 筆改名。
+//
+// 邏輯與 scripts/undo-rollover.mjs 完全相同（那支只能對本機檔案動手，而權威資料在 Drive）：
+//   1. graduatedSemester === from 的班 → 還原成 **null**（不是 delete：顯式 null 才是這份資料
+//      的正規形狀，欄位刪掉會讓 import-from-gas 每次同步都判定「有更新」）、active 改回 true。
+//      **以 graduatedSemester 當鍵，不是以 active** —— 本來就停用的班不會被誤救活。
+//   2. nameHistory 最後一筆的 upToSemester === from → 還原 name/displayName 並把那筆 pop 掉。
+//   3. **tutorHistory 不動**：append-only 的稽核軌跡，那次升級確實發生過。
+const UNDO_ROLLOVER_FROM_ = '114-2';   // 要復原哪一次升級的「來源學期」；換事故要改這裡
+
+function undoRolloverInPlace_(classes, fromSemester) {
+  const unGraduated = [];
+  const renamed = [];
+  (classes || []).forEach(function (c) {
+    if (!c) return;
+    if (c.graduatedSemester === fromSemester) {
+      unGraduated.push({ id: c.id, dept: c.deptId, name: c.name, wasActive: c.active });
+      c.graduatedSemester = null;
+      c.active = true;
+    }
+    const nh = Array.isArray(c.nameHistory) ? c.nameHistory : null;
+    const last = nh && nh.length ? nh[nh.length - 1] : null;
+    if (last && last.upToSemester === fromSemester) {
+      renamed.push({ id: c.id, dept: c.deptId, from: c.name, to: last.name });
+      c.name = last.name;
+      if (last.displayName !== undefined) c.displayName = last.displayName;
+      nh.pop();
+      if (!nh.length) delete c.nameHistory;
+    }
+  });
+  return { unGraduated: unGraduated, renamed: renamed };
+}
+
+// 摘要做成純函式，預覽與套用共用同一份文字——兩邊各寫一次的話，看到的與寫下去的會分岔。
+function undoRolloverSummary_(plan, total, fromSemester) {
+  const byName = {};
+  plan.unGraduated.forEach(function (x) { byName[x.name] = (byName[x.name] || 0) + 1; });
+  return {
+    學期: fromSemester,
+    班級總數: total,
+    復原停用: plan.unGraduated.length,
+    停用班級分布: Object.keys(byName).sort(function (a, b) { return byName[b] - byName[a]; })
+      .map(function (n) { return n + '×' + byName[n]; }).join('、'),
+    復原改名: plan.renamed.length,
+    改名清單: plan.renamed.map(function (r) { return r.dept + '：' + r.from + ' → 還原成 ' + r.to; }),
+  };
+}
+
+// 預覽（零參數，不寫入）。先跑這支，數字對了再跑 Apply 那支。
+function maintenanceUndoRollover() {
+  requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const classes = readJsonSafe_('classes.json', ctx, null);
+  if (!Array.isArray(classes)) {
+    const err = JSON.stringify({ error: 'classes.json 不是陣列或讀不到，拒絕處理' });
+    Logger.log(err);
+    return err;
+  }
+  const plan = undoRolloverInPlace_(classes, UNDO_ROLLOVER_FROM_);   // 只動記憶體裡的副本，不寫回
+  const out = JSON.stringify(Object.assign(
+    { 模式: '預覽（未寫入）' },
+    undoRolloverSummary_(plan, classes.length, UNDO_ROLLOVER_FROM_),
+    (!plan.unGraduated.length && !plan.renamed.length)
+      ? { 結論: '沒有找到 ' + UNDO_ROLLOVER_FROM_ + ' 的升級痕跡，這份資料不需要復原（也可能是跑錯環境）' }
+      : { 下一步: '數字無誤才執行 maintenanceUndoRolloverApply（會先備份再寫入）' }
+  ));
+  Logger.log(out);
+  return out;
+}
+
+// 實際套用（零參數）。寫入前把原檔備份成 classes.json.bak-undorollover-<時間戳>。
+function maintenanceUndoRolloverApply() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  return withLock_(function () {
+    const classes = readJsonSafe_('classes.json', ctx, null);
+    if (!Array.isArray(classes)) {
+      const err = JSON.stringify({ error: 'classes.json 不是陣列或讀不到，拒絕處理' });
+      Logger.log(err);
+      return err;
+    }
+    // 備份要的是「改之前」的樣子，所以在 undo 之前先拷一份——事後再讀一次 Drive 看似也行，
+    // 但那是把備份的正確性押在「兩次讀到的是同一份」上，沒必要。
+    const original = JSON.parse(JSON.stringify(classes));
+    const plan = undoRolloverInPlace_(classes, UNDO_ROLLOVER_FROM_);
+    if (!plan.unGraduated.length && !plan.renamed.length) {
+      // 什麼都不必改就不要寫檔——白寫一次等於平白多一個「資料變動過」的事實。
+      const out = JSON.stringify({ 模式: '未寫入', 結論: '沒有找到 ' + UNDO_ROLLOVER_FROM_ + ' 的升級痕跡' });
+      Logger.log(out);
+      return out;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const bak = 'classes.json.bak-undorollover-' + stamp;
+    writeJsonPath_(bak, original, ctx);
+    writeJsonPath_('classes.json', classes, ctx);
+    appendAuditLog_(ctx, {
+      action: 'maintenanceUndoRollover', by: who,
+      targetId: UNDO_ROLLOVER_FROM_ + '：復原停用 ' + plan.unGraduated.length + '、復原改名 ' + plan.renamed.length,
+      at: new Date().toISOString(),
+    });
+    const out = JSON.stringify(Object.assign(
+      { 模式: '已寫入', 備份: bak, by: who },
+      undoRolloverSummary_(plan, classes.length, UNDO_ROLLOVER_FROM_),
+      { 提醒: 'tutorHistory 沒有動（append-only 稽核軌跡），裡面仍留著那次升級的紀錄' }
+    ));
+    Logger.log(out);
+    return out;
+  });
+}
+
 // 種一筆**測試用**系辦助理白名單（給人從編輯器一鍵執行——編輯器只能跑零參數函式）。
 // 刻意用 example.com 的假 email 與假分機：這支會進公開 repo，不能帶任何真實個資。
 // 掛的系所取「現存且啟用」的第一個，不寫死——各環境的系所清單不一樣。
@@ -844,6 +962,58 @@ function maintenanceResetLocalAccounts(emailsCsv) {
   });
   Logger.log(out);
   return out;
+}
+
+// 建立（或綁定）名冊同步用的 Google 試算表，並立刻同步一次。零參數，從 GAS 編輯器執行。
+// 已經有 ROSTER_SHEET_ID 就沿用那一份，不會重建——重建會讓已分享出去的網址失效。
+// **分享設定要人工做**：這份表不含私人手機（決策如此），但仍是全校導師名單，
+// 請只分享給需要的人，不要用「知道連結的人」。
+function maintenanceSetupRosterSheet() {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  const props = PropertiesService.getScriptProperties();
+  let id = props.getProperty(ROSTER_SHEET_PROP_) || '';
+  let created = false;
+  if (!id) {
+    const ss = SpreadsheetApp.create('各系導師名冊（自動同步）');
+    id = ss.getId();
+    props.setProperty(ROSTER_SHEET_PROP_, id);
+    created = true;
+    // 放進系統的根資料夾，跟其他資料檔擺一起，之後好找
+    try { DriveApp.getFileById(id).moveTo(DriveApp.getFolderById(ROOT_FOLDER_ID)); } catch (e) {}
+  }
+  const res = syncRosterSheet_(ctx);
+  const out = JSON.stringify({
+    建立: created, sheetId: id,
+    網址: 'https://docs.google.com/spreadsheets/d/' + id + '/edit',
+    同步結果: res, by: who,
+    提醒: '請手動設定共用對象（不含私人手機，但仍是全校導師名單）',
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 安裝兩個時間觸發器：每小時全量校正 Sheet、每 10 分鐘出清通知佇列。
+// 重複執行不會裝出兩份（先刪同名的舊觸發器）。零參數，從 GAS 編輯器執行。
+function maintenanceInstallRosterTriggers() {
+  const who = requireMaintenanceOwner_();
+  const wanted = ['hourlyRosterSheetSync', 'flushRosterNotifications'];
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (wanted.indexOf(t.getHandlerFunction()) !== -1) ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('hourlyRosterSheetSync').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('flushRosterNotifications').timeBased().everyMinutes(10).create();
+  const out = JSON.stringify({ installed: wanted, by: who });
+  Logger.log(out);
+  return out;
+}
+
+// 每小時的全量校正（時間觸發器用，零參數）。存檔即同步已經涵蓋 99% 的情況，
+// 這一趟是為了修掉漏寫、手動亂改、或某次同步剛好失敗的殘留。
+function hourlyRosterSheetSync() {
+  const res = syncRosterSheetSafe_({ root: ROOT_FOLDER_ID });
+  Logger.log(JSON.stringify(res));
+  return JSON.stringify(res);
 }
 
 // ── 登出即註銷（全部裝置）：以「該帳號的 revokedBefore 時間戳」實作（仿 infosys v146）──
@@ -1245,7 +1415,18 @@ function resolveRoles_(email, config, departments, classes) {
   const staffLeads = (config && config.staffLeads) || [];
   const staffAssistants = (config && config.staffAssistants) || [];
   const lead = staffLeads.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
-  if (lead) roles.isStaffLead = true;
+  if (lead) {
+    roles.isStaffLead = true;
+    // 學諮中心主責＝系統最大權限（2026-08-11 使用者決策）：主責看得到、也做得到 admin 的一切。
+    // 刻意寫成「主責 ⇒ isAdmin」單一條規則，而不是在每個閘門各補一個 `|| roles.isStaffLead`：
+    // 本系統是 default-deny，逐點補會漏掉日後新增的 action（漏了＝主責少看到一頁），
+    // 也讓「誰有權限」散在幾十處無法一眼確認。代價要講清楚——主責因此同時獲得
+    //   ①resolveActionableStage_ 的 admin override（可代核/代退**任何一關**，含導師關與系主任關）
+    //   ②職員帳號與系辦助理帳號的管理權（可新增管理員、可把助理密碼重設為分機）
+    //   ③全部系所的名冊讀取權（deptRosterGet 走 isAdmin 分支，含私人手機）
+    // 要收回其中任何一項，就不能靠這一行，得改成該閘門自己判斷 isStaffLead。
+    roles.isAdmin = true;
+  }
   const assistant = staffAssistants.filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
   if (assistant) {
     roles.isStaffAssistant = true;
@@ -1584,9 +1765,12 @@ function isValidSemesterId_(semesterId, semesters) {
 // - suggestedTutors 的 by（建議者 email，即上傳學生）與自填 email 屬個資，只有 admin
 //   看得到完整內容；其他人（含該班導師）只拿到 name（前端顯示「待確認」chip 用）。
 // - tutors 的 email/姓名保留——上傳表單選班級與核章顯示都需要。
-// 導師手機（tutors[].phone，Phase 2 由系辦助理填）**一律不進 bootstrap**——
+// 導師聯絡方式（tutors[].ext 校內分機／tutors[].mobile 私人手機，以及 2026-08-11 之前的
+// 單一欄位 phone）**一律不進 bootstrap**——
 // bootstrap 的 classes 是每一個登入者（含任何 Google 帳號的學生）都拿得到的，
-// 手機留在裡面就等於全校可讀。要看手機只有一條路：deptRosterGet（後端按系所驗權限）。
+// 手機留在裡面就等於全校可讀。要看它們只有一條路：deptRosterGet（後端按系所驗權限）。
+// 分機雖然是校內公開資訊，也一起拔掉：同一組欄位走同一條通道，不留「這欄可以、那欄不行」
+// 的判斷空間。
 // 這裡對**所有角色含 admin** 都拔掉，讓「bootstrap 的 classes 沒有 phone」成為一條無例外的
 // 不變量——有例外就會有人依賴例外，然後某天例外變成漏洞。
 // 實作刻意**內聯**在 sanitizeClassesForViewer_ 裡而不是抽成 helper：抽出去的話，
@@ -1598,9 +1782,11 @@ function sanitizeClassesForViewer_(classes, roles) {
     if (c && c.tutors && c.tutors.length) {
       c = Object.assign({}, c0);
       c.tutors = c0.tutors.map(function (t) {
-        if (!t || t.phone === undefined) return t;
+        if (!t || (t.phone === undefined && t.ext === undefined && t.mobile === undefined)) return t;
         const t2 = Object.assign({}, t);
         delete t2.phone;
+        delete t2.ext;
+        delete t2.mobile;
         return t2;
       });
     }
@@ -1617,6 +1803,19 @@ function sanitizeClassesForViewer_(classes, roles) {
       copy.hasWhitelist = !!(c.uploadWhitelist && c.uploadWhitelist.length);
       delete copy.uploadWhitelist;
     }
+    return copy;
+  });
+}
+
+// 系所的「主任導師」（＝系主任）聯絡方式，比照導師的 ext/mobile：**一律不進 bootstrap**。
+// departments 是每個登入者都拿得到的（前端要用它顯示系所名稱），主任的私人手機留在裡面
+// 等於全校可讀。要看它只有 deptRosterGet 一條路。headName/headEmail 照舊保留——
+// 那是核章身分（resolveRoles_ 的 deptHeadOf 靠 headEmail 命中），且是校內公開資訊。
+function sanitizeDepartmentsForViewer_(departments) {
+  return (departments || []).map(function (d) {
+    if (!d || !d.head) return d;
+    const copy = Object.assign({}, d);
+    copy.head = { name: d.head.name || '', email: d.head.email || '' };
     return copy;
   });
 }
@@ -2600,7 +2799,8 @@ function bootstrapAction_(params, ctx, userEmail) {
   return {
     email: userEmail,
     roles: roles,
-    departments: departments,
+    // 主任導師的分機/手機不在這裡出現（見 sanitizeDepartmentsForViewer_）。
+    departments: sanitizeDepartmentsForViewer_(departments),
     colleges: colleges,
     tutorSystems: tutorSystems,
     // uploadWhitelist（學生 gmail 清單）只給該班導師/admin 看，其他人只拿到 hasWhitelist 布林。
@@ -2656,8 +2856,13 @@ function sessionStartAction_(params, ctx, userEmail) {
       if (geo) lines.push('大致位置：' + geo);
       lines.push('', '本次登入憑證有效至今日 24:00（台北時間），到期後需重新登入。',
         '若非本人操作，請立即聯繫系統管理者停用帳號，並可於系統「登入紀錄」按「登出所有裝置」使所有憑證即時失效。');
+      // 主責/助理可能填了「其他收信信箱」——登入通知也照那個設定寄，否則設定了卻只有名冊
+      // 通知會用到，人會以為沒生效。找不到那個人的設定時就退回登入信箱本身。
+      const meEntry = ((config.staffLeads || []).concat(config.staffAssistants || []))
+        .filter(function (x) { return x && x.email === userEmail && x.deleted !== true; })[0];
+      const to = (meEntry ? mailTargetsForEntry_(meEntry) : [userEmail]).join(',') || userEmail;
       MailApp.sendEmail({
-        to: userEmail,
+        to: to,
         subject: '【屏科大導師資訊系統】登入通知（正式版）',
         body: lines.join('\n'),
       });
@@ -3022,7 +3227,7 @@ function adminUpsertDepartmentAction_(params, ctx, userEmail) {
     if (idx === -1) data.push(merged); else data[idx] = merged;
     writeJsonPath_('departments.json', data, ctx);
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDepartment' : 'adminUpsertDepartment', by: userEmail, targetId: entry.id, at: now });
-    return { departments: data };
+    return { departments: sanitizeDepartmentsForViewer_(data) };
   });
 }
 
@@ -3137,7 +3342,8 @@ function adminImportRosterAction_(params, ctx, userEmail) {
       count: successCount, errorCount: errors.length, at: now,
     });
     return {
-      colleges: colleges, departments: departments, tutorSystems: tutorSystems, classes: classes,
+      colleges: colleges, departments: sanitizeDepartmentsForViewer_(departments),
+      tutorSystems: tutorSystems, classes: classes,
       successCount: successCount, errors: errors,
     };
   });
@@ -3187,10 +3393,41 @@ function adminUpsertTutorSystemAction_(params, ctx, userEmail) {
 // config.staffLeads / config.staffAssistants（比照現有職員帳號管理模式，見 adminUpsertUserAction_）。
 // staffAssistant.leadEmail 綁定的主責若不存在或已停用，resolveRoles_ 會 fail-closed 判該助理
 // 的 assistantLead 為 null（無法代為核章），故此處不額外擋——沿用既有 admin 信任邊界。
+// ── 收信信箱解析（純函式）──────────────────────────────────────────────────────
+// 學諮主責/助理有些人的登入帳號（Google/gmail）與實際收信的信箱不是同一個，所以名單那筆
+// 可以填 altEmail（其他收信信箱）與 noPrimaryMail（不要寄給登入用的那個信箱）。
+// 規則：預設寄登入信箱；填了 altEmail 就**兩個都寄**；勾了 noPrimaryMail 則只寄 altEmail。
+// 兩者都沒有等於「不寄給任何人」，那是設定錯誤而不是意圖——所以寫入時就擋掉
+// （見 normalizeMailPrefs_），這裡只負責把有效設定攤成收件者清單。
+function mailTargetsForEntry_(entry) {
+  if (!entry) return [];
+  const primary = String(entry.email || '').trim();
+  const alt = String(entry.altEmail || '').trim();
+  const out = [];
+  if (primary && entry.noPrimaryMail !== true) out.push(primary);
+  if (alt && out.indexOf(alt) === -1) out.push(alt);
+  return out;
+}
+
+// 寫入前的驗證：altEmail 格式、以及「不寄給登入信箱」時必須有替代信箱
+// （否則這個人就此收不到任何通知，而且從畫面上看不出來）。
+function normalizeMailPrefs_(entry) {
+  const alt = String((entry && entry.altEmail) || '').trim().toLowerCase();
+  if (alt && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(alt)) return { ok: false, error: '其他收信信箱格式不正確：' + alt };
+  if (alt.length > 100) return { ok: false, error: '其他收信信箱過長' };
+  const noPrimary = (entry && entry.noPrimaryMail) === true;
+  if (noPrimary && !alt) return { ok: false, error: '勾選「不寄給登入信箱」時，必須填其他收信信箱，否則這個人收不到任何通知' };
+  return { ok: true, altEmail: alt, noPrimaryMail: noPrimary };
+}
+
 function adminUpsertStaffLeadAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffLead;
   if (!entry || !entry.email) throw new Error('staffLead.email required');
+  const prefs = normalizeMailPrefs_(entry);
+  if (!prefs.ok) throw new Error(prefs.error);
+  entry.altEmail = prefs.altEmail;
+  entry.noPrimaryMail = prefs.noPrimaryMail;
   const isDelete = entry.deleted === true;
 
   return withLock_(function () {
@@ -3210,6 +3447,10 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffAssistant;
   if (!entry || !entry.email) throw new Error('staffAssistant.email required');
+  const prefs = normalizeMailPrefs_(entry);
+  if (!prefs.ok) throw new Error(prefs.error);
+  entry.altEmail = prefs.altEmail;
+  entry.noPrimaryMail = prefs.noPrimaryMail;
   const isDelete = entry.deleted === true;
 
   return withLock_(function () {
@@ -3306,20 +3547,33 @@ function projectClassForDeptRoster_(cls) {
     requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
     graduatedSemester: cls.graduatedSemester || null,
     active: cls.active !== false,
-    // phone（導師手機）**只在這條通道出現**：bootstrap 的 classes 是每個登入者都拿得到的，
-    // 手機放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會把它整個拔掉（見該函式）。
+    // ext（校內分機）／mobile（私人手機）**只在這條通道出現**：bootstrap 的 classes 是每個
+    // 登入者都拿得到的，放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會整組拔掉（見該函式）。
+    // 2026-08-11 之前只有單一「電話」欄 phone，沒填過 mobile 的舊資料就把 phone 當私人手機顯示
+    // （當時的欄位標籤就是「電話」，實際填的是手機）。
     tutors: (cls.tutors || []).map(function (t) {
-      return { name: (t && t.name) || '', email: (t && t.email) || '', phone: (t && t.phone) || '' };
+      // 存檔時整個 tutors 陣列會被換掉（不留 phone 鍵），所以這個 fallback 只會命中沒編輯過的舊列。
+      return {
+        name: (t && t.name) || '', email: (t && t.email) || '',
+        ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+      };
     }),
   };
 }
 
-// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填手機）。
-// 姓名必填，email/手機選填。手機是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
+// 系辦助理送上來的導師名單（Phase 2：可增刪導師、填聯絡方式）。
+// 姓名必填，其餘選填。聯絡方式是高度個資，但這裡只做**格式與長度**限制，不做真實性判斷——
 // 名冊上會有「0912-345-678」「(08)7703202#1234」這類寫法，硬要正規化只會逼人填假的。
+//
+// 2026-08-11 起分成兩欄：ext（校內分機）與 mobile（私人手機）；在那之前是單一欄位 phone。
+// 舊鍵 phone 仍當作 mobile 收下（GAS 軌與自架軌各有一份資料，不可能同時換版），
+// 但寫出去的物件只有 ext/mobile，存過一次就沒有 phone 了。
+// email 這裡仍然驗、仍然存：表單雖然不再讓助理填，**它是導師核章權限的身分依據**
+// （resolveRoles_ 的 tutorOf 靠 email 命中），由 deptRosterUpsertClassAction_ 依姓名補回舊值。
 function normalizeDeptRosterTutors_(tutors) {
   if (!Array.isArray(tutors)) return { ok: false, error: 'tutors must be an array' };
   if (tutors.length > 10) return { ok: false, error: 'too many tutors (max 10)' };
+  const CONTACT_RE = /^[0-9+\-()#\s]{1,20}$/;
   const out = [];
   for (let i = 0; i < tutors.length; i++) {
     const t = tutors[i] || {};
@@ -3330,14 +3584,580 @@ function normalizeDeptRosterTutors_(tutors) {
     const email = String(t.email == null ? '' : t.email).trim().toLowerCase();
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
     if (email.length > 100) return { ok: false, error: 'email 過長' };
-    const phone = String(t.phone == null ? '' : t.phone).trim();
-    if (phone && !/^[0-9+\-()#\s]{1,20}$/.test(phone)) return { ok: false, error: '電話格式不正確（只接受數字與 + - ( ) # 空白）：' + phone };
-    out.push({ name: name, email: email, phone: phone });
+    const ext = String(t.ext == null ? '' : t.ext).trim();
+    if (ext && !CONTACT_RE.test(ext)) return { ok: false, error: '校內分機格式不正確（只接受數字與 + - ( ) # 空白）：' + ext };
+    const mobileRaw = (t.mobile === undefined || t.mobile === null) ? t.phone : t.mobile;
+    const mobile = String(mobileRaw == null ? '' : mobileRaw).trim();
+    if (mobile && !CONTACT_RE.test(mobile)) return { ok: false, error: '私人手機格式不正確（只接受數字與 + - ( ) # 空白）：' + mobile };
+    out.push({ name: name, email: email, ext: ext, mobile: mobile });
   }
   return { ok: true, tutors: out };
 }
 
-// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含手機）。
+// ── 主任導師（＝系主任）─────────────────────────────────────────────────────
+// 系所層級只有一位，資料放在 department.head = {name,email,ext,mobile}。
+// headName/headEmail 是**核章身分**（resolveRoles_ 的 deptHeadOf 靠 headEmail 命中），
+// 與 head.name/head.email 同步由 admin 維護；系辦助理只能改姓名與聯絡方式，**改不到 email**
+// ——能改 email 就等於能把自己設成系主任、進而核章，那是提權（見 deptRosterUpsertHeadAction_）。
+function projectDeptHeadForRoster_(dept) {
+  const h = (dept && dept.head) || {};
+  return {
+    name: h.name || (dept && dept.headName) || '',
+    email: h.email || (dept && dept.headEmail) || '',
+    ext: h.ext || '',
+    mobile: (h.mobile || h.phone) || '',
+  };
+}
+
+// 主任導師欄位正規化（純函式）。規則刻意與導師名單同一套（同樣的字元白名單與長度）。
+function normalizeDeptHead_(head) {
+  const h = head || {};
+  const CONTACT_RE = /^[0-9+\-()#\s]{1,20}$/;
+  const name = String(h.name == null ? '' : h.name).trim();
+  if (name && !/^[A-Za-z0-9一-鿿·．\s]{1,20}$/.test(name)) return { ok: false, error: '主任導師姓名含不允許的字元：' + name };
+  const email = String(h.email == null ? '' : h.email).trim().toLowerCase();
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return { ok: false, error: 'email 格式不正確：' + email };
+  if (email.length > 100) return { ok: false, error: 'email 過長' };
+  const ext = String(h.ext == null ? '' : h.ext).trim();
+  if (ext && !CONTACT_RE.test(ext)) return { ok: false, error: '校內分機格式不正確：' + ext };
+  const mobileRaw = (h.mobile === undefined || h.mobile === null) ? h.phone : h.mobile;
+  const mobile = String(mobileRaw == null ? '' : mobileRaw).trim();
+  if (mobile && !CONTACT_RE.test(mobile)) return { ok: false, error: '私人手機格式不正確：' + mobile };
+  return { ok: true, head: { name: name, email: email, ext: ext, mobile: mobile } };
+}
+
+// deptRosterUpsertHead：系辦助理（或 admin）維護自己系的主任導師姓名與聯絡方式。
+// **email 一律沿用既有值**：那是核章身分，助理改得動就等於能指派系主任。要換人請由中心（admin）改。
+function deptRosterUpsertHeadAction_(params, ctx, userEmail) {
+  const wantDeptId = String(params.deptId || '').trim();
+  const headRes = normalizeDeptHead_(params.head);
+  if (!headRes.ok) throw new Error(headRes.error);
+
+  return withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const roles = resolveRoles_(userEmail, config, departments, classes);
+    const scope = resolveDeptRosterScope_(roles, wantDeptId, departments);
+    if (!scope.ok) throw new Error(scope.error);
+    const deptId = scope.deptIds.length === 1 ? scope.deptIds[0] : wantDeptId;
+    if (!deptId || scope.deptIds.indexOf(deptId) === -1) throw new Error('forbidden');
+
+    const idx = departments.findIndex(function (d) { return d && d.id === deptId; });
+    if (idx === -1) throw new Error('department not found: ' + deptId);
+    const cur = departments[idx];
+    const now = new Date().toISOString();
+    const head = Object.assign({}, headRes.head, {
+      email: (cur.head && cur.head.email) || cur.headEmail || '',   // ← 助理改不到
+    });
+    departments[idx] = Object.assign({}, cur, {
+      head: head, headName: head.name, updatedAt: now, updatedBy: userEmail,
+    });
+    writeJsonPath_('departments.json', departments, ctx);
+    appendAuditLog_(ctx, { action: 'deptRosterUpsertHead', by: userEmail, targetId: deptId, at: now });
+    return {
+      department: { id: deptId, name: cur.name, collegeId: cur.collegeId || null, head: projectDeptHeadForRoster_(departments[idx]) },
+      _notify: { deptId: deptId, summary: '更新主任導師（' + (head.name || '未填姓名') + '）的聯絡方式' },
+    };
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 導師名冊 → Google Sheet 同步 ─────────────────────────────────────────────
+// 使用者決策（2026-08-11）：**存檔即同步＋每小時全量校正**、**Sheet 不含私人手機**。
+// - 不含手機是刻意的：Sheet 一旦分享出去，權限就由 Google 的共用設定決定，系統管不到；
+//   外洩時外流的頂多是校內分機。要看手機一律回系統（deptRosterGet）。
+// - 兩條路徑都是「整張重寫」而不是只補該系那幾列：名冊只有幾百列，一次 setValues 就寫完，
+//   而部分更新要處理列位移／刪除，錯了會留下幽靈列——重寫沒有這個問題。
+// - 只有 GAS 軌有 SpreadsheetApp；自架軌（server/gas-host.js）沒有這個全域，
+//   所以一律先 typeof 檢查，缺了就當作「沒設定同步」安靜跳過，不能讓存檔失敗。
+// ══════════════════════════════════════════════════════════════════════════════
+const ROSTER_SHEET_PROP_ = 'ROSTER_SHEET_ID';
+const ROSTER_SHEET_TAB_ = '導師名冊';
+
+// 純函式：攤成試算表的二維陣列（第一列是表頭）。一位導師一列、沒有導師的班級也出一列，
+// 與 Excel 匯出同一套形狀，差別只在**不含私人手機**。
+// 純函式：產生每個分頁的內容。版面刻意仿既有統計表：
+//   row0 學院名／row1 說明／row2–4 三列表頭（欄標題垂直合併）／row5 起資料，
+//   系別與主任導師只在該系第一列出現（其餘留白，效果同合併儲存格的視覺）。
+// 欄位是名冊的欄位，不是統計表的「應開/已開/宣導」——那些屬於班會紀錄流程，目前停用；
+// 之後重啟再把欄位補回來即可（表頭是這裡產生的，加欄不影響資料寫入邏輯）。
+function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
+  // 分頁分組：比照既有的「班級、家族會議記錄暨班級業務統計」活頁簿——一個學院一個分頁，
+  // 獸醫／國際／達人三個小學院併成一頁。沒對到的學院各自成頁（不會靜默消失）。
+  // 刻意放在函式**裡面**：測試沙箱只載入具名函式，頂層 const 不會跟著進去
+  // （放外面第一次跑測試就 ReferenceError）。
+  const TAB_MAP = {
+    '農學院': '農學院', '工學院': '工學院', '管理學院': '管理學院',
+    '人文暨社會科學院': '人文學院', '人文社科院': '人文學院',
+    '獸醫學院': '獸醫國際達人', '國際學院': '獸醫國際達人', '達人學院': '獸醫國際達人',
+  };
+  const TAB_ORDER = ['農學院', '工學院', '管理學院', '人文學院', '獸醫國際達人'];
+  const HEADER_ROWS = 5;   // 學院名／說明／表頭三列
+  const W = 8;              // 系別｜主任導師姓名｜主任導師分機｜班級｜班名(原始)｜導師｜分機｜狀態
+
+  const collegeName = {};
+  (colleges || []).forEach(function (c) { if (c) collegeName[c.id] = c.name || c.id; });
+  // 對外一律顯示正式全名（fullName，中心的系所清冊）；沒填過就退回內部的簡稱名。
+  const deptLabel = function (d) { return (d && (d.fullName || d.name || d.id)) || ''; };
+  const byDept = {};
+  (classes || []).forEach(function (c) {
+    if (!c || c.deleted === true) return;
+    (byDept[c.deptId] = byDept[c.deptId] || []).push(c);
+  });
+
+  const tabs = {};      // tab → { rows:[], merges:[] }
+  const tabOrder = [];
+  const ensure = function (tab) {
+    if (!tabs[tab]) { tabs[tab] = { rows: [], merges: [] }; tabOrder.push(tab); }
+    return tabs[tab];
+  };
+
+  (departments || []).forEach(function (d) {
+    if (!d || d.deleted === true || d.active === false) return;
+    const cname = collegeName[d.collegeId] || d.collegeId || '未分學院';
+    const t = ensure(TAB_MAP[cname] || cname);
+    const head = d.head || {};
+    const deptStart = t.rows.length;                    // 這個系在資料區的起始 index
+    const list = (byDept[d.id] || []).slice().sort(function (a, b) {
+      return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
+    });
+
+    if (!list.length) {
+      t.rows.push([deptLabel(d), head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '']);
+    } else {
+      list.forEach(function (c) {
+        const state = [];
+        if (c.active === false) state.push('停用');
+        if (c.graduatedSemester) state.push('已畢業(' + c.graduatedSemester + ')');
+        const tutors = (c.tutors || []).filter(Boolean);
+        const clsStart = t.rows.length;
+        const rowsFor = tutors.length ? tutors : [null];
+        rowsFor.forEach(function (tu, i) {
+          t.rows.push([
+            i === 0 && clsStart === deptStart ? deptLabel(d) : '',       // 系別只寫在該系第一列
+            i === 0 && clsStart === deptStart ? (head.name || '') : '',
+            i === 0 && clsStart === deptStart ? (head.ext || '') : '',
+            i === 0 ? (c.displayName || c.name) : '',                    // 班級只寫在該班第一列
+            i === 0 ? c.name : '',
+            (tu && tu.name) || '', (tu && tu.ext) || '',
+            state.join('／') || '啟用',
+          ]);
+        });
+        // 同一班多位導師 → 班級那兩欄縱向合併
+        if (rowsFor.length > 1) {
+          [4, 5].forEach(function (col) {
+            t.merges.push({ row: HEADER_ROWS + clsStart + 1, col: col, numRows: rowsFor.length, numCols: 1 });
+          });
+        }
+      });
+    }
+    // 系別與主任導師兩欄，縱向合併整個系的區塊（原檔就是合併儲存格的樣子）
+    const span = t.rows.length - deptStart;
+    if (span > 1) {
+      [1, 2, 3].forEach(function (col) {
+        t.merges.push({ row: HEADER_ROWS + deptStart + 1, col: col, numRows: span, numCols: 1 });
+      });
+    }
+  });
+
+  const ordered = TAB_ORDER.filter(function (t) { return tabs[t]; })
+    .concat(tabOrder.filter(function (t) { return TAB_ORDER.indexOf(t) === -1; }));
+
+  return ordered.map(function (tab) {
+    const t = tabs[tab];
+    const values = [];
+    values.push([tab, '', '', '', '', '', '', '']);
+    values.push(['資料來源：各系導師名冊（系辦助理維護）。最後同步：' + (stamp || '') +
+      '　※本表不含導師私人手機，需要時請至系統查詢。', '', '', '', '', '', '', '']);
+    values.push(['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
+    values.push(['', '姓名', '校內分機', '', '', '', '', '']);
+    values.push(['', '', '', '', '', '', '', '']);
+    t.rows.forEach(function (r) { values.push(r); });
+    // 表頭的合併：學院名列與說明列各自跨滿整列；「主任導師」跨兩欄、「聯絡方式」跨兩欄；
+    // 其餘欄標題垂直跨三列（第 3–5 列）——與原檔同一種讀法。
+    const merges = [
+      { row: 1, col: 1, numRows: 1, numCols: values[0].length },
+      { row: 2, col: 1, numRows: 1, numCols: values[0].length },
+      { row: 3, col: 2, numRows: 1, numCols: 2 },
+    ];
+    [1, 4, 5, 6, 7, 8].forEach(function (col) { merges.push({ row: 3, col: col, numRows: 3, numCols: 1 }); });
+    return { tab: tab, values: values, merges: merges.concat(t.merges), rows: t.rows.length, headerRows: HEADER_ROWS, width: W };
+  });
+}
+
+function rosterSheetId_() {
+  try { return PropertiesService.getScriptProperties().getProperty(ROSTER_SHEET_PROP_) || ''; } catch (e) { return ''; }
+}
+
+// 整張重寫。回 {ok:true,rows} 或 {ok:false,reason}——reason 是「沒設定/沒有這個環境」這類
+// 預期內的跳過，例外才 throw（由 syncRosterSheetSafe_ 吞掉）。
+function syncRosterSheet_(ctx) {
+  if (typeof SpreadsheetApp === 'undefined') return { ok: false, reason: '這個環境沒有 SpreadsheetApp（自架軌）' };
+  const id = rosterSheetId_();
+  if (!id) return { ok: false, reason: 'ROSTER_SHEET_ID 未設定（請先跑 maintenanceSetupRosterSheet）' };
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const colleges = readJsonSafe_('colleges.json', ctx, []);
+  const tabs = buildRosterSheetTabs_(departments, classes, colleges, nowStampTaipei_());
+  const ss = SpreadsheetApp.openById(id);
+  let total = 0;
+  const report = [];
+  tabs.forEach(function (t, i) {
+    let sh = ss.getSheetByName(t.tab);
+    if (!sh) sh = ss.insertSheet(t.tab);
+    sh.clear();
+    // 舊的合併要先解掉，否則 setValues 會在合併範圍上炸（重寫時尺寸可能變）
+    try { sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).breakApart(); } catch (e) {}
+    sh.getRange(1, 1, t.values.length, t.values[0].length).setValues(t.values);
+    const W = t.values[0].length;
+    // 合併：表頭與「系別／主任導師」的縱向區塊，都由 buildRosterSheetTabs_ 算好座標送過來。
+    // **不要整段 try 包住**——上一版那樣寫，其中一個 merge 撞到就把後面的版面全吃掉，
+    // 使用者看到的是「沒有跨欄置中」而 log 一片安靜。改成逐一 try 並回報失敗數。
+    let mergeFailed = 0;
+    t.merges.forEach(function (m) {
+      try { sh.getRange(m.row, m.col, m.numRows, m.numCols).merge(); } catch (e) { mergeFailed++; }
+    });
+    try {
+      sh.getRange(1, 1, 1, W).setFontWeight('bold').setFontSize(14).setHorizontalAlignment('center');
+      sh.getRange(2, 1, 1, W).setWrap(true).setFontSize(9).setFontColor('#666666');
+      sh.getRange(3, 1, 3, W).setFontWeight('bold').setBackground('#f2f4f7');
+      // 合併的儲存格要水平＋垂直置中才有原檔那個樣子
+      sh.getRange(3, 1, 3 + t.rows, W).setHorizontalAlignment('center').setVerticalAlignment('middle');
+      sh.setFrozenRows(t.headerRows);
+      sh.setColumnWidths(1, W, 110);
+      sh.setColumnWidth(2, 90); sh.setColumnWidth(3, 80);
+      if (sh.getMaxColumns() > W) sh.deleteColumns(W + 1, sh.getMaxColumns() - W);
+      if (sh.getMaxRows() > t.values.length) sh.deleteRows(t.values.length + 1, sh.getMaxRows() - t.values.length);
+    } catch (e) { report.push(t.tab + ' 版面：' + e.message); }
+    if (mergeFailed) report.push(t.tab + ' 有 ' + mergeFailed + ' 個合併失敗');
+    total += t.rows;
+    if (i === 0) sh.activate();
+  });
+  // 上一版只有一張「導師名冊」總表，改成分學院分頁後把它清掉，免得留著過期資料誤導
+  const legacy = ss.getSheetByName(ROSTER_SHEET_TAB_);
+  if (legacy && tabs.length) { try { ss.deleteSheet(legacy); } catch (e) {} }
+  return {
+    ok: true, rows: total,
+    tabs: tabs.map(function (t) { return t.tab + '(' + t.rows + ')'; }),
+    版面問題: report.length ? report : '無',
+  };
+}
+
+function syncRosterSheetSafe_(ctx) {
+  try { return syncRosterSheet_(ctx); } catch (e) {
+    // 同步失敗**不能**讓名冊存檔失敗——助理填的資料已經寫進 Drive 了，
+    // 這裡只是把它抄一份到 Sheet，抄失敗下一次存檔或每小時校正就會補上。
+    try { Logger.log('syncRosterSheet failed: ' + e.message); } catch (_) {}
+    return { ok: false, reason: e.message };
+  }
+}
+
+function nowStampTaipei_() {
+  const d = new Date(Date.now() + 8 * 3600000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' +
+    p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 名冊異動通知學諮主責 ──────────────────────────────────────────────────────
+// 使用者決策（2026-08-11）：**即時，但同一系 30 分鐘內合併成一封**。
+// GAS 沒有「延後執行一次」的機制，所以做法是：異動先進佇列（Drive JSON），
+// 由每 10 分鐘的時間觸發器決定哪些系所該寄了——
+//   ①該系已經停手（最後一筆距今 ≥ 靜默期 10 分鐘）→ 寄
+//   ②該系一直在改（最早一筆距今 ≥ 30 分鐘）→ 也寄，不能無限延後
+// 這樣連續編輯十幾筆只會收到一封，而停手後最多 10 分鐘內就會收到。
+// ══════════════════════════════════════════════════════════════════════════════
+const ROSTER_NOTIFY_QUEUE_ = 'rosterNotifyQueue.json';
+const ROSTER_NOTIFY_QUIET_MS_ = 10 * 60 * 1000;
+const ROSTER_NOTIFY_MAX_WAIT_MS_ = 30 * 60 * 1000;
+
+// 純函式：決定哪些系所的事件現在該寄出、哪些繼續等。
+function selectNotifyBatches_(events, nowMs, quietMs, maxWaitMs) {
+  const byDept = {};
+  (events || []).forEach(function (e) {
+    if (!e || !e.deptId) return;
+    (byDept[e.deptId] = byDept[e.deptId] || []).push(e);
+  });
+  const ready = [];
+  const keep = [];
+  Object.keys(byDept).forEach(function (deptId) {
+    const list = byDept[deptId].slice().sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); });
+    const first = new Date(list[0].at).getTime();
+    const last = new Date(list[list.length - 1].at).getTime();
+    if ((nowMs - last) >= quietMs || (nowMs - first) >= maxWaitMs) ready.push({ deptId: deptId, events: list });
+    else list.forEach(function (e) { keep.push(e); });
+  });
+  ready.sort(function (a, b) { return a.deptId.localeCompare(b.deptId); });
+  return { ready: ready, keep: keep };
+}
+
+function enqueueRosterChange_(ctx, deptId, userEmail, summary) {
+  try {
+    withLock_(function () {
+      const q = readJsonSafe_(ROSTER_NOTIFY_QUEUE_, ctx, { events: [] });
+      const events = (q && q.events) || [];
+      // 佇列只是通知用的暫存，不是稽核（稽核在 audit_log）。爆量時丟掉最舊的，
+      // 寧可少寄一封也不要讓這個檔無限長大。
+      if (events.length >= 500) events.splice(0, events.length - 499);
+      events.push({ deptId: deptId, by: userEmail, at: new Date().toISOString(), summary: summary });
+      writeJsonPath_(ROSTER_NOTIFY_QUEUE_, { events: events }, ctx);
+    });
+  } catch (e) {
+    try { Logger.log('enqueueRosterChange failed: ' + e.message); } catch (_) {}
+  }
+}
+
+// 零參數，供每 10 分鐘的時間觸發器呼叫。
+function flushRosterNotifications() {
+  const ctx = { root: ROOT_FOLDER_ID };
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  // 收件者：每位未停用的主責攤成「登入信箱＋其他收信信箱」（見 mailTargetsForEntry_）
+  const leads = [];
+  (config.staffLeads || []).forEach(function (s) {
+    if (!s || !s.email || s.disabled === true || s.deleted === true) return;
+    mailTargetsForEntry_(s).forEach(function (m) { if (leads.indexOf(m) === -1) leads.push(m); });
+  });
+
+  const picked = withLock_(function () {
+    const q = readJsonSafe_(ROSTER_NOTIFY_QUEUE_, ctx, { events: [] });
+    const res = selectNotifyBatches_((q && q.events) || [], Date.now(), ROSTER_NOTIFY_QUIET_MS_, ROSTER_NOTIFY_MAX_WAIT_MS_);
+    if (res.ready.length) writeJsonPath_(ROSTER_NOTIFY_QUEUE_, { events: res.keep }, ctx);
+    return res.ready;
+  });
+
+  if (!picked.length) return 'nothing to send';
+  // 沒有主責就別把佇列吃掉——上面已經寫回去了，所以這裡直接回報，事件已消失是可接受的
+  // （通知是輔助，不是稽核；稽核在 audit_log）。
+  if (!leads.length) return 'no staffLead to notify';
+
+  let sent = 0;
+  picked.forEach(function (batch) {
+    const dept = departments.filter(function (d) { return d && d.id === batch.deptId; })[0];
+    const deptName = (dept && dept.name) || batch.deptId;
+    const lines = batch.events.map(function (e) {
+      return '・' + stampToTaipei_(e.at) + '　' + (e.summary || '（未記錄內容）') + '　— ' + (e.by || '');
+    });
+    const body = deptName + ' 的導師名冊有 ' + batch.events.length + ' 筆更新：\n\n' + lines.join('\n') +
+      '\n\n（同一系所 ' + (ROSTER_NOTIFY_QUIET_MS_ / 60000) + ' 分鐘內的連續編輯會合併成一封）\n' +
+      '系統：各系導師名冊';
+    try {
+      MailApp.sendEmail({
+        to: leads.join(','),
+        subject: '【各系導師名冊】' + deptName + ' 有 ' + batch.events.length + ' 筆更新',
+        body: body,
+      });
+      sent++;
+    } catch (e) {
+      try { Logger.log('notify failed for ' + batch.deptId + ': ' + e.message); } catch (_) {}
+    }
+  });
+  return 'sent ' + sent + ' mail(s)';
+}
+
+function stampToTaipei_(iso) {
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return String(iso || '');
+  const d = new Date(t + 8 * 3600000);
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getUTCMonth() + 1) + '/' + p(d.getUTCDate()) + ' ' + p(d.getUTCHours()) + ':' + p(d.getUTCMinutes());
+}
+
+// action 回傳裡的 _notify 是給 dispatcher 看的內部欄位：取出來做收尾，再從回應拿掉。
+// 收尾失敗（寄信佇列寫不進去、Sheet 同步掛掉）不影響這次存檔的成功回應——資料已經落地了。
+function withRosterAftercare_(result, ctx, userEmail) {
+  if (!result || !result._notify) return result;
+  const n = result._notify;
+  delete result._notify;
+  afterRosterChange_(ctx, n.deptId, userEmail, n.summary);
+  return result;
+}
+
+// 名冊異動的共同收尾：同步 Sheet ＋ 排入通知佇列。**一定在 withLock_ 外面呼叫**——
+// 這兩件事都是對外 I/O（Sheets API／Drive 寫檔），放在鎖裡會讓別人的存檔等到 waitLock 逾時。
+function afterRosterChange_(ctx, deptId, userEmail, summary) {
+  enqueueRosterChange_(ctx, deptId, userEmail, summary);
+  syncRosterSheetSafe_(ctx);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 批次套用「系所全名 ＋ 系辦助理登入密碼」（來源：中心提供的系所清冊）─────────
+// 兩個發現決定了這裡的做法，都寫下來免得日後有人「簡化」掉：
+//
+// ① **全名存成新欄位 fullName，不改 department.name。**
+//    name 不只是顯示用：deptShortName_ 會把它去掉結尾的「系」當成班級顯示名的系簡稱
+//    （農園系→農園 → 四農園一A），classDisplayNameDeptOverride_ 也是用 name 當鍵
+//    （'材料工程系'→'材料'…）。把 name 換成「農園生產系」會讓之後每次匯入/改名產出
+//    「四農園生產一A」，並讓 7 個 canonical 覆寫全部失配。所以：
+//      name     = 內部命名規則的輸入（簡稱來源），維持現狀
+//      fullName = 對外顯示的正式全名（Sheet 的系別欄、選單、匯出、公文都用它）
+//
+// ② **密碼＝系主任分機，寫進白名單的 ext。**
+//    ext 這個欄位在本系統的定義就是「初始密碼的來源」（見 initialPasswordFromExtGas_），
+//    所以把它設成系主任分機，UI 顯示、匯出的「初始密碼」欄與實際登入密碼才會一致——
+//    只改雜湊不改 ext 會讓後台顯示一個打不開的號碼，是接電話的人最容易被害到的那種不一致。
+//
+// 預設是**預演**（apply!==true 只回計畫不寫入）。已自行改過密碼的帳號預設**跳過**
+// （2026-08-11 使用者剛被「重設為分機」清掉自訂密碼，那個坑不要再踩），
+// 真要一起重設得明確帶 force:true。
+function adminBulkApplyDeptSheetAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const rows = params.rows;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('rows 必須是非空陣列');
+  if (rows.length > 200) throw new Error('一次最多 200 列');
+  const apply = params.apply === true;
+  const force = params.force === true;
+
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const accounts = readJsonSafe_('localAccounts.json', ctx, {});
+  const assistants = (config.deptAssistants || []).filter(function (a) { return a && a.deleted !== true; });
+
+  // 先全部驗完再動手：任何一列對不到系所就整批拒絕（半套的名冊比沒有更難查）
+  const plan = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i] || {};
+    const deptId = String(r.deptId || '').trim();
+    const fullName = String(r.fullName == null ? r.name : r.fullName).trim();
+    const ext = String(r.ext == null ? '' : r.ext).trim();
+    const dept = departments.filter(function (d) { return d && d.id === deptId && d.deleted !== true; })[0];
+    if (!dept) throw new Error('第 ' + (i + 1) + ' 列：找不到系所「' + deptId + '」');
+    if (!fullName) throw new Error('第 ' + (i + 1) + ' 列：缺全名');
+    if (fullName.length > 40) throw new Error('第 ' + (i + 1) + ' 列：全名過長');
+    if (ext && !/^[0-9+\-()#\s]{1,20}$/.test(ext)) throw new Error('第 ' + (i + 1) + ' 列：分機格式不正確：' + ext);
+    const mine = assistants.filter(function (a) { return (a.deptIds || []).indexOf(deptId) !== -1; });
+    plan.push({
+      deptId: deptId, fullName: fullName, ext: ext,
+      nameNow: dept.name || deptId, fullNameNow: dept.fullName || '',
+      assistants: mine.map(function (a) {
+        const email = String(a.email || '').toLowerCase();
+        const u = accounts[email];
+        const selfChanged = !!u && u.mustChangePassword !== true;
+        return {
+          email: email, extNow: a.ext || '',
+          hasAccount: !!u, selfChanged: selfChanged,
+          action: !ext ? 'skip-no-ext' : (selfChanged && !force ? 'skip-self-changed' : (u ? 'reset' : 'create')),
+        };
+      }),
+    });
+  }
+
+  const summary = {
+    模式: apply ? '已套用' : '預演（未寫入）',
+    系所數: plan.length,
+    全名有變動: plan.filter(function (p) { return (p.fullNameNow || '') !== p.fullName; }).length,
+    助理筆數: plan.reduce(function (n, p) { return n + p.assistants.length; }, 0),
+    將建立帳號: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'create'; }).length; }, 0),
+    將重設密碼: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'reset'; }).length; }, 0),
+    跳過已自訂密碼: plan.reduce(function (n, p) { return n + p.assistants.filter(function (a) { return a.action === 'skip-self-changed'; }).length; }, 0),
+    沒有助理的系所: plan.filter(function (p) { return !p.assistants.length; }).map(function (p) { return p.deptId; }),
+  };
+  if (!apply) return { plan: plan, summary: summary };
+
+  // 雜湊在鎖外算（每筆約 0.5 秒；47 筆放進鎖裡會讓別人的請求 waitLock 逾時）
+  const hashes = {};
+  plan.forEach(function (p) {
+    p.assistants.forEach(function (a) {
+      if (a.action === 'create' || a.action === 'reset') hashes[a.email] = hashPasswordGas_(initialPasswordFromExtGas_(p.ext));
+    });
+  });
+
+  const now = new Date();
+  const expires = new Date(now.getTime() + ACTIVATION_WINDOW_DAYS_ * 86400000).toISOString();
+  withLock_(function () {
+    const freshDepts = readJsonSafe_('departments.json', ctx, []);
+    const freshConfig = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const freshAccounts = readJsonSafe_('localAccounts.json', ctx, {});
+    plan.forEach(function (p) {
+      const di = freshDepts.findIndex(function (d) { return d && d.id === p.deptId; });
+      if (di !== -1) freshDepts[di] = Object.assign({}, freshDepts[di], { fullName: p.fullName, updatedAt: now.toISOString(), updatedBy: userEmail });
+      (freshConfig.deptAssistants || []).forEach(function (a, ai) {
+        if (!a || a.deleted === true) return;
+        if ((a.deptIds || []).indexOf(p.deptId) === -1) return;
+        if (p.ext) freshConfig.deptAssistants[ai] = Object.assign({}, a, { ext: p.ext });
+      });
+      p.assistants.forEach(function (a) {
+        if (!hashes[a.email]) return;
+        freshAccounts[a.email] = Object.assign({}, freshAccounts[a.email] || {}, {
+          hash: hashes[a.email], disabled: false,
+          mustChangePassword: true, activationExpiresAt: expires,
+        });
+      });
+    });
+    writeJsonPath_('departments.json', freshDepts, ctx);
+    writeJsonPath_('config.json', freshConfig, ctx);
+    writeJsonPath_('localAccounts.json', freshAccounts, ctx);
+  });
+  appendAuditLog_(ctx, {
+    action: 'adminBulkApplyDeptSheet', by: userEmail,
+    targetId: plan.length + ' depts / ' + summary.將建立帳號 + '+' + summary.將重設密碼 + ' accounts',
+    at: now.toISOString(),
+  });
+  syncRosterSheetSafe_(ctx);
+  return { plan: plan, summary: summary };
+}
+
+// adminBulkUpsertDeptHeads：admin only，一次寫入多系的主任導師（含 email）。
+// 37 個系所逐筆呼叫 adminUpsertDepartment 會各進一次鎖、各寫一次檔，在 GAS 上會逼近 6 分鐘上限
+// （2026-08-10 建 47 個帳號時實際卡住過），所以這裡「讀一次 → 全部算完 → 寫一次」。
+// 任一列的系所不存在就整批拒絕，不做部分寫入——半套的名單比沒有更難查。
+function adminBulkUpsertDeptHeadsAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const rows = params.heads;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('heads 必須是非空陣列');
+  if (rows.length > 200) throw new Error('一次最多 200 列');
+
+  return withLock_(function () {
+    const departments = readJsonSafe_('departments.json', ctx, []);
+    const now = new Date().toISOString();
+    const prepared = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i] || {};
+      const deptId = String(r.deptId || '').trim();
+      const idx = departments.findIndex(function (d) { return d && d.id === deptId && d.deleted !== true; });
+      if (idx === -1) throw new Error('第 ' + (i + 1) + ' 列：找不到系所「' + deptId + '」');
+      const res = normalizeDeptHead_(r);
+      if (!res.ok) throw new Error('第 ' + (i + 1) + ' 列：' + res.error);
+      if (!res.head.name) throw new Error('第 ' + (i + 1) + ' 列：主任導師姓名必填');
+      prepared.push({ idx: idx, head: res.head });
+    }
+    prepared.forEach(function (p) {
+      const cur = departments[p.idx];
+      departments[p.idx] = Object.assign({}, cur, {
+        head: p.head,
+        // headName/headEmail 是核章身分的事實來源，與 head 同步更新。
+        headName: p.head.name, headEmail: p.head.email,
+        updatedAt: now, updatedBy: userEmail,
+      });
+    });
+    writeJsonPath_('departments.json', departments, ctx);
+    appendAuditLog_(ctx, { action: 'adminBulkUpsertDeptHeads', by: userEmail, targetId: prepared.length + ' depts', at: now });
+    return { count: prepared.length, departments: sanitizeDepartmentsForViewer_(departments) };
+  });
+}
+
+// 送上來沒有 email 的導師，依**姓名**把既有的 email 補回來（純函式）。
+// 2026-08-11 起導師資料表單不再有 email 欄（系辦助理只填分機與手機），送上來一律是空字串；
+// 直接寫回去等於把 class.tutors[].email 清空，而那是導師核章權限的身分依據
+// （resolveRoles_ 的 tutorOf 用 email 命中 isClassTutor_）——導師會就此失去自己班的核章權。
+// 姓名相同視為同一人（同班同名極罕見；真的撞名就取第一個，寧可補錯也不要清空）。
+// 明確送了 email 的呼叫端（admin 匯入路徑不走這裡，但未來可能有）照送的值為準。
+function carryOverTutorEmails_(incoming, existing) {
+  const byName = {};
+  (existing || []).forEach(function (t) {
+    const k = String((t && t.name) || '').trim();
+    if (k && !byName[k] && t.email) byName[k] = t.email;
+  });
+  return (incoming || []).map(function (t) {
+    if (t.email) return t;
+    const old = byName[String(t.name || '').trim()];
+    return old ? Object.assign({}, t, { email: old }) : t;
+  });
+}
+
+// deptRosterUpsertClass：系辦助理在**自己系**新增或修改班級（班名、簡稱、導師名單含聯絡方式）。
 // 刻意不開放的欄位：deptId（不能把班搬去別系）、requiredMeetingOverride／graduatedSemester
 // （應繳份數與畢業狀態是中心的事）、uploadWhitelist、suggestedTutors。
 // 既有班級一律先確認「它現在就屬於允許的系所」才准動——不然帶著別系的 classId 就能改到別系。
@@ -3378,7 +4198,8 @@ function deptRosterUpsertClassAction_(params, ctx, userEmail) {
       if (clash) throw new Error('class name already exists: ' + className);
       target = Object.assign({}, cur, {
         name: className, displayName: displayName || cur.displayName || className,
-        tutors: tutorsRes.tutors, updatedAt: now, updatedBy: userEmail,
+        tutors: carryOverTutorEmails_(tutorsRes.tutors, cur.tutors),
+        updatedAt: now, updatedBy: userEmail,
       });
       next[idx] = target;
     } else {
@@ -3403,7 +4224,7 @@ function deptRosterUpsertClassAction_(params, ctx, userEmail) {
       action: entry.id ? 'deptRosterUpdateClass' : 'deptRosterCreateClass',
       by: userEmail, targetId: target.id, at: now,
     });
-    return { class: projectClassForDeptRoster_(target) };
+    return { class: projectClassForDeptRoster_(target), _notify: { deptId: deptId, summary: (entry.id ? '修改班級「' : '新增班級「') + className + '」（導師 ' + tutorsRes.tutors.length + ' 位）' } };
   });
 }
 
@@ -3429,7 +4250,7 @@ function deptRosterDeleteClassAction_(params, ctx, userEmail) {
     next[idx] = Object.assign({}, next[idx], { deleted: true, deletedAt: now, deletedBy: userEmail });
     writeJsonPath_('classes.json', next, ctx);
     appendAuditLog_(ctx, { action: 'deptRosterDeleteClass', by: userEmail, targetId: classId, at: now });
-    return { classId: classId, deleted: true };
+    return { classId: classId, deleted: true, _notify: { deptId: classes[idx].deptId, summary: '刪除班級「' + (classes[idx].displayName || classes[idx].name) + '」' } };
   });
 }
 
@@ -3450,7 +4271,13 @@ function deptRosterGetAction_(params, ctx, userEmail) {
 
   const depts = departments.filter(function (d) {
     return d && scope.deptIds.indexOf(d.id) !== -1;
-  }).map(function (d) { return { id: d.id, name: d.name, collegeId: d.collegeId || null }; });
+  }).map(function (d) {
+    // head（主任導師＝系主任）帶完整聯絡方式，因為這裡就是那條唯一通道。
+    return {
+      id: d.id, name: d.name, fullName: d.fullName || '',
+      collegeId: d.collegeId || null, head: projectDeptHeadForRoster_(d),
+    };
+  });
 
   return { deptIds: scope.deptIds, departments: depts, classes: rows };
 }
@@ -3743,7 +4570,7 @@ function classResolveAction_(params, ctx, userEmail) {
     return {
       deptId: res.dept.id,
       classId: res.cls.id,
-      departments: departments,
+      departments: sanitizeDepartmentsForViewer_(departments),
       classes: sanitizeClassesForViewer_(classes, roles),
       suggestionsDropped: res.suggestionsDropped || 0,
     };
