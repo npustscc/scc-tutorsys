@@ -2706,7 +2706,6 @@ const ADMIN_TABS = [
   { id: 'users', label: '職員帳號' },
   { id: 'staffTeam', label: '學諮主責／助理' },
   { id: 'deptAssistants', label: '系辦助理' },
-  { id: 'deptAccounts', label: '系辦助理帳號' },
   { id: 'keywords', label: '宣導關鍵字' },
   { id: 'roster', label: 'Excel 匯入導師名單' },
 ];
@@ -2729,8 +2728,7 @@ function renderAdminTab() {
   const fns = {
     colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
     classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
-    staffTeam: renderAdminStaffTeam, deptAssistants: renderAdminDeptAssistants,
-    deptAccounts: renderAdminDeptAccounts,
+    staffTeam: renderAdminStaffTeam, deptAssistants: enterAdminDeptAssistants,
     keywords: renderAdminKeywords, roster: renderAdminRoster,
   };
   (fns[adminTab] || function () {})();
@@ -2986,31 +2984,104 @@ function bindDeptAsstFilter(rerender) {
   });
 }
 
+// 系辦助理（合併頁）：白名單（授權）與登入帳號（認證）本來就是兩份資料、兩個 action，
+// 但對使用者而言是同一個人——原本切成兩個分頁看，Email/姓名/分機/系所四欄完全重複，
+// 要查一個人得來回切。這裡合成一列顯示，**架構不動**：白名單仍走 bootstrap 的
+// config.deptAssistants，帳號狀態仍走 serverAdminCall('list')。
+// 帳號那一趟失敗時只有帳號三欄顯示「讀取失敗」，白名單照樣看得到（GAS 軌與自架軌取帳號的
+// 方式不同，不能讓它的失敗把整頁吃掉）。
+let deptAccountsState = 'idle';   // idle | loading | ok | error
+let deptAccountsError = '';
+
+// 進入分頁＝一定重抓帳號狀態；其他重畫（切篩選、動作完成後）沿用已抓到的資料。
+// 分開的原因：renderAdminDeptAssistants 會被篩選器反覆呼叫，若在裡面無條件重抓就會遞迴。
+function enterAdminDeptAssistants() {
+  deptAccountsState = 'idle';
+  renderAdminDeptAssistants();
+}
+
 function renderAdminDeptAssistants() {
-  const all = (bootstrapData.deptAssistants || []).filter(notDeleted);
+  // 列來源：帳號那一趟（serverAdminCall('list')）的回傳其實就是「白名單 join 帳號狀態」，
+  // 而且是**當下**從後端讀的；bootstrapData.deptAssistants 是登入時的快照，別人剛加的人
+  // 不會出現在裡面。所以有拿到就用它，拿不到才退回快照。
+  const fromServer = deptAccountsState === 'ok' && deptAccountRows.length;
+  const all = (fromServer
+    ? deptAccountRows.map(function (r) {
+        return { email: r.email, name: r.name, ext: r.ext, deptIds: r.deptIds || [], disabled: r.assistantDisabled === true };
+      })
+    : (bootstrapData.deptAssistants || []).filter(notDeleted));
   const rows = all.filter(function (s) { return deptAsstRowMatches(s.deptIds); });
+  const acctBy = {};
+  (deptAccountRows || []).forEach(function (r) { acctBy[String(r.email || '').toLowerCase()] = r; });
+
+  const acctCells = function (email) {
+    if (deptAccountsState === 'loading' || deptAccountsState === 'idle') {
+      return '<td data-label="帳號" class="field-hint">載入中…</td><td data-label="密碼" class="field-hint">…</td>';
+    }
+    if (deptAccountsState === 'error') {
+      return '<td data-label="帳號" class="field-hint">讀取失敗</td><td data-label="密碼" class="field-hint">—</td>';
+    }
+    const r = acctBy[String(email || '').toLowerCase()];
+    if (!r || !r.hasAccount) {
+      return '<td data-label="帳號"><span style="color:var(--color-danger);">尚未建立</span></td>' +
+        '<td data-label="密碼">—</td>';
+    }
+    return '<td data-label="帳號">' + (r.accountDisabled ? '<span style="color:var(--color-danger);">已停用</span>' : '啟用') + '</td>' +
+      '<td data-label="密碼">' + (r.mustChangePassword
+        ? '<span style="color:var(--color-warning);">仍是初始密碼</span>' : '已自行更改') + '</td>';
+  };
+  const acctOps = function (s) {
+    if (deptAccountsState !== 'ok') return '';
+    const r = acctBy[String(s.email || '').toLowerCase()];
+    const ops = [];
+    if (!s.ext) ops.push('<span class="field-hint">未填分機</span>');
+    else ops.push('<button class="btn btn-sm" data-action="deptacct-reset" data-email="' + escapeHtml(s.email) + '">' +
+      (r && r.hasAccount ? '重設為分機' : '建立帳號') + '</button>');
+    if (r && r.hasAccount) {
+      ops.push('<button class="btn btn-sm" data-action="deptacct-toggle" data-email="' + escapeHtml(s.email) + '" data-disabled="' + (r.accountDisabled ? '0' : '1') + '">' +
+        (r.accountDisabled ? '啟用帳號' : '停用帳號') + '</button>');
+    }
+    return ' ' + ops.join(' ');
+  };
+
+  const noAccount = deptAccountsState === 'ok'
+    ? rows.filter(function (s) { const r = acctBy[String(s.email || '').toLowerCase()]; return !r || !r.hasAccount; }).length : null;
+  const initial = deptAccountsState === 'ok'
+    ? rows.filter(function (s) { const r = acctBy[String(s.email || '').toLowerCase()]; return r && r.hasAccount && r.mustChangePassword; }).length : null;
+
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>系辦助理</h3>' +
     '<p class="field-hint">各系系辦助理維護本系導師名冊用。<b>只看得到自己掛的系所</b>，看不到他系；' +
-    '一人可掛多個系所（例如同時兼任兩個單位）。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。</p>' +
+    '一人可掛多個系所。名單裡掛的系所若被停用或刪除，該系的權限會立刻消失。<br>' +
+    '登入帳號＝這裡的 email（登入時可只打 @ 前面那段），<b>初始密碼＝分機</b>，首次登入會要求改密碼。' +
+    '沒填分機的無法建立帳號。</p>' +
     deptAsstFilterHtml() +
-    '<p class="field-hint">顯示 <b>' + rows.length + '</b> / ' + all.length + ' 筆。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>分機</th><th>負責系所</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<p class="field-hint">顯示 <b>' + rows.length + '</b> / ' + all.length + ' 筆' +
+      (noAccount === null ? '' : '（其中 <b>' + noAccount + '</b> 人尚無帳號、<b>' + initial + '</b> 人仍是初始密碼）') +
+      (deptAccountsState === 'error' ? '。<span style="color:var(--color-danger);">帳號狀態讀取失敗：' + escapeHtml(deptAccountsError) + '</span>' : '。') + '</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>姓名</th><th>Email</th><th>分機</th>' +
+    '<th>白名單</th><th>帳號</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
     (rows.length ? rows.map(function (s) {
       const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
-      return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td>' +
+      return '<tr>' +
+        '<td data-label="系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
         '<td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="Email">' + escapeHtml(s.email) + '</td>' +
         '<td data-label="分機">' + escapeHtml(s.ext || '') + '</td>' +
-        '<td data-label="負責系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
-        '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        '<td data-label="白名單">' + (s.disabled ? '停用' : '啟用') + '</td>' +
+        acctCells(s.email) +
         '<td data-label="操作"><button class="btn btn-sm" data-action="deptasst-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
-        '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
-    }).join('') : '<tr><td colspan="6"><div class="empty-hint">' +
+        '<button class="btn btn-sm btn-danger" data-action="deptasst-delete" data-email="' + escapeHtml(s.email) + '">刪除</button>' +
+        acctOps(s) + '</td></tr>';
+    }).join('') : '<tr><td colspan="8"><div class="empty-hint">' +
       (all.length ? '這個篩選條件下沒有系辦助理。' : '尚未建立任何系辦助理。') + '</div></td></tr>') +
     '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button> ' +
-    '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button></div>';
+    '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button> ' +
+    '<button class="btn" data-action="deptacct-create-all" style="margin-top:12px;">為所有尚無帳號者建立帳號</button> ' +
+    '<button class="btn" data-action="deptacct-export" style="margin-top:12px;">匯出 Excel</button></div>';
   bindDeptAsstFilter(renderAdminDeptAssistants);
+  if (deptAccountsState === 'idle') loadDeptAccounts();
 }
 
 // 批次匯入白名單：37 個系所手 key 太痛苦，而名單本身是個資、不能進 repo，
@@ -3167,81 +3238,26 @@ async function serverAdminCall(op, params) {
   return json.data || {};
 }
 
-function renderAdminDeptAccounts() {
-  $('admin-tab-content').innerHTML = '<div class="card"><h3>系辦助理帳號</h3>' +
-    '<div id="deptacct-content"><div class="empty-hint">載入中…</div></div></div>';
-  loadDeptAccounts();
-}
-
-let deptAccountRows = [];   // 上一次 list 回來的原始列，篩選時直接重畫、不再打一次 API
+let deptAccountRows = [];   // 上一次 list 回來的原始列（含 deptIds/ext），供合併頁與匯出共用
 
 async function loadDeptAccounts() {
+  deptAccountsState = 'loading';
   try {
     const data = await serverAdminCall('list');
     deptAccountRows = data.accounts || [];
-    renderDeptAccountsTable(deptAccountRows);
+    deptAccountsState = 'ok';
+    deptAccountsError = '';
   } catch (e) {
-    $('deptacct-content').innerHTML =
-      '<div class="empty-hint">載入失敗：' + escapeHtml(e.message) + '</div>' +
-      '<p class="field-hint">本機登入帳號只存在於自架伺服器版本；若這裡是 GitHub Pages＋GAS 的版本，' +
-      '就沒有這個功能（那一軌用 Google 登入）。</p>';
+    deptAccountsState = 'error';
+    deptAccountsError = e.message;
   }
-}
-
-function renderDeptAccountsTable(all) {
-  if (!all.length) {
-    $('deptacct-content').innerHTML = '<div class="empty-hint">白名單還沒有任何系辦助理，請先到「系辦助理」分頁建立。</div>';
-    return;
-  }
-  const rows = all.filter(function (r) { return deptAsstRowMatches(r.deptIds); });
-  const noAccount = rows.filter(function (r) { return !r.hasAccount; }).length;
-  const initial = rows.filter(function (r) { return r.hasAccount && r.mustChangePassword; }).length;
-  $('deptacct-content').innerHTML =
-    '<p class="field-hint">帳號＝白名單的 email（登入時也可以只打 @ 前面那段），' +
-    '<b>初始密碼＝該筆的校內分機</b>，第一次登入會被邀請改密碼（可以選擇稍後再做）。' +
-    '沒填分機的無法建立帳號——請先到「系辦助理」分頁補上分機。</p>' +
-    deptAsstFilterHtml() +
-    // 「為所有尚無帳號者建立帳號」永遠是對**全部**白名單動作，與畫面上的篩選無關，
-    // 所以這裡的統計也照全部算，只多附一行說明目前篩選出幾筆，避免看著小數字按大動作。
-    '<p class="field-hint">目前：<b>' + all.length + '</b> 人，其中 <b>' +
-      all.filter(function (r) { return !r.hasAccount; }).length + '</b> 人尚無帳號、' +
-    '<b>' + all.filter(function (r) { return r.hasAccount && r.mustChangePassword; }).length +
-      '</b> 人仍在使用初始密碼。' +
-    (rows.length === all.length ? '' :
-      '（篩選後顯示 <b>' + rows.length + '</b> 人：' + noAccount + ' 人尚無帳號、' + initial + ' 人用初始密碼）') + '</p>' +
-    '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button> ' +
-    '<button class="btn btn-sm" data-action="deptacct-export">匯出 Excel</button></div>' +
-    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>系所</th><th>分機</th><th>帳號狀態</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
-    (rows.length ? '' : '<tr><td colspan="7"><div class="empty-hint">這個篩選條件下沒有系辦助理。</div></td></tr>') +
-    rows.map(function (r) {
-      const acct = !r.hasAccount ? '<span style="color:var(--color-danger);">尚未建立</span>'
-        : (r.accountDisabled ? '<span style="color:var(--color-danger);">已停用</span>' : '啟用');
-      const pw = !r.hasAccount ? '—'
-        : (r.mustChangePassword ? '<span style="color:var(--color-warning);">初始密碼（分機）</span>' : '已自行更改');
-      const ops = [];
-      if (!r.ext) ops.push('<span class="field-hint">未填分機</span>');
-      else ops.push('<button class="btn btn-sm" data-action="deptacct-reset" data-email="' + escapeHtml(r.email) + '">' +
-        (r.hasAccount ? '重設為分機' : '建立帳號') + '</button>');
-      if (r.hasAccount) {
-        ops.push('<button class="btn btn-sm" data-action="deptacct-toggle" data-email="' + escapeHtml(r.email) + '" data-disabled="' + (r.accountDisabled ? '0' : '1') + '">' +
-          (r.accountDisabled ? '啟用' : '停用') + '</button>');
-      }
-      const ids = Array.isArray(r.deptIds) ? r.deptIds : [];
-      return '<tr><td data-label="Email">' + escapeHtml(r.email) + '</td>' +
-        '<td data-label="姓名">' + escapeHtml(r.name || '') + '</td>' +
-        '<td data-label="系所">' + (ids.length ? ids.map(function (id) { return escapeHtml(deptNameById(id)); }).join('、') : '<span class="field-hint">（未指定）</span>') + '</td>' +
-        '<td data-label="分機">' + escapeHtml(r.ext || '') + '</td>' +
-        '<td data-label="帳號狀態">' + acct + '</td>' +
-        '<td data-label="密碼">' + pw + '</td>' +
-        '<td data-label="操作">' + ops.join(' ') + '</td></tr>';
-    }).join('') + '</tbody></table></div>';
-  bindDeptAsstFilter(function () { renderDeptAccountsTable(deptAccountRows); });
+  if (adminTab === 'deptAssistants') renderAdminDeptAssistants();
 }
 
 // 匯出目前**篩選後**看到的那些列——畫面上看到幾筆就匯出幾筆，不會偷偷多給。
 async function exportDeptAccounts() {
   const shown = (deptAccountRows || []).filter(function (r) { return deptAsstRowMatches(r.deptIds); });
-  if (!shown.length) { showToast('目前篩選條件下沒有資料可匯出', 'error'); return; }
+  if (!shown.length) { showToast('目前篩選條件下沒有資料可匯出（或帳號狀態尚未載入）', 'error'); return; }
   try {
     showLoading('準備檔案…');
     await ensureSheetJsLoaded();

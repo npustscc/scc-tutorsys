@@ -1158,23 +1158,27 @@ await flow('H', async () => {
     const r = await apiCall('localChangePassword', { email: 'h-asst', currentPassword: 'nope', newPassword: 'another-pass1' });
     expect(/目前密碼錯誤/.test(r.data.error || ''), JSON.stringify(r));
   });
-  await check('H', '系辦助理帳號分頁：同一組學院篩選生效，列上看得到系所', async () => {
+  await check('H', '系辦助理（合併頁）：一列同時看得到白名單與帳號狀態，學院篩選生效', async () => {
     await page.locator('.nav-btn', { hasText: '後台管理' }).click();
-    await page.locator('[data-admin-tab="deptAccounts"]').click();
-    await page.locator('#deptacct-content table').waitFor({ timeout: 10000 });
+    await page.locator('[data-admin-tab="deptAssistants"]').click();
+    // 合併頁：白名單先畫出來，帳號欄位由 serverAdminCall 補上，等到「密碼」欄不再是「…」
+    await page.locator('#admin-tab-content table').waitFor({ timeout: 10000 });
+    await page.locator('#admin-tab-content tr', { hasText: '仍是初始密碼' }).first().waitFor({ timeout: 15000 })
+      .catch(() => {});
     await page.selectOption('#deptasst-filter-college', '獸醫學院');
-    await page.locator('#deptacct-content', { hasText: '這個篩選條件下沒有系辦助理' }).waitFor({ timeout: 5000 });
+    await page.locator('#admin-tab-content', { hasText: '這個篩選條件下沒有系辦助理' }).waitFor({ timeout: 5000 });
     // 篩選只影響顯示：總人數那行仍以全部白名單計算（「為所有尚無帳號者建立帳號」是全體動作）
-    const filtered = await page.locator('#deptacct-content').textContent();
+    const filtered = await page.locator('#admin-tab-content').textContent();
     evid['H-account-summary-filtered'] = (filtered || '').replace(/\s+/g, ' ').slice(0, 200);
-    expect(/目前：2 人/.test(filtered || '') && /篩選後顯示 0 人/.test(filtered || ''),
-      '篩選時應同時標示全部與篩選後的人數：' + (filtered || '').slice(0, 160));
+    expect(/顯示 0 \/ \d+ 筆/.test(filtered || ''), '篩到獸醫學院應該是 0 筆：' + (filtered || '').slice(0, 200));
     await page.selectOption('#deptasst-filter-college', '農學院');
-    const row = page.locator('#deptacct-content tr', { hasText: 'h-asst@example.com' });
+    const row = page.locator('#admin-tab-content tr', { hasText: 'h-asst@example.com' });
     await row.waitFor({ timeout: 5000 });
     const txt = (await row.textContent() || '').trim();
     evid['H-account-row'] = txt;
     expect(/森林系/.test(txt), '系所欄沒顯示：' + txt);
+    expect(/h-asst@example.com/.test(await page.locator('#admin-tab-content').textContent()),
+      '合併頁應該看得到剛用 API 建的 h-asst（進分頁要重抓，不能只吃 bootstrap 快照）');
     await page.selectOption('#deptasst-filter-college', '');
   });
   await check('H', '系辦助理帳號分頁可匯出 Excel（帳號＋分機，供通知信使用）', async () => {
