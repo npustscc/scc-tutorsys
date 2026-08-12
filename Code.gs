@@ -2399,11 +2399,17 @@ function canViewTutorHistory_(roles, classInfo) {
   return false;
 }
 
-// ── 換學期帶入＋年級升級（Ticket D，純函式區）─────────────────────────────────
-// 班級實體 = 一屆學生（cohort）：升級 = 同實體改名（records 以 classId 關聯跨學期連續）；
-// 畢業 = active:false + graduatedSemester。管理員按鈕觸發、預覽逐列可修、確認才套用。
-// 班名歷史掛 class.nameHistory: [{upToSemester, name, displayName}]（升級時 append，
-// upToSemester = fromSemester，語意「到該學期為止叫這個名字」；一年最多一筆，體積有界）。
+// ── 換學期帶入＋年級升級（Ticket D，純函式區；2026-08-11 事故後改為席位式）───────
+// 班級實體 = 席位（同一系每個年級的班名同時並存，如 四技一A~四技四A 全年都在），
+// 不是「一屆學生」（cohort）。升級的本質是「導師跟著這屆學生換到下一個年級的班」——
+// **不改班名、不畢業任何班**：originally（2026-08-11 前）的 cohort 式邏輯把「改名往上推＋
+// 最高年級 graduate 停用」當升級，套到席位式資料上必然撞名（目標班名本來就已經有人在用），
+// 撞名列進 errors 但不中斷整批，結果是 200 列失敗、104 列已經寫進正式資料（99 班被停用+
+// 畢業註記、5 班被改名）。改版後：畢業＝admin 另外手動停用該屆最高年級班，不由 rollover
+// 自動判斷；action 只有 inherit（導師從低一個年級的席位接手）／vacate（新生席位，原導師
+// 隨學生升上去、本班待指派新導師）／keep（原樣不動）。管理員按鈕觸發、預覽逐列顯示、
+// 確認才套用；套用（applyRolloverPlan_）是**全有全無**，任何一列有問題就整批不寫
+// （見該函式註解）。
 
 const GRADE_CHARS_ = ['一', '二', '三', '四', '五', '六', '七'];
 
@@ -2435,10 +2441,25 @@ function resolveDuration_(cls, system, parsed) {
   return null;
 }
 
-// 產生升級規劃（預覽用，不寫入）：逐班判斷 advance（改名升級）/ graduate（畢業停用）/
-// keep（原樣保留）。年差 dy = 學年(to) - 學年(from)：dy ≤ 0（同學年換學期、或選反）全部 keep
-// ——名單本來就掛在班上自動沿用，無事可做。dy ≥ 1 逐班解析年級與修業年限；無法確定的
-// 一律標 uncertain（不擅自動作或標給 admin 在預覽逐列確認）。只納入 active 且未刪除的班。
+// 產生升級規劃（預覽用，不寫入）：逐班判斷 inherit（導師從低一個年級的席位接手）/
+// vacate（新生席位：原導師隨學生升上去，本班待指派）/ keep（原樣保留）。年差
+// dy = 學年(to) - 學年(from)：dy ≤ 0（同學年換學期、或選反）全部 keep——名單本來就掛在
+// 班上自動沿用，無事可做。只納入 active 且未刪除的班。決策順序見函式內註解（先命中先回，
+// 這個順序本身就是規格，別為了「看起來更省」重排）。
+// 注意：displayName 刻意不重算（沿用 c.displayName）——fuseClassDisplayName_ 只有「家族」
+// 那條分支會用到導師姓名，而家族班在第 2 條就一律 keep，班名也從不改變，沒有需要重算的情況。
+//
+// ── cascade（2026-08-13 修：gate 4 問錯問題）───────────────────────────────
+// 第一輪的 gate 4（規則 4）只檢查「目標席位存在嗎」，但存在不代表它這次真的會接手——
+// 目標席位自己也可能因為它的目標/來源不齊而被判 keep。用正式資料骨架實跑過：某系有
+// 一B/二B/三B 但沒有四B（duration 4）→ 三B 被 gate 4 正確擋成 keep+uncertain，但二B
+// 看到「三B 存在」就放行 inherit——二B 原本的導師被「其實不會接手」的三B 拒收，憑空消失；
+// 一B 同理被 vacate 掉。降級會像骨牌一樣往下傳染（三B keep → 二B keep → 一B keep），
+// 所以第一輪算完之後要反覆掃描到不動點（fixed point），不能只掃一輪——這正是下面
+// cascadeDowngrade_ 在做的事：任一列 R 若會動（inherit/vacate）、現在有導師、不是畢業，
+// 而它指望接手的目標列 T 這次並不會真的接手（T 不存在、T 不是 inherit、或 T 的來源
+// 不是 R），就把 R 也降回 keep+uncertain。跑完之後，預設 plan 本身就是自洽的：沒有任何
+// 一列會讓導師無人接手。
 function computeRolloverPlan_(classes, departments, tutorSystems, fromId, toId) {
   const deptById = {};
   (departments || []).forEach(function (d) { if (d) deptById[d.id] = d; });
@@ -2450,81 +2471,326 @@ function computeRolloverPlan_(classes, departments, tutorSystems, fromId, toId) 
   const toYear = Number(String(toId || '').slice(0, 3));
   const dy = (isNaN(fromYear) || isNaN(toYear)) ? 0 : toYear - fromYear;
 
-  return (classes || [])
-    .filter(function (c) { return c && c.active !== false && c.deleted !== true; })
-    .map(function (c) {
-      const dept = deptById[c.deptId];
-      const deptNameStr = dept ? dept.name : c.deptId;
-      const system = sysById[c.systemId];
-      const parsed = parseClassGrade_(c.name);
-      const duration = resolveDuration_(c, system, parsed);
-      const row = {
-        classId: c.id, deptId: c.deptId, deptName: deptNameStr,
-        name: c.name, displayName: c.displayName || c.name,
-        tutors: (c.tutors || []).map(function (t) { return (t && t.name) || ''; }),
-        grade: parsed ? parsed.grade : null,
-        newGrade: null, duration: duration,
-        action: 'keep', newName: null, newDisplayName: null,
-        uncertain: false, reason: null,
-      };
-      if (dy <= 0) {
-        row.reason = '同學年換學期，名單自動沿用';
-        return row;
-      }
-      if (!parsed) {
-        row.uncertain = true;
-        row.reason = '無法解析年級';
-        return row;
-      }
-      const newGrade = parsed.grade + dy;
-      row.newGrade = newGrade;
-      if (duration !== null && newGrade > duration) {
-        row.action = 'graduate';
-        row.reason = '超過修業年限 ' + duration + ' 年';
-        return row;
-      }
-      if (duration === null && newGrade > GRADE_CHARS_.length) {
-        row.uncertain = true;
-        row.reason = '修業年限未設定且超出年級字表';
-        return row;
-      }
-      // duration 已知且未超 → 確定升級；duration 未知但年級字還排得出 → 升級但標 uncertain
-      row.action = 'advance';
-      row.newName = parsed.prefix + GRADE_CHARS_[newGrade - 1] + parsed.section;
-      row.newDisplayName = fuseClassDisplayName_(
-        row.newName, deptNameStr, c.systemId,
-        (c.tutors && c.tutors[0] && c.tutors[0].name) || undefined
-      );
-      if (duration === null) {
-        row.uncertain = true;
-        row.reason = '修業年限未設定';
-      }
+  const active = (classes || []).filter(function (c) { return c && c.active !== false && c.deleted !== true; });
+
+  // 依 (deptId, name) 查現存席位——只查 active（停用/刪除的班一律視同不存在，見規格
+  // 案例 7：這正是「來源班存在但被停用」要落到 keep+uncertain 而非誤接手的原因）。
+  function findByName(deptId, name) {
+    if (!name) return null;
+    return active.filter(function (c) { return c.deptId === deptId && c.name === name; })[0] || null;
+  }
+  // 依 prefix/section 组回某個年級的班名；grade 落在 1..7（GRADE_CHARS_ 範圍）外一律
+  // 算不出（回 null），呼叫端自行決定 null 時的措辭與後續判斷。
+  function gradeName(prefix, section, grade) {
+    if (grade < 1 || grade > GRADE_CHARS_.length) return null;
+    return prefix + GRADE_CHARS_[grade - 1] + section;
+  }
+
+  const rows = active.map(function (c) {
+    const dept = deptById[c.deptId];
+    const deptNameStr = dept ? dept.name : c.deptId;
+    const system = sysById[c.systemId];
+    const parsed = parseClassGrade_(c.name);
+    const duration = resolveDuration_(c, system, parsed);
+    const tutorNames = (c.tutors || []).map(function (t) { return (t && t.name) || ''; });
+
+    const row = {
+      classId: c.id, deptId: c.deptId, deptName: deptNameStr,
+      name: c.name, displayName: c.displayName || c.name,
+      tutors: tutorNames,
+      grade: parsed ? parsed.grade : null, sourceGrade: null,
+      sourceClassId: null, sourceName: null, sourceTutors: [],
+      targetName: null, targetClassId: null, graduating: false,
+      duration: duration,
+      action: 'keep', alreadyDone: false,
+      uncertain: false, reason: null,
+    };
+
+    // 0. dy ≤ 0：同學年換學期、或選反，名單本來就掛在班上自動沿用，全部 keep。
+    if (dy <= 0) {
+      row.reason = '同學年換學期，導師沿用';
       return row;
-    });
+    }
+    // 1. 冪等守門：這班「這個學年」已經做過一次升級就不重複執行——比對學年（前三碼）
+    //    而非完整學期 id：「同一學年內又被推一次」（例：114-2→115-1 做完後又跑
+    //    114-2→115-2）是很自然的誤操作，且預覽會看起來完全正常（一堆 inherit）。
+    //    解析失敗（rolloverSemester 格式不明）保守退回完整字串比對。
+    if (c.rolloverSemester) {
+      const doneYear = Number(String(c.rolloverSemester).slice(0, 3));
+      const isDone = isNaN(doneYear) ? (c.rolloverSemester === toId) : (doneYear >= toYear);
+      if (isDone) {
+        row.alreadyDone = true;
+        row.reason = '已於 ' + c.rolloverSemester + ' 完成升級，同一學年不重複執行';
+        return row;
+      }
+    }
+    // 2. 非年級班（家族／專班等）：parseClassGrade_ 回 null，或班名含「家族」。
+    //    「家族」要另外擋是因為導師姓名結尾若剛好是年級字（一~七），例如導師姓「大三」
+    //    的家族班「家族林大三」，parseClassGrade_ 光看結尾字元會誤判成年級 3、不會回 null。
+    if (String(c.name || '').indexOf('家族') !== -1 || !parsed) {
+      row.reason = '非年級班（家族／專班等），導師不隨學年異動';
+      return row;
+    }
+
+    row.sourceGrade = parsed.grade - dy;
+    const targetGrade = parsed.grade + dy;
+    row.targetName = gradeName(parsed.prefix, parsed.section, targetGrade);
+    const sourceName = gradeName(parsed.prefix, parsed.section, row.sourceGrade);
+    row.sourceName = row.sourceGrade >= 1 ? sourceName : null;
+    const target = findByName(c.deptId, row.targetName);
+    row.targetClassId = target ? target.id : null;
+    // 本班學生讀完了、本來就沒有去處（例如四技四A升五年級但制度只有四年）——
+    // duration 未知時一律視為「不確定畢業與否」，不能當成畢業例外放行。
+    row.graduating = (duration !== null && targetGrade > duration);
+
+    // 4. 導師去處守門：本班現在有導師、不是畢業，卻連目標席位這個班都不存在
+    //    → 不能悄悄 vacate/inherit 到一個不存在的班。這只是「存在性」的第一關；
+    //    「存在但這次不會真的接手」由函式最後的 cascadeDowngrade_ 補上（見上方函式頂端註解）。
+    if (tutorNames.length && !row.graduating && !target) {
+      row.action = 'keep';
+      row.uncertain = true;
+      row.reason = (row.targetName ? '找不到學生要升上去的班「' + row.targetName + '」' : '算不出升上去的班') +
+        '，現任導師會變成沒班可帶，請先建立該班或設定修業年限後再執行。';
+      return row;
+    }
+
+    // 5. 新生席位（sourceGrade < 1）：本班學生不是從系上既有班升上來的（剛入學）。
+    if (row.sourceGrade < 1) {
+      if (!tutorNames.length) {
+        row.reason = '新生班，目前無導師，待指派';
+        return row;
+      }
+      row.action = 'vacate';
+      row.reason = '新生班：原導師隨學生升上「' + (row.targetName || '（無法判定）') + '」，本班導師待指派';
+      return row;
+    }
+
+    // 6. 找不到來源班：無法決定由誰接手（沒有第 4 條那種「導師消失」風險——本班現在的
+    //    導師還在原位，只是不知道要接手的名單掛在哪，交 admin 人工判斷）。
+    const source = findByName(c.deptId, sourceName);
+    if (!source) {
+      row.action = 'keep';
+      row.uncertain = true;
+      row.reason = '找不到來源班「' + sourceName + '」，無法決定由誰接手——請確認名冊或手動指派';
+      return row;
+    }
+
+    // 7. 由來源班（低一個年級的席位）的導師接手。
+    row.action = 'inherit';
+    row.sourceClassId = source.id;
+    row.sourceTutors = (source.tutors || []).map(function (t) { return (t && t.name) || ''; });
+    if (!row.sourceTutors.length) {
+      row.uncertain = true;
+      row.reason = '來源班「' + sourceName + '」目前沒有導師，接手後本班將無導師';
+    } else {
+      row.reason = '由「' + sourceName + '」的導師接手（學生升上來）';
+    }
+    return row;
+  });
+
+  return cascadeDowngrade_(rows);
 }
 
-// 套用前逐列驗證（apply 端只信 client 傳回的 classId/action/newName，其餘後端重算）：
-// classId 必須存在且未刪除；action 白名單；advance 的 newName 過 isValidClassName_ 且
-// 同系所內不得與其他班撞名（排除自己；含墓碑與停用班也算撞名，fail-closed——否則升級
-// 改名可撞出第二個同名班，繞過 classResolveCore_ 的同名防線）。
-// fromId 保留參數位（目前驗證不需要；nameHistory 的 upToSemester 由呼叫端寫入）。
-function validateRolloverRow_(row, classes, fromId) {
-  if (!row || !row.classId) return { ok: false, error: 'classId required' };
-  const cls = (classes || []).filter(function (c) { return c && c.id === row.classId; })[0];
-  if (!cls || cls.deleted === true) return { ok: false, error: 'class not found: ' + row.classId };
-  if (row.action !== 'advance' && row.action !== 'graduate' && row.action !== 'keep') {
-    return { ok: false, error: 'invalid action: ' + row.action };
-  }
-  if (row.action === 'advance') {
-    if (!isValidClassName_(row.newName)) return { ok: false, error: 'invalid newName: ' + row.newName };
-    const newName = String(row.newName).trim();
-    const clash = (classes || []).some(function (c) {
-      return c && c.id !== cls.id && c.deptId === cls.deptId && c.name === newName;
+// 把第一輪算完的 rows 收斂到不動點：任一列 R 會動（inherit/vacate）、現在有導師、
+// 不是畢業，但它指望接手的目標列 T 這次並不會真的接手（不存在／T 不是 inherit／
+// T 的來源不是 R）→ 把 R 也降回 keep+uncertain。降級會像骨牌一樣往下傳染（見函式
+// computeRolloverPlan_ 頂端註解的三B/二B/一B 例子），所以要反覆掃描直到某一輪完全
+// 沒有變動才停止；GRADE_CHARS_.length + 1 輪是保險上限（鏈最長不會超過年級字表長度），
+// 正常情況下遠遠掃不到那麼多輪就會收斂。就地修改傳入的 rows（呼叫端每次都是全新陣列，
+// 沒有外部別名疑慮）。
+// 兩個方向都會把某一列降回 keep，且都要在同一個不動點迴圈裡跑——單掃一個方向不會收斂
+// （下游降級可能讓某列失去接收者、觸發上游降級；上游降級也可能讓某列的目標不再合格、
+// 觸發下游降級，反之亦然）：
+// - 下游方向：R 要動（inherit/vacate）、現在有導師、不是畢業，但它指望接手的目標列 T
+//   這次並不會真的接手（見 computeRolloverPlan_ 頂端註解的三B/二B/一B 例子）。
+// - 上游方向（2026-08-13 用去識別化正式資料骨架實跑抓到的第二個洞）：R 是 inherit，
+//   但它的來源列 S 這次不會交出導師（S 停在 keep，通常是規則 6「S 自己找不到來源」）、
+//   而 S 現在確實有導師 → 讓 R 照 plan 接手就會讓同一位導師同時掛在 S 與 R 兩班。
+//   S 目前沒有導師則不必降級——接手一份空名單不會造成重複，維持原行為。
+// 上限用 rows.length + 1（原本 GRADE_CHARS_.length + 1 在兩個方向交錯降級時可能不夠）：
+// 降級是單向的（action 只會往 keep 走、不會回頭），所以最多 rows.length 輪、每輪至少
+// 降一列就一定會收斂；真的撞到上限代表邏輯有環或其他 bug，直接 throw，不要靜靜地回一個
+// 沒收斂、可能還在自相矛盾的 plan。
+function cascadeDowngrade_(rows) {
+  const byId = {};
+  rows.forEach(function (r) { byId[r.classId] = r; });
+  const maxRounds = rows.length + 1;
+  let round = 0;
+  for (; round < maxRounds; round++) {
+    let changed = false;
+    rows.forEach(function (r) {
+      // 下游方向
+      if ((r.action === 'inherit' || r.action === 'vacate') && r.tutors.length && !r.graduating) {
+        const t = r.targetClassId ? byId[r.targetClassId] : null;
+        const willReceive = t && t.action === 'inherit' && t.sourceClassId === r.classId;
+        if (!willReceive) {
+          r.action = 'keep';
+          r.uncertain = true;
+          r.sourceClassId = null;
+          r.sourceTutors = [];
+          r.reason = '學生要升上去的席位「' + (r.targetName || '（無法判定）') + '」這次不會接手（該班需人工確認），' +
+            '現任導師會沒有去處，因此本班保持不動';
+          changed = true;
+          return; // 這一列這輪已經降級（action 不再是 inherit），不用再檢查上游方向
+        }
+      }
+      // 上游方向
+      if (r.action === 'inherit') {
+        const srcRow = r.sourceClassId ? byId[r.sourceClassId] : null;
+        const srcHandsOver = !!srcRow && (srcRow.action === 'inherit' || srcRow.action === 'vacate');
+        if (!srcHandsOver && srcRow && srcRow.tutors.length) {
+          const srcName = r.sourceName;
+          r.action = 'keep';
+          r.uncertain = true;
+          r.sourceClassId = null;
+          r.sourceTutors = [];
+          r.reason = '來源席位「' + (srcName || '（無法判定）') + '」這次不會交出導師（該班需人工確認），' +
+            '暫不接手以免同一位導師同時掛兩班';
+          changed = true;
+        }
+      }
     });
-    if (clash) return { ok: false, error: 'newName already exists in department: ' + newName };
-    return { ok: true, cls: cls, newName: newName };
+    if (!changed) break;
   }
-  return { ok: true, cls: cls, newName: null };
+  if (round >= maxRounds) {
+    throw new Error('cascadeDowngrade_ 未在 ' + maxRounds + ' 輪內收斂（可能有邏輯錯誤，如環狀依賴）——拒絕回傳未收斂的 plan');
+  }
+  return rows;
+}
+
+// 純函式（不碰 I/O，供單元測試就地抽取）：把後端重算的 planRows 與前端確認的 clientRows
+// 合成一次「全有全無」的寫入——2026-08-11 事故的教訓正是「失敗列不中斷、成功列照寫」，
+// 200 列失敗但 104 列已經寫進正式資料。這裡反過來：**只要 errors 非空就整批放棄**，
+// 驗證階段一個字都不准動到 classes，回傳的 classes 與輸入逐位元相同。
+// clientRows 只信 classId 與 action，其餘（尤其導師名單）一律從 classes 的原始快照取——
+// 每一列的 previousTutors／inherit 來源導師都是從輸入的 classes 陣列直接查（不是從逐步
+// 套用中的陣列鏈式往上推），所以套用順序完全不影響結果（見 test 13：clientRows 反序送入
+// 結果逐位元相同）。
+//
+// 每一列允許的動作只有兩個：plan.action 本身，或降級成 keep（見下方逐列驗證）。
+// 不准把 plan 判的 keep「升級」成 inherit/vacate——那等於繞過 computeRolloverPlan_ 的所有
+// 守門（gate 4／cascadeDowngrade_／來源存在性…），admin 真正該做的是先把資料修好（建缺的
+// 席位、設修業年限）再重新產生預覽，不是在 UI 上硬點一個 plan 沒打算給的動作。這條同時
+// 關掉一個併發破口：預覽之後別人改動資料、鎖內重算後這列翻成 keep，stale 的 vacate 就會
+// 被這條擋下（不然「鎖內重算」形同白做）。
+//
+// 光是逐列合法還不夠：vacate 與 inherit 是成對的（見 F1 的 cascade），UI／API 都可能只送
+// plan 的子集，把本來成對的兩列拆開——例如「二A 接手」被人工改回 keep，但「一A 釋出」
+// 照送，逐列驗證兩列都合法，套用後一A 的導師就悄悄不見了。所以逐列驗證全過之後，套用前
+// 還有一段全批一致性檢查（R1／R2，見下方），任一條不成立一樣整批 abort。
+function applyRolloverPlan_(classes, planRows, clientRows, opts) {
+  const errors = [];
+  const planById = {};
+  (planRows || []).forEach(function (p) { if (p) planById[p.classId] = p; });
+  const classById = {};
+  (classes || []).forEach(function (c) { if (c) classById[c.id] = c; });
+  const seen = {};
+  const validRows = [];
+
+  (clientRows || []).forEach(function (row, i) {
+    const classId = row && row.classId;
+    if (!classId) { errors.push({ row: i, classId: null, error: 'classId required' }); return; }
+    if (seen[classId]) { errors.push({ row: i, classId: classId, error: 'duplicate classId: ' + classId }); return; }
+    seen[classId] = true;
+    const plan = planById[classId];
+    if (!plan) { errors.push({ row: i, classId: classId, error: 'class not in plan: ' + classId }); return; }
+    const action = row.action;
+    if (['inherit', 'vacate', 'keep'].indexOf(action) === -1) {
+      errors.push({ row: i, classId: classId, error: 'invalid action: ' + action }); return;
+    }
+    if (action !== 'keep' && plan.alreadyDone) {
+      errors.push({ row: i, classId: classId, error: 'already rolled over to ' + opts.toSemester + ': ' + classId }); return;
+    }
+    // 只准原樣採用 plan 的動作，或降級成 keep；不准把 plan 的 keep 升級成別的動作。
+    if (action !== 'keep' && action !== plan.action) {
+      errors.push({ row: i, classId: classId, error: 'action does not match plan (' + plan.action + '): ' + classId }); return;
+    }
+    if (action === 'inherit') {
+      if (!plan.sourceClassId) { errors.push({ row: i, classId: classId, error: 'no source class to inherit from: ' + classId }); return; }
+      const srcCls = classById[plan.sourceClassId];
+      if (!srcCls || srcCls.deleted === true || srcCls.active === false) {
+        errors.push({ row: i, classId: classId, error: 'source class unavailable: ' + plan.sourceClassId }); return;
+      }
+    }
+    validRows.push({ row: i, classId: classId, action: action, plan: plan });
+  });
+
+  // 全批一致性檢查（R1/R2）：只在逐列都合法時才跑，跑出的錯誤一樣進 errors 陣列，維持
+  // 「全有全無」單一回應形狀。這兩條是 backstop——F1 修好後，預設 plan 全套用不該觸發
+  // 它們，只有人工把某幾列降級成 keep、或 API 只送 plan 子集時才會踩到。
+  if (!errors.length) {
+    const appliedActionByClassId = {};
+    validRows.forEach(function (vr) { appliedActionByClassId[vr.classId] = vr.action; });
+    const inheritedFromClassId = {};
+    validRows.forEach(function (vr) { if (vr.action === 'inherit') inheritedFromClassId[vr.plan.sourceClassId] = true; });
+
+    validRows.forEach(function (vr) {
+      // R1（不准掉導師）：本班現在有導師、不是畢業，卻沒有任何一列真的接手它。
+      if ((vr.action === 'inherit' || vr.action === 'vacate') && vr.plan.tutors.length && !vr.plan.graduating) {
+        if (!inheritedFromClassId[vr.classId]) {
+          errors.push({ row: vr.row, classId: vr.classId, error: 'tutors would be dropped: ' + vr.classId + '（沒有任何一列接手它的導師）' });
+        }
+      }
+      // R2（不准同一位導師同時掛兩班）：inherit 的來源班現在有導師，來源班那一列
+      // 也必須在本批被套用（inherit 或 vacate），否則來源班會保留原導師、目標班
+      // 又拿到同一批導師，變成同一位導師同時掛兩個班。
+      if (vr.action === 'inherit') {
+        const srcId = vr.plan.sourceClassId;
+        const srcCls = classById[srcId];
+        if (srcCls && srcCls.tutors && srcCls.tutors.length) {
+          const srcAction = appliedActionByClassId[srcId];
+          if (srcAction === undefined || srcAction === 'keep') {
+            errors.push({ row: vr.row, classId: vr.classId, error: 'source class kept while inheriting from it: ' + srcId });
+          }
+        }
+      }
+    });
+  }
+
+  if (errors.length) {
+    return { ok: false, errors: errors, classes: classes, applied: null, historyEntries: [] };
+  }
+
+  const out = classes.slice();
+  const idxById = {};
+  out.forEach(function (c, i) { if (c) idxById[c.id] = i; });
+  const historyEntries = [];
+  // unchanged 是 inherited+vacated 的子集（導師 JSON 剛好沒變的列），不要跟 inherited/
+  // vacated 分開加總——inherited+vacated 已經含 unchanged，加總時只需取前兩者。
+  const applied = { inherited: 0, vacated: 0, kept: 0, unchanged: 0 };
+  const fromSemester = opts.fromSemester, toSemester = opts.toSemester, by = opts.by, now = opts.now;
+
+  validRows.forEach(function (vr) {
+    if (vr.action === 'keep') { applied.kept++; return; }
+    const idx = idxById[vr.classId];
+    const cls = classes[idx]; // 原始快照，不是 out[idx]——見函式頂端註解的順序無關性
+    const previousTutors = cls.tutors || [];
+    let newTutors, note;
+    if (vr.action === 'inherit') {
+      const srcCls = classById[vr.plan.sourceClassId]; // 同樣取原始快照，不受同批次其他列影響
+      // 整個導師物件淺拷貝搬過去——tutors 自 2026-08-11 起還帶 ext（校內分機）／mobile
+      // （私人手機，含舊鍵 phone），那是系辦助理逐筆填的名冊資料。這裡只負責搬移不負責
+      // 清洗，只挑 name/email 會讓接手的班拿到「半殘」的導師、原班又被 vacate 清空，
+      // 分機/手機就從系統裡憑空消失，助理得重填。
+      newTutors = (srcCls.tutors || []).map(function (t) { return (t && typeof t === 'object') ? Object.assign({}, t) : { name: '', email: '' }; });
+      note = '升級接手：導師由「' + (vr.plan.sourceName || srcCls.name) + '」帶上來（' + fromSemester + '→' + toSemester + '）';
+      applied.inherited++;
+    } else { // vacate
+      newTutors = [];
+      note = '新生班釋出：原導師隨學生升上「' + (vr.plan.targetName || '（無法判定）') + '」，導師待指派（' + fromSemester + '→' + toSemester + '）';
+      applied.vacated++;
+    }
+    const changed = tutorsDiffer_(previousTutors, newTutors);
+    if (!changed) applied.unchanged++;
+    // 即使導師剛好沒變也要蓋 rolloverSemester，否則下次執行時冪等守門（規則 1）會漏掉這班。
+    const updated = Object.assign({}, cls, { tutors: newTutors, rolloverSemester: toSemester });
+    out[idx] = updated;
+    if (changed) {
+      historyEntries.push(buildTutorHistoryEntry_(updated, previousTutors, 'rollover', null, note, toSemester, by, now));
+    }
+  });
+
+  return { ok: true, errors: [], classes: out, applied: applied, historyEntries: historyEntries };
 }
 
 // 歷史學期班名解析：nameHistory 依 upToSemester 升冪，找第一筆 semesterId <= upToSemester
@@ -4345,14 +4611,16 @@ function adminRolloverPreviewAction_(params, ctx, userEmail) {
   return { rows: computeRolloverPlan_(classes, departments, tutorSystems, fromSemester, toSemester) };
 }
 
-// adminRolloverApply：套用升級規劃（admin only；Ticket D）。rows 為前端可能逐列修改過的
-// 版本——每列只信 classId / action / newName（其餘後端重算），逐列 validateRolloverRow_，
-// 失敗列收進 errors 不中斷整批。withLock_ 內重讀 classes（不信 preview 當下的快照，防併發）：
-// - advance：nameHistory append {upToSemester: fromSemester, 舊 name/displayName}，改
-//   name/displayName（fuse 以新名重算），tutorHistory append changeType:'rollover'。
-// - graduate：active:false + graduatedSemester: fromSemester，tutorHistory 同上。
-// - keep：no-op（不寫任何東西，只計數）。
-// 撞名驗證是逐列對「套用中」的最新 classes 狀態比對——同批兩列都改成同名，第二列會被擋。
+// adminRolloverApply：套用升級規劃（admin only；Ticket D；2026-08-11 事故後改為薄殼）。
+// ensureTutorSystemsSeeded_ 在鎖外先跑一次（它首跑時自己會拿 LockService 鎖，withLock_
+// 不可重入，全新部署第一次執行升級若沒有這一步會巢狀取鎖卡死 15 秒後逾時）；withLock_
+// 內用剛讀到的最新 classes/departments/tutorSystems **重跑 computeRolloverPlan_**
+// （不信前端 preview 快照，防併發也防灌水——client 傳來的 rows 只信 classId/action），
+// 交給 applyRolloverPlan_ 做逐列驗證與「全有全無」套用：
+// - ok:false（任一列有問題）→ 不寫 classes.json、不寫 tutorHistory，只留一筆 aborted
+//   audit（誰在什麼時候試著套用、幾列失敗），回錯誤清單給前端逐列顯示。
+// - ok:true → 只在真的有列被套用（inherited+vacated > 0）時才寫 classes.json（即使導師
+//   剛好沒變，rolloverSemester 標記本身就是一次真實的寫入，見 applyRolloverPlan_ 註解）。
 function adminRolloverApplyAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const fromSemester = params.fromSemester, toSemester = params.toSemester;
@@ -4361,70 +4629,45 @@ function adminRolloverApplyAction_(params, ctx, userEmail) {
   requireValidSemester_(toSemester, ctx);
   const rows = params.rows;
   if (!Array.isArray(rows) || !rows.length) throw new Error('rows required');
+  // 先在鎖外確保 tutorSystems.json 已播種（ensureTutorSystemsSeeded_ 首跑時自己會拿鎖；
+  // withLock_ 的 LockService 鎖不可重入，放進臨界區內會巢狀取鎖卡死——見 adminImportRosterAction_
+  // 同一句註解）。全新部署第一次執行升級時 tutorSystems.json 還不存在，最容易踩到這個坑。
+  ensureTutorSystemsSeeded_(ctx);
 
   return withLock_(function () {
     const now = new Date().toISOString();
     const classes = readJsonSafe_('classes.json', ctx, []);
     const departments = readJsonSafe_('departments.json', ctx, []);
-    const deptById = {};
-    departments.forEach(function (d) { if (d) deptById[d.id] = d; });
-    const applied = { advanced: 0, graduated: 0, kept: 0 };
-    const errors = [];
-    const historyEntries = [];
-    let classesChanged = false;
-
-    rows.forEach(function (row, i) {
-      const chk = validateRolloverRow_(row, classes, fromSemester);
-      if (!chk.ok) { errors.push({ row: i, classId: row && row.classId, error: chk.error }); return; }
-      const idx = classes.findIndex(function (c) { return c && c.id === chk.cls.id; });
-      const cls = classes[idx];
-
-      if (row.action === 'keep') { applied.kept++; return; }
-
-      if (row.action === 'advance') {
-        const oldName = cls.name;
-        const oldDisplayName = cls.displayName || cls.name;
-        const dept = deptById[cls.deptId];
-        const newDisplayName = fuseClassDisplayName_(
-          chk.newName, dept ? dept.name : cls.deptId, cls.systemId,
-          (cls.tutors && cls.tutors[0] && cls.tutors[0].name) || undefined
-        );
-        const nameHistory = (Array.isArray(cls.nameHistory) ? cls.nameHistory : []).concat([
-          { upToSemester: fromSemester, name: oldName, displayName: oldDisplayName },
-        ]);
-        const updated = Object.assign({}, cls, { name: chk.newName, displayName: newDisplayName, nameHistory: nameHistory });
-        classes[idx] = updated;
-        classesChanged = true;
-        applied.advanced++;
-        historyEntries.push(buildTutorHistoryEntry_(
-          updated, cls.tutors || [], 'rollover', null,
-          '升級：' + oldName + '→' + chk.newName + '（' + fromSemester + '→' + toSemester + '）',
-          toSemester, userEmail, now
-        ));
-        return;
-      }
-
-      // graduate
-      const graduated = Object.assign({}, cls, { active: false, graduatedSemester: fromSemester });
-      classes[idx] = graduated;
-      classesChanged = true;
-      applied.graduated++;
-      historyEntries.push(buildTutorHistoryEntry_(
-        graduated, cls.tutors || [], 'rollover', null,
-        '畢業（' + fromSemester + ' 止）',
-        toSemester, userEmail, now
-      ));
+    const tutorSystems = readJsonSafe_('tutorSystems.json', ctx, []);
+    const plan = computeRolloverPlan_(classes, departments, tutorSystems, fromSemester, toSemester);
+    const result = applyRolloverPlan_(classes, plan, rows, {
+      fromSemester: fromSemester, toSemester: toSemester, by: userEmail, now: now,
     });
 
-    if (classesChanged) writeJsonPath_('classes.json', classes, ctx);
-    appendTutorHistory_(ctx, historyEntries);
+    if (!result.ok) {
+      appendAuditLog_(ctx, {
+        action: 'adminRolloverApply', by: userEmail,
+        targetId: fromSemester + '→' + toSemester,
+        aborted: true, errorCount: result.errors.length, at: now,
+      });
+      return { ok: false, aborted: true, errors: result.errors, applied: null };
+    }
+
+    const applied = result.applied;
+    // 先寫 tutorHistory 再寫 classes.json（順序刻意反過來）：history 是「原本的導師是誰」
+    // 唯一的一份紀錄，如果先寫 classes.json、history 寫入才拋例外，會變成「班級已經被改掉，
+    // 但沒有任何紀錄說原本的導師是誰」——前端顯示套用失敗，admin 以為沒套用其實套了，
+    // 重試又會撞 alreadyDone 整批 abort，變成解不開的死結。反過來的話，history 寫入失敗
+    // 只會留下一筆孤兒 entry（沒有對應的 classes.json 變動），無害。
+    appendTutorHistory_(ctx, result.historyEntries);
+    if (applied.inherited + applied.vacated > 0) writeJsonPath_('classes.json', result.classes, ctx);
     appendAuditLog_(ctx, {
       action: 'adminRolloverApply', by: userEmail,
       targetId: fromSemester + '→' + toSemester,
-      advanced: applied.advanced, graduated: applied.graduated, kept: applied.kept,
-      errorCount: errors.length, at: now,
+      inherited: applied.inherited, vacated: applied.vacated, kept: applied.kept, unchanged: applied.unchanged,
+      at: now,
     });
-    return { classes: classes, applied: applied, errors: errors };
+    return { ok: true, classes: result.classes, applied: applied, errors: [] };
   });
 }
 
