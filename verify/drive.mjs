@@ -1181,6 +1181,50 @@ await flow('H', async () => {
       '合併頁應該看得到剛用 API 建的 h-asst（進分頁要重抓，不能只吃 bootstrap 快照）');
     await page.selectOption('#deptasst-filter-college', '');
   });
+  await check('H', '操作按鈕在表格上方，且每個可調整的欄位都有拖曳把手', async () => {
+    const bar = page.locator('#admin-tab-content .admin-toolbar');
+    await bar.waitFor({ timeout: 5000 });
+    const barBox = await bar.boundingBox();
+    const tableBox = await page.locator('#deptasst-table').boundingBox();
+    expect(barBox.y < tableBox.y, `按鈕列（y=${barBox.y}）應該在表格（y=${tableBox.y}）上方`);
+    for (const act of ['deptasst-new', 'deptasst-bulk', 'deptacct-create-all', 'deptacct-export', 'deptasst-reset-colw']) {
+      expect(await bar.locator(`[data-action="${act}"]`).count() === 1, `按鈕列少了 ${act}`);
+    }
+    const handles = await page.locator('#deptasst-table thead .col-resize-handle').count();
+    expect(handles === 7, `把手應該是 7 個（操作欄不給），實際 ${handles}`);
+    expect(await page.locator('#deptasst-table colgroup col').count() === 8, 'colgroup 欄數不是 8');
+  });
+  await check('H', '拖曳把手可加寬欄位，寬度存進 localStorage 且重繪後保留', async () => {
+    const before = await page.locator('#deptasst-table thead th[data-col="3"]').boundingBox();
+    const handle = page.locator('#deptasst-table thead th[data-col="3"] .col-resize-handle');
+    const hb = await handle.boundingBox();
+    await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(hb.x + hb.width / 2 + 90, hb.y + hb.height / 2, { steps: 8 });
+    await page.mouse.up();
+    const after = await page.locator('#deptasst-table thead th[data-col="3"]').boundingBox();
+    expect(after.width > before.width + 40, `Email 欄沒被拉寬：${before.width} → ${after.width}`);
+    const saved = await page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}'), 'tutor_colw_' + ROOT_FOLDER_ID);
+    evid['H-colwidths-saved'] = JSON.stringify(saved);
+    expect(saved.deptAsstColWidths && Number(saved.deptAsstColWidths['3']) > 0, '欄寬沒寫進 localStorage：' + JSON.stringify(saved));
+    // 篩選器會整個重畫表格：偏好要在重畫後自己套回去（infosys 那邊漏掉這步等於沒存）
+    await page.selectOption('#deptasst-filter-college', '農學院');
+    await page.locator('#deptasst-table').waitFor({ timeout: 5000 });
+    const redrawn = await page.locator('#deptasst-table thead th[data-col="3"]').boundingBox();
+    expect(Math.abs(redrawn.width - after.width) < 6, `重畫後欄寬掉了：${after.width} → ${redrawn.width}`);
+  });
+  await check('H', '「重設欄寬」清掉偏好並恢復預設比例', async () => {
+    await page.locator('[data-action="deptasst-reset-colw"]').click();
+    const saved = await page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}'), 'tutor_colw_' + ROOT_FOLDER_ID);
+    expect(saved.deptAsstColWidths && Object.keys(saved.deptAsstColWidths).length === 0,
+      '重設後 localStorage 仍有欄寬：' + JSON.stringify(saved));
+    const cleared = await page.evaluate(() => ({
+      layout: document.getElementById('deptasst-table').style.tableLayout,
+      col3: document.getElementById('deptasst-col-3').style.width,
+    }));
+    expect(!cleared.layout && !cleared.col3, '欄寬樣式沒清乾淨：' + JSON.stringify(cleared));
+    await page.selectOption('#deptasst-filter-college', '');
+  });
   await check('H', '系辦助理帳號分頁可匯出 Excel（帳號＋分機，供通知信使用）', async () => {
     const [download] = await Promise.all([
       page.waitForEvent('download', { timeout: 60000 }),

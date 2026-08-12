@@ -112,6 +112,13 @@
   th,td{text-align:left; padding:9px 8px; border-bottom:1px solid var(--color-border); vertical-align:middle;}
   th{color:var(--color-text-light); font-size:.78rem; text-transform:uppercase; letter-spacing:.02em;}
   .table-wrap{overflow-x:auto;}
+  /* 表格上方的操作列：窄螢幕自動換行，按鈕之間留固定間距 */
+  .admin-toolbar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 12px;}
+  /* 可拖曳欄寬：把手貼在 th 右緣（10px 命中區），滑過才顯色，避免表頭看起來多一堆線 */
+  .col-resize-handle{position:absolute; right:0; top:0; bottom:0; width:10px; cursor:col-resize; z-index:2; background:transparent;}
+  .col-resize-handle:hover{background:linear-gradient(to right, transparent 40%, var(--color-border) 40%, var(--color-border) 60%, transparent 60%);}
+  /* 欄寬拖窄時內容要能斷行，否則 fixed 版面下長 email／系所串會撐破欄位 */
+  table[style*="table-layout: fixed"] td, table[style*="table-layout: fixed"] th{overflow-wrap:anywhere;}
   /* 匯入差異預覽（仿 Excel 統計表）：學院分頁＋系所群組列＋全欄位 inline input */
   #roster-preview-table{min-width:1060px;}
   #roster-preview-table input[type="text"]{
@@ -392,6 +399,94 @@ function showToast(msg, type) {
   el.textContent = msg;
   $('toast-container').appendChild(el);
   setTimeout(() => el.remove(), 4200);
+}
+
+// ── 共用：可拖曳欄寬（移植自 scc-infosys 的 _makeTableResizable，含它踩過的坑）──
+// infosys 把偏好存後端（那邊本來就有 user pref），本系統沒有這個機制，所以存 localStorage：
+// 欄寬純屬個人視覺偏好，為它開一條會寫 config.json 的後端通道不划算，也省掉 infosys
+// 2026-07-09「整檔覆寫互相蓋掉」那類風險。鍵一樣以 ROOT_FOLDER_ID 隔離 dev/prod。
+const LS_COLW_KEY = 'tutor_colw_' + ROOT_FOLDER_ID;   // { [prefKey]: { 欄號: 寬度px } }
+
+function colWidthPrefs_() {
+  try { return JSON.parse(localStorage.getItem(LS_COLW_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+function saveColWidthPref_(prefKey, widths) {
+  const all = colWidthPrefs_();
+  all[prefKey] = widths;
+  try { localStorage.setItem(LS_COLW_KEY, JSON.stringify(all)); } catch (e) {}
+}
+
+// table 需要有 <colgroup>（每個 <col id="{colPrefix}{n}">）與 <th data-col="{n}">，
+// 且 n 的順序要與 th／td 完全一致。skipCols 裡的欄不給拉把手（例如操作欄）。
+function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = new Set() }) {
+  if (!table) return;
+  const saved = colWidthPrefs_()[prefKey] || {};
+  if (Object.keys(saved).length) {
+    table.style.tableLayout = 'fixed';
+    colNums.forEach(function (n) {
+      const col = document.getElementById(colPrefix + n);
+      if (col && saved[n]) col.style.width = saved[n] + 'px';
+    });
+  }
+  table.querySelectorAll('thead th[data-col]').forEach(function (th) {
+    const n = parseInt(th.dataset.col, 10);
+    if (!n || skipCols.has(n) || th.querySelector('.col-resize-handle')) return;
+    th.style.position = 'relative';
+    const handle = document.createElement('div');
+    handle.className = 'col-resize-handle';
+    handle.title = '拖曳調整欄寬';
+    handle.setAttribute('aria-hidden', 'true');
+    let startX, startW, startTableW;
+    handle.addEventListener('mousedown', function (e) {
+      const col = document.getElementById(colPrefix + n);
+      startX = e.pageX;
+      // 切成 table-layout:fixed 之前，先把每一欄「現在的自然寬度」寫成明確 width——
+      // 沒寫的話 fixed 會把欄寬重新均分，一拖就整表跳動（infosys 的原始註解）。
+      table.querySelectorAll('thead th[data-col]').forEach(function (hd) {
+        const i = parseInt(hd.dataset.col, 10);
+        if (skipCols.has(i)) return;
+        const c = document.getElementById(colPrefix + i);
+        if (c && !c.style.width) c.style.width = hd.offsetWidth + 'px';
+      });
+      table.style.tableLayout = 'fixed';
+      startTableW = table.offsetWidth;
+      table.style.width = startTableW + 'px';
+      startW = (col && parseInt(col.style.width, 10)) || th.offsetWidth;
+      const onMove = function (ev) {
+        const delta = ev.pageX - startX;
+        const minTableW = colNums.length * 30;          // 每欄至少 30px
+        const newTableW = Math.max(minTableW, startTableW + delta);
+        const w = Math.max(30, startW + (newTableW - startTableW));
+        if (col) col.style.width = w + 'px';
+        table.style.width = newTableW + 'px';
+      };
+      const onUp = function () {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        const widths = {};
+        colNums.forEach(function (i) {
+          const c = document.getElementById(colPrefix + i);
+          if (c && c.style.width) widths[i] = parseInt(c.style.width, 10);
+        });
+        saveColWidthPref_(prefKey, widths);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+      e.preventDefault(); e.stopPropagation();
+    });
+    th.appendChild(handle);
+  });
+}
+
+function _resetTableColWidths({ table, colPrefix, colNums, prefKey }) {
+  saveColWidthPref_(prefKey, {});
+  if (!table) return;
+  table.style.tableLayout = '';
+  table.style.width = '';
+  colNums.forEach(function (n) {
+    const col = document.getElementById(colPrefix + n);
+    if (col) col.style.width = '';
+  });
 }
 
 function showLoading(text) {
@@ -3059,8 +3154,17 @@ function renderAdminDeptAssistants() {
     '<p class="field-hint">顯示 <b>' + rows.length + '</b> / ' + all.length + ' 筆' +
       (noAccount === null ? '' : '（其中 <b>' + noAccount + '</b> 人尚無帳號、<b>' + initial + '</b> 人仍是初始密碼）') +
       (deptAccountsState === 'error' ? '。<span style="color:var(--color-danger);">帳號狀態讀取失敗：' + escapeHtml(deptAccountsError) + '</span>' : '。') + '</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>系所</th><th>姓名</th><th>Email</th><th>分機</th>' +
-    '<th>白名單</th><th>帳號</th><th>密碼</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="admin-toolbar">' +
+    '<button class="btn btn-primary" data-action="deptasst-new">新增系辦助理</button> ' +
+    '<button class="btn" data-action="deptasst-bulk">批次匯入（貼上 JSON）</button> ' +
+    '<button class="btn" data-action="deptacct-create-all">為所有尚無帳號者建立帳號</button> ' +
+    '<button class="btn" data-action="deptacct-export">匯出 Excel</button> ' +
+    '<button class="btn btn-sm" data-action="deptasst-reset-colw" data-tip="清除已儲存的欄寬，恢復預設比例">重設欄寬</button>' +
+    '</div>' +
+    '<div class="table-wrap"><table id="deptasst-table">' +
+    '<colgroup>' + DEPTASST_COL_NUMS.map(function (n) { return '<col id="deptasst-col-' + n + '">'; }).join('') + '</colgroup>' +
+    '<thead><tr><th data-col="1">系所</th><th data-col="2">姓名</th><th data-col="3">Email</th><th data-col="4">分機</th>' +
+    '<th data-col="5">白名單</th><th data-col="6">帳號</th><th data-col="7">密碼</th><th data-col="8">操作</th></tr></thead><tbody>' +
     (rows.length ? rows.map(function (s) {
       const ids = Array.isArray(s.deptIds) ? s.deptIds : [];
       return '<tr>' +
@@ -3075,13 +3179,24 @@ function renderAdminDeptAssistants() {
         acctOps(s) + '</td></tr>';
     }).join('') : '<tr><td colspan="8"><div class="empty-hint">' +
       (all.length ? '這個篩選條件下沒有系辦助理。' : '尚未建立任何系辦助理。') + '</div></td></tr>') +
-    '</tbody></table></div>' +
-    '<button class="btn btn-primary" data-action="deptasst-new" style="margin-top:12px;">新增系辦助理</button> ' +
-    '<button class="btn" data-action="deptasst-bulk" style="margin-top:12px;">批次匯入（貼上 JSON）</button> ' +
-    '<button class="btn" data-action="deptacct-create-all" style="margin-top:12px;">為所有尚無帳號者建立帳號</button> ' +
-    '<button class="btn" data-action="deptacct-export" style="margin-top:12px;">匯出 Excel</button></div>';
+    '</tbody></table></div></div>';
   bindDeptAsstFilter(renderAdminDeptAssistants);
+  makeDeptAsstTableResizable();
   if (deptAccountsState === 'idle') loadDeptAccounts();
+}
+
+// 每次 render 都會重建 <table>，所以把手也要重新掛（舊的隨 innerHTML 一起消失，不會累積）。
+// 操作欄（8）不給把手：它是最後一欄，往右拉沒有東西可以推。
+const DEPTASST_COL_NUMS = [1, 2, 3, 4, 5, 6, 7, 8];
+function deptAsstColOpts() {
+  return { table: $('deptasst-table'), colPrefix: 'deptasst-col-', colNums: DEPTASST_COL_NUMS, prefKey: 'deptAsstColWidths', skipCols: new Set([8]) };
+}
+function makeDeptAsstTableResizable() {
+  _makeTableResizable(deptAsstColOpts());
+}
+function resetDeptAsstColWidths() {
+  _resetTableColWidths(deptAsstColOpts());
+  showToast('已恢復預設欄寬', 'success');
 }
 
 // 批次匯入白名單：37 個系所手 key 太痛苦，而名單本身是個資、不能進 repo，
@@ -3203,6 +3318,7 @@ function openDeptAssistantForm(email) {
 
 document.body.addEventListener('click', function (e) {
   if (e.target.closest('[data-action="deptasst-new"]')) { openDeptAssistantForm(null); return; }
+  if (e.target.closest('[data-action="deptasst-reset-colw"]')) { resetDeptAsstColWidths(); return; }
   const edit = e.target.closest('[data-action="deptasst-edit"]');
   if (edit) { openDeptAssistantForm(edit.dataset.email); return; }
   const del = e.target.closest('[data-action="deptasst-delete"]');
