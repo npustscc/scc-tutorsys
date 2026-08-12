@@ -882,13 +882,20 @@ await flow('G3', async () => {
     await download.saveAs(file);
     const XLSX = requireScratch('xlsx');
     const wb = XLSX.read(fs.readFileSync(file));
-    const rows = XLSX.utils.sheet_to_json(wb.Sheets['導師名冊'], { defval: '' });
-    evid['G3-export'] = download.suggestedFilename() + '：' + rows.length + ' 列，欄位=' + Object.keys(rows[0] || {}).join('/');
+    // 版面仿統計表：一個學院一個分頁、三列表頭、系別跨列合併
+    const names = wb.SheetNames;
+    const first = XLSX.utils.sheet_to_json(wb.Sheets[names[0]], { header: 1, defval: '' });
+    const merges = wb.Sheets[names[0]]['!merges'] || [];
+    evid['G3-export'] = download.suggestedFilename() + '：分頁=' + names.join('/') +
+      '，第一頁 ' + first.length + ' 列，合併 ' + merges.length + ' 處';
     expect(/^導師名冊_全校_\d{8}\.xlsx$/.test(download.suggestedFilename()), '檔名=' + download.suggestedFilename());
-    expect(rows.length > 300, '列數不對：' + rows.length);
-    expect(['學院', '系所', '班級', '導師', '校內分機', '私人手機'].every((k) => k in (rows[0] || {})),
-      '缺欄位：' + Object.keys(rows[0] || {}).join('/'));
-    expect(rows.some((r) => r['班級'] === '主任導師(系主任)'), '沒有主任導師列');
+    expect(names.length > 1, '應該一個學院一個分頁，實得 ' + names.join('/'));
+    expect(first[0][0] === names[0], '第一列應是學院名：' + JSON.stringify(first[0]));
+    expect(String(first[2][0]) === '系別' && String(first[3][1]) === '姓名', '三列表頭不對：' + JSON.stringify(first.slice(2, 4)));
+    expect(merges.length > 5, '合併儲存格太少（系別/班級應縱向合併）：' + merges.length);
+    // 手機欄在這份 fixture 裡本來就沒有資料（G2 建的那班已刪除），所以驗欄位存在＋分機有值就好
+    expect(String(first[3][7]) === '私人手機', '第 8 欄應是私人手機：' + JSON.stringify(first[3]));
+    expect(first.slice(5).some((r) => r[6]), '校內分機欄整欄空的');
   });
   await check('G3', '選「獸醫學院」→ 系所自動改指獸醫系，表格跟著換系', async () => {
     // 班名不寫死：D 的換學期流程會把獸醫系那班改名（四獸醫四A→四獸醫五A），認「獸醫」就好。

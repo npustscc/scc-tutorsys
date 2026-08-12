@@ -2287,53 +2287,106 @@ async function loadDeptRoster(deptId) {
 }
 
 // __ROSTER_EXPORT_START__
-// 導師名冊匯出用的列（純函式，無 DOM/全域相依，供 test/export-rows.test.js 就地抽出測試）。
-// 一位導師一列；一班多位導師就多列（Excel 要能直接排序/篩選，合併儲存格只會擋路）。
-// 沒有導師的班級仍出一列（導師欄留白）——「這班還沒有導師」正是中心要看見的缺口。
-// 主任導師（系主任）每個系一列，班級欄寫「（主任導師）」，排在該系最前面。
-function buildRosterExportRows(classes, depts, opts) {
+// 導師名冊匯出（純函式，無 DOM/全域相依，供 test/export-rows.test.js 就地抽出測試）。
+// 版面刻意與 Google Sheet 同一套、也就是仿學諮中心既有的「班級、家族會議記錄暨班級業務統計」：
+//   一個學院一個分頁；row0 學院名／row1 說明／row2–4 三列表頭／row5 起資料；
+//   系別與主任導師(系主任)縱向合併整個系的區塊，同一班多位導師時班級欄也合併。
+// 與 Sheet 的唯一差別：**這裡有「私人手機」欄**——匯出是系統內的授權動作，
+// 而 Sheet 會被分享出去，所以那邊不放（2026-08-11 決策）。
+function buildRosterExportTabs(classes, depts, opts) {
   opts = opts || {};
+  const collegeName = opts.collegeName || function (id) { return id || '未分學院'; };
+  const stamp = opts.stamp || '';
+  const TAB_MAP = {
+    '農學院': '農學院', '工學院': '工學院', '管理學院': '管理學院',
+    '人文暨社會科學院': '人文學院', '人文社科院': '人文學院',
+    '獸醫學院': '獸醫國際達人', '國際學院': '獸醫國際達人', '達人學院': '獸醫國際達人',
+  };
+  const TAB_ORDER = ['農學院', '工學院', '管理學院', '人文學院', '獸醫國際達人'];
+  const HEADER_ROWS = 5;
+  const W = 9;   // 系別｜主任姓名｜主任分機｜班級｜班名(原始)｜導師｜分機｜私人手機｜狀態
+
   const deptById = {};
   (depts || []).forEach(function (d) { if (d) deptById[d.id] = d; });
-  const collegeName = opts.collegeName || function (id) { return id || ''; };
-  const withMobile = opts.withMobile !== false;
-  const out = [];
-  const row = function (d, cls, tutor, isHead) {
-    const r = {
-      '學院': collegeName(d ? d.collegeId : ''),
-      '系所': (d && (d.fullName || d.name)) || (cls && cls.deptId) || '',
-      '班級': isHead ? '主任導師(系主任)' : (cls ? (cls.displayName || cls.name) : ''),
-      '班級名稱(原始)': isHead ? '' : (cls ? cls.name : ''),
-      '導師': (tutor && tutor.name) || '',
-      '校內分機': (tutor && tutor.ext) || '',
-    };
-    if (withMobile) r['私人手機'] = (tutor && tutor.mobile) || '';
-    r['Email'] = (tutor && tutor.email) || '';
-    r['狀態'] = isHead ? '' : classStateLabelForExport(cls);
-    return r;
-  };
-  // 依系所分組，系內先出主任導師再出班級（班級以顯示名排序）
   const byDept = {};
   (classes || []).forEach(function (c) {
-    if (!c) return;
+    if (!c || c.deleted === true) return;
     (byDept[c.deptId] = byDept[c.deptId] || []).push(c);
   });
-  const deptIds = (depts || []).map(function (d) { return d.id; })
-    .filter(function (id) { return byDept[id] || (deptById[id] && deptById[id].head && deptById[id].head.name); });
+  // 有班級但不在 depts 裡的系所也要出現（不能靜默丟資料）
+  const deptIds = (depts || []).map(function (d) { return d.id; });
   Object.keys(byDept).forEach(function (id) { if (deptIds.indexOf(id) === -1) deptIds.push(id); });
+
+  const tabs = {};
+  const tabOrder = [];
   deptIds.forEach(function (id) {
     const d = deptById[id] || { id: id, name: id, collegeId: '' };
-    const head = d.head || null;
-    if (head && (head.name || head.ext || head.mobile)) out.push(row(d, null, head, true));
-    (byDept[id] || []).slice().sort(function (a, b) {
+    const cname = collegeName(d.collegeId);
+    const tab = TAB_MAP[cname] || cname;
+    if (!tabs[tab]) { tabs[tab] = { rows: [], merges: [] }; tabOrder.push(tab); }
+    const t = tabs[tab];
+    const head = d.head || {};
+    const deptStart = t.rows.length;
+    const list = (byDept[id] || []).slice().sort(function (a, b) {
       return String(a.displayName || a.name).localeCompare(String(b.displayName || b.name), 'zh-Hant');
-    }).forEach(function (c) {
-      const tutors = (c.tutors || []).filter(Boolean);
-      if (!tutors.length) out.push(row(d, c, null, false));
-      else tutors.forEach(function (t) { out.push(row(d, c, t, false)); });
     });
+    const deptLabel = d.fullName || d.name || d.id;
+    if (!list.length) {
+      t.rows.push([deptLabel, head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '', '']);
+    } else {
+      list.forEach(function (c) {
+        const tutors = (c.tutors || []).filter(Boolean);
+        const clsStart = t.rows.length;
+        const rowsFor = tutors.length ? tutors : [null];
+        rowsFor.forEach(function (tu, i) {
+          const firstOfDept = (i === 0 && clsStart === deptStart);
+          t.rows.push([
+            firstOfDept ? deptLabel : '',
+            firstOfDept ? (head.name || '') : '',
+            firstOfDept ? (head.ext || '') : '',
+            i === 0 ? (c.displayName || c.name) : '',
+            i === 0 ? c.name : '',
+            (tu && tu.name) || '', (tu && tu.ext) || '', (tu && tu.mobile) || '',
+            classStateLabelForExport(c),
+          ]);
+        });
+        if (rowsFor.length > 1) {
+          [4, 5].forEach(function (col) {
+            t.merges.push({ row: HEADER_ROWS + clsStart + 1, col: col, numRows: rowsFor.length, numCols: 1 });
+          });
+        }
+      });
+    }
+    const span = t.rows.length - deptStart;
+    if (span > 1) {
+      [1, 2, 3].forEach(function (col) {
+        t.merges.push({ row: HEADER_ROWS + deptStart + 1, col: col, numRows: span, numCols: 1 });
+      });
+    }
   });
-  return out;
+
+  const ordered = TAB_ORDER.filter(function (t) { return tabs[t]; })
+    .concat(tabOrder.filter(function (t) { return TAB_ORDER.indexOf(t) === -1; }));
+
+  return ordered.map(function (tab) {
+    const t = tabs[tab];
+    const values = [];
+    values.push([tab, '', '', '', '', '', '', '', '']);
+    values.push(['各系導師名冊　匯出時間：' + stamp + '　※本檔含導師私人手機，請比照個資保管。',
+      '', '', '', '', '', '', '', '']);
+    values.push(['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
+    values.push(['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '']);
+    values.push(['', '', '', '', '', '', '', '', '']);
+    t.rows.forEach(function (r) { values.push(r); });
+    const merges = [
+      { row: 1, col: 1, numRows: 1, numCols: W },
+      { row: 2, col: 1, numRows: 1, numCols: W },
+      { row: 3, col: 2, numRows: 1, numCols: 2 },
+      { row: 3, col: 7, numRows: 1, numCols: 2 },
+    ];
+    [1, 4, 5, 6, 9].forEach(function (col) { merges.push({ row: 3, col: col, numRows: 3, numCols: 1 }); });
+    return { tab: tab, values: values, merges: merges.concat(t.merges), rows: t.rows.length, headerRows: HEADER_ROWS, width: W };
+  });
 }
 
 function classStateLabelForExport(cls) {
@@ -2343,6 +2396,69 @@ function classStateLabelForExport(cls) {
   if (cls.graduatedSemester) s.push('已畢業(' + cls.graduatedSemester + ')');
   return s.join('／') || '啟用';
 }
+
+// 匯出目前看得到的名冊。範圍三選一：目前系所／目前學院／全部系所。
+async function exportDeptRoster(scope) {
+  const many = deptRosterDepts.length > 1;
+  if (!scope && many) {
+    const col = deptRosterCollegeId ? (deptRosterCollegeLabel(deptRosterCollegeId)) : '';
+    openModal('匯出 Excel',
+      '<p class="field-hint">要匯出哪些系所？<b>私人手機也會寫進檔案裡</b>，下載後請比照個資保管。</p>' +
+      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+      '<button type="button" class="btn" data-action="deptroster-export-one">只匯出目前系所</button>' +
+      (deptRosterCollegeId ? '<button type="button" class="btn" data-action="deptroster-export-college">匯出目前學院（' + escapeHtml(col) + '）</button>' : '') +
+      '<button type="button" class="btn btn-primary" data-action="deptroster-export-all">匯出全部系所</button></div>');
+    return;
+  }
+  const all = scope === 'all' || scope === 'college';
+  try {
+    showLoading('準備檔案…');
+    await ensureSheetJsLoaded();
+    const res = await proxyCall('deptRosterGet', all ? {} : { deptId: deptRosterDeptId });
+    let depts = (res.departments || []).length ? res.departments : deptRosterDepts;
+    let classes = res.classes || [];
+    let who = all ? '全校' : ((depts[0] && (depts[0].fullName || depts[0].name)) || deptRosterDeptId || '');
+    if (scope === 'college') {
+      const keep = {};
+      depts = depts.filter(function (d) {
+        const hit = (d.collegeId || '') === deptRosterCollegeId;
+        if (hit) keep[d.id] = true;
+        return hit;
+      });
+      classes = classes.filter(function (c) { return keep[c.deptId]; });
+      who = deptRosterCollegeLabel(deptRosterCollegeId);
+    }
+    const tabs = buildRosterExportTabs(classes, depts, {
+      collegeName: function (id) { const c = collegeById(id); return (c && c.name) || id || '未分學院'; },
+      stamp: todayStamp(),
+    });
+    if (!tabs.length) { showToast('沒有可匯出的資料', 'error'); return; }
+    const wb = XLSX.utils.book_new();
+    tabs.forEach(function (t) {
+      const ws = XLSX.utils.aoa_to_sheet(t.values);
+      ws['!merges'] = t.merges.map(function (m) {
+        return { s: { r: m.row - 1, c: m.col - 1 }, e: { r: m.row + m.numRows - 2, c: m.col + m.numCols - 2 } };
+      });
+      ws['!cols'] = [{ wch: 22 }, { wch: 12 }, { wch: 10 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 12 }];
+      ws['!freeze'] = { xSplit: 0, ySplit: t.headerRows };
+      XLSX.utils.book_append_sheet(wb, ws, t.tab);
+    });
+    XLSX.writeFile(wb, '導師名冊_' + who + '_' + todayStamp() + '.xlsx');
+    showToast('已匯出 ' + tabs.length + ' 個分頁、' + tabs.reduce(function (n, t) { return n + t.rows; }, 0) + ' 列', 'success');
+  } catch (e) {
+    showToast('匯出失敗：' + e.message, 'error');
+  } finally {
+    hideLoading();
+    closeModal();
+  }
+}
+
+function todayStamp() {
+  const d = new Date();
+  const p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
+}
+
 // 系辦助理帳號的匯出列（純函式）。用途是「寄通知信給各系」：要的就是帳號＋分機。
 // 初始密碼＝分機的第一段數字（與後端 initialPasswordFromExtGas_ 同規則），但**只在該帳號
 // 仍是初始密碼時才填**——已自行改過的人再列出分機會誤導收信的人去打一個沒用的密碼。
@@ -2369,47 +2485,6 @@ function buildDeptAccountExportRows(rows, deptNameById) {
 
 // 匯出目前看得到的名冊。管超過一個系所時先問要匯出哪個範圍——admin／主責管全校 38 系，
 // 每次都整包匯出未必是想要的。
-async function exportDeptRoster(scope) {
-  const many = deptRosterDepts.length > 1;
-  if (!scope && many) {
-    openModal('匯出 Excel',
-      '<p class="field-hint">要匯出哪些系所？私人手機也會寫進檔案裡，下載後請比照個資保管。</p>' +
-      '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
-      '<button type="button" class="btn" data-action="deptroster-export-one">只匯出目前系所</button>' +
-      '<button type="button" class="btn btn-primary" data-action="deptroster-export-all">匯出全部系所</button></div>');
-    return;
-  }
-  const all = scope === 'all';
-  try {
-    showLoading('準備檔案…');
-    await ensureSheetJsLoaded();
-    // 一律重新抓一次：畫面上的是目前這個系所的快取，而且匯出要的是當下最新資料。
-    const res = await proxyCall('deptRosterGet', all ? {} : { deptId: deptRosterDeptId });
-    const depts = (res.departments || []).length ? res.departments : deptRosterDepts;
-    const rows = buildRosterExportRows(res.classes || [], depts, {
-      collegeName: function (id) { const c = collegeById(id); return (c && c.name) || id || '未分學院'; },
-    });
-    if (!rows.length) { showToast('沒有可匯出的資料', 'error'); return; }
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws['!cols'] = [{ wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 14 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 28 }, { wch: 12 }];
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '導師名冊');
-    const who = all ? '全校' : ((depts[0] && depts[0].name) || deptRosterDeptId || '');
-    XLSX.writeFile(wb, '導師名冊_' + who + '_' + todayStamp() + '.xlsx');
-    showToast('已匯出 ' + rows.length + ' 列', 'success');
-  } catch (e) {
-    showToast('匯出失敗：' + e.message, 'error');
-  } finally {
-    hideLoading();
-    closeModal();
-  }
-}
-
-function todayStamp() {
-  const d = new Date();
-  const p = function (n) { return (n < 10 ? '0' : '') + n; };
-  return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
-}
 
 // 主任導師卡片。email 只顯示不可編（那是核章身分，要換人請中心改）——助理能改的是姓名與聯絡方式。
 let deptRosterHeadCache = {};
@@ -2590,6 +2665,7 @@ document.body.addEventListener('click', async function (e) {
   if (e.target.closest('[data-action="deptroster-head-edit"]')) { openDeptRosterHeadForm(); return; }
   if (e.target.closest('[data-action="deptroster-export"]')) { exportDeptRoster(null); return; }
   if (e.target.closest('[data-action="deptroster-export-one"]')) { exportDeptRoster('one'); return; }
+  if (e.target.closest('[data-action="deptroster-export-college"]')) { exportDeptRoster('college'); return; }
   if (e.target.closest('[data-action="deptroster-export-all"]')) { exportDeptRoster('all'); return; }
   if (e.target.closest('[data-action="deptroster-new"]')) { openDeptRosterForm(null); return; }
   const edit = e.target.closest('[data-action="deptroster-edit"]');

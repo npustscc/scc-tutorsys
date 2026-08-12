@@ -24,8 +24,11 @@ function load() {
 }
 
 const DEPTS = [
-  { id: '森林系', name: '森林系', collegeId: '農學院', head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0955' } },
+  { id: '森林系', name: '森林系', fullName: '森林學系', collegeId: '農學院',
+    head: { name: '吳羽婷', email: 'wu@x.com', ext: '7149', mobile: '0955' } },
   { id: '農園系', name: '農園系', collegeId: '農學院' },
+  { id: '獸醫系', name: '獸醫系', collegeId: '獸醫學院' },
+  { id: '熱農系', name: '熱農系', collegeId: '國際學院' },
 ];
 const CLASSES = [
   { id: 'c2', name: '四技二A', displayName: '四森林二A', deptId: '森林系', active: true,
@@ -33,66 +36,63 @@ const CLASSES = [
   { id: 'c1', name: '四技一A', displayName: '四森林一A', deptId: '森林系', active: true, tutors: [] },
   { id: 'c3', name: '碩一', displayName: '碩農園一', deptId: '農園系', active: false, graduatedSemester: '114-2',
     tutors: [{ name: '丙' }] },
+  { id: 'c4', name: '四技一A', displayName: '四獸醫一A', deptId: '獸醫系', tutors: [{ name: '丁' }] },
+  { id: 'c5', name: '四技一A', displayName: '四熱農一A', deptId: '熱農系', tutors: [{ name: '戊' }] },
 ];
-const OPTS = { collegeName: function (id) { return id || '未分學院'; } };
+const OPTS = { collegeName: function (id) { return id || '未分學院'; }, stamp: '20260812' };
 
-test('一位導師一列；沒有導師的班級仍出一列（那正是要看見的缺口）', () => {
+function tabNamed(tabs, name) { return tabs.find((t) => t.tab === name); }
+
+test('一個學院一個分頁，獸醫/國際/達人併成一頁，順序照既有統計表', () => {
   const S = load();
-  const rows = S.buildRosterExportRows(CLASSES, DEPTS, OPTS);
-  const forest = rows.filter((r) => r['系所'] === '森林系');
-  // 主任導師 1 + 四森林一A(無導師)1 + 四森林二A 兩位 2 = 4
-  assert.equal(forest.length, 4);
-  const noTutor = forest.find((r) => r['班級'] === '四森林一A');
-  assert.equal(noTutor['導師'], '');
-  assert.equal(noTutor['狀態'], '啟用');
-  const two = forest.filter((r) => r['班級'] === '四森林二A');
-  assert.deepEqual(plain(two.map((r) => r['導師'])), ['甲', '乙']);
-  assert.equal(two[0]['校內分機'], '1');
-  assert.equal(two[0]['私人手機'], '0911');
+  const tabs = S.buildRosterExportTabs(CLASSES, DEPTS, OPTS);
+  assert.deepEqual(plain(tabs.map((t) => t.tab)), ['農學院', '獸醫國際達人']);
+  assert.equal(tabNamed(tabs, '獸醫國際達人').rows, 2, '獸醫系與熱農系要併在同一頁');
 });
 
-test('主任導師排在該系最前面，班級欄標「主任導師(系主任)」', () => {
+test('前五列是學院名／說明／三列表頭，資料從第 6 列起；系別只寫在該系第一列', () => {
   const S = load();
-  const rows = S.buildRosterExportRows(CLASSES, DEPTS, OPTS);
-  assert.equal(rows[0]['系所'], '森林系');
-  assert.equal(rows[0]['班級'], '主任導師(系主任)');
-  assert.equal(rows[0]['導師'], '吳羽婷');
-  assert.equal(rows[0]['校內分機'], '7149');
-  // 沒設主任導師的系所不會多出空白列
-  assert.equal(rows.filter((r) => r['班級'] === '主任導師(系主任)').length, 1);
+  const t = tabNamed(S.buildRosterExportTabs(CLASSES, DEPTS, OPTS), '農學院');
+  assert.equal(t.values[0][0], '農學院');
+  assert.match(t.values[1][0], /匯出時間：20260812/);
+  assert.match(t.values[1][0], /含導師私人手機/);
+  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
+  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '']);
+  // 森林系第一列：系別用**正式全名**，主任導師只出現在這一列
+  assert.deepEqual(plain(t.values[5]), ['森林學系', '吳羽婷', '7149', '四森林一A', '四技一A', '', '', '', '啟用']);
+  assert.equal(t.values[6][0], '', '系別只寫一次，其餘留白給合併');
 });
 
-test('班級以顯示名排序、狀態照實寫、學院名走 collegeName 轉換', () => {
+test('一班多位導師 → 多列，且班級欄縱向合併；沒有導師的班級仍出一列', () => {
   const S = load();
-  const rows = S.buildRosterExportRows(CLASSES, DEPTS, OPTS);
-  const forestClasses = rows.filter((r) => r['系所'] === '森林系' && r['班級'] !== '主任導師(系主任)');
-  assert.deepEqual(plain([...new Set(forestClasses.map((r) => r['班級']))]), ['四森林一A', '四森林二A']);
-  const grad = rows.find((r) => r['班級'] === '碩農園一');
-  assert.equal(grad['狀態'], '停用／已畢業(114-2)');
-  assert.equal(grad['學院'], '農學院');
-  assert.equal(grad['班級名稱(原始)'], '碩一');
+  const t = tabNamed(S.buildRosterExportTabs(CLASSES, DEPTS, OPTS), '農學院');
+  const rows = t.values.slice(5);
+  const two = rows.filter((r) => r[3] === '四森林二A' || (r[5] === '甲' || r[5] === '乙'));
+  assert.equal(two.length, 2, '兩位導師兩列');
+  assert.equal(two[0][7], '0911', '私人手機要在（匯出含手機，Sheet 不含）');
+  const noTutor = rows.find((r) => r[3] === '四森林一A');
+  assert.equal(noTutor[5], '', '沒有導師的班級導師欄留白');
+  const m = plain(t.merges);
+  assert.ok(m.some((x) => x.col === 4 && x.numRows === 2), '班級欄沒有縱向合併：' + JSON.stringify(m));
+  assert.ok(m.some((x) => x.col === 1 && x.numRows > 1), '系別欄沒有縱向合併');
+  assert.ok(m.some((x) => x.row === 3 && x.col === 2 && x.numCols === 2), '主任導師表頭沒跨欄');
 });
 
-test('withMobile=false 時整欄不存在（給不含手機的用途，例如 Google Sheet）', () => {
+test('狀態照實寫；classes 有、departments 沒有的系所不會被丟掉', () => {
   const S = load();
-  const rows = S.buildRosterExportRows(CLASSES, DEPTS, { collegeName: OPTS.collegeName, withMobile: false });
-  assert.equal('私人手機' in rows[0], false);
-  assert.equal('校內分機' in rows[0], true);
-});
-
-test('classes 有、departments 沒有的系所不會被丟掉（fail-open 到 deptId 當名稱）', () => {
-  const S = load();
-  const rows = S.buildRosterExportRows(
+  const t = tabNamed(S.buildRosterExportTabs(CLASSES, DEPTS, OPTS), '農學院');
+  const grad = t.values.slice(5).find((r) => r[3] === '碩農園一');
+  assert.equal(grad[8], '停用／已畢業(114-2)');
+  const tabs = S.buildRosterExportTabs(
     [{ id: 'x', name: '四技一A', deptId: '孤兒系', tutors: [{ name: '丁' }] }], DEPTS, OPTS);
-  const orphan = rows.find((r) => r['系所'] === '孤兒系');
+  const orphan = tabs.find((t2) => t2.values.slice(5).some((r) => r[0] === '孤兒系'));
   assert.ok(orphan, '孤兒系的班級不該消失');
-  assert.equal(orphan['導師'], '丁');
 });
 
 test('空輸入不炸', () => {
   const S = load();
-  assert.deepEqual(plain(S.buildRosterExportRows([], [], {})), []);
-  assert.deepEqual(plain(S.buildRosterExportRows(null, null, {})), []);
+  assert.deepEqual(plain(S.buildRosterExportTabs([], [], {})), []);
+  assert.deepEqual(plain(S.buildRosterExportTabs(null, null, {})), []);
 });
 
 // ── 系辦助理帳號的匯出（用途是寄通知信給各系：帳號＋分機）──────────────────────
