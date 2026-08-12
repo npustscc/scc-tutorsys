@@ -1039,6 +1039,29 @@ await flow('K', async () => {
   await ctx4.close();
 });
 
+// ══ L：GAS 把 POST 降級成 GET 時，前端要自己重試而不是撞牆 ═══════════════════
+await flow('L', async () => {
+  await check('L', '注入一次降級回應 → 畫面照常載入（自動重試），不出現「bootstrap 回應異常」', async () => {
+    await fetch(`http://127.0.0.1:${API_PORT}/downgrade-once`);
+    // 下一個 proxyCall 會拿到 doGet 形狀；前端應自行重送，使用者看不到錯誤
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    await page.locator('[data-admin-tab="departments"]').click();
+    await page.locator('#admin-tab-content', { hasText: '系所清單' }).waitFor({ timeout: 15000 });
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('#deptroster-content table').first().waitFor({ timeout: 20000 });
+    const txt = await page.locator('#page-root').textContent();
+    expect(!/回應異常/.test(txt || ''), '畫面出現了降級錯誤訊息：' + (txt || '').slice(0, 160));
+  });
+  await check('L', '🔒 降級回應不會被當成成功資料吃進去（重試後拿到的是真資料）', async () => {
+    await fetch(`http://127.0.0.1:${API_PORT}/downgrade-once`);
+    const r = await apiCall('deptRosterGet', {}, adminToken.token);   // 這一趟會吃掉降級回應
+    evid['L-downgraded-raw'] = JSON.stringify(r).slice(0, 120);
+    // apiCall 是測試自己的 fetch，不含前端重試邏輯——它應該原封不動拿到降級形狀，
+    // 這正好證明「前端那層的重試」才是使畫面正常的原因，而不是模擬器沒生效。
+    expect(r.data && r.data.via === 'doGet', '注入沒生效？回應=' + JSON.stringify(r).slice(0, 160));
+  });
+});
+
 // ══ I：切頁順暢度（快取先畫）＋ 視窗不該被「拖曳反白到外面放開」關掉 ═══════════
 await flow('I', async () => {
   await check('I', '切到全校總表 → 離開 → 再切回來時直接有表格，不再閃「載入中…」', async () => {

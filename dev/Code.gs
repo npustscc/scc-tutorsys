@@ -2743,8 +2743,13 @@ function sessionStartAction_(params, ctx, userEmail) {
       if (geo) lines.push('大致位置：' + geo);
       lines.push('', '本次登入憑證有效至今日 24:00（台北時間），到期後需重新登入。',
         '若非本人操作，請立即聯繫系統管理者停用帳號，並可於系統「登入紀錄」按「登出所有裝置」使所有憑證即時失效。');
+      // 主責/助理可能填了「其他收信信箱」——登入通知也照那個設定寄，否則設定了卻只有名冊
+      // 通知會用到，人會以為沒生效。找不到那個人的設定時就退回登入信箱本身。
+      const meEntry = ((config.staffLeads || []).concat(config.staffAssistants || []))
+        .filter(function (x) { return x && x.email === userEmail && x.deleted !== true; })[0];
+      const to = (meEntry ? mailTargetsForEntry_(meEntry) : [userEmail]).join(',') || userEmail;
       MailApp.sendEmail({
-        to: userEmail,
+        to: to,
         subject: '【屏科大導師資訊系統】登入通知（測試版）',
         body: lines.join('\n'),
       });
@@ -3275,10 +3280,41 @@ function adminUpsertTutorSystemAction_(params, ctx, userEmail) {
 // config.staffLeads / config.staffAssistants（比照現有職員帳號管理模式，見 adminUpsertUserAction_）。
 // staffAssistant.leadEmail 綁定的主責若不存在或已停用，resolveRoles_ 會 fail-closed 判該助理
 // 的 assistantLead 為 null（無法代為核章），故此處不額外擋——沿用既有 admin 信任邊界。
+// ── 收信信箱解析（純函式）──────────────────────────────────────────────────────
+// 學諮主責/助理有些人的登入帳號（Google/gmail）與實際收信的信箱不是同一個，所以名單那筆
+// 可以填 altEmail（其他收信信箱）與 noPrimaryMail（不要寄給登入用的那個信箱）。
+// 規則：預設寄登入信箱；填了 altEmail 就**兩個都寄**；勾了 noPrimaryMail 則只寄 altEmail。
+// 兩者都沒有等於「不寄給任何人」，那是設定錯誤而不是意圖——所以寫入時就擋掉
+// （見 normalizeMailPrefs_），這裡只負責把有效設定攤成收件者清單。
+function mailTargetsForEntry_(entry) {
+  if (!entry) return [];
+  const primary = String(entry.email || '').trim();
+  const alt = String(entry.altEmail || '').trim();
+  const out = [];
+  if (primary && entry.noPrimaryMail !== true) out.push(primary);
+  if (alt && out.indexOf(alt) === -1) out.push(alt);
+  return out;
+}
+
+// 寫入前的驗證：altEmail 格式、以及「不寄給登入信箱」時必須有替代信箱
+// （否則這個人就此收不到任何通知，而且從畫面上看不出來）。
+function normalizeMailPrefs_(entry) {
+  const alt = String((entry && entry.altEmail) || '').trim().toLowerCase();
+  if (alt && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(alt)) return { ok: false, error: '其他收信信箱格式不正確：' + alt };
+  if (alt.length > 100) return { ok: false, error: '其他收信信箱過長' };
+  const noPrimary = (entry && entry.noPrimaryMail) === true;
+  if (noPrimary && !alt) return { ok: false, error: '勾選「不寄給登入信箱」時，必須填其他收信信箱，否則這個人收不到任何通知' };
+  return { ok: true, altEmail: alt, noPrimaryMail: noPrimary };
+}
+
 function adminUpsertStaffLeadAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffLead;
   if (!entry || !entry.email) throw new Error('staffLead.email required');
+  const prefs = normalizeMailPrefs_(entry);
+  if (!prefs.ok) throw new Error(prefs.error);
+  entry.altEmail = prefs.altEmail;
+  entry.noPrimaryMail = prefs.noPrimaryMail;
   const isDelete = entry.deleted === true;
 
   return withLock_(function () {
@@ -3298,6 +3334,10 @@ function adminUpsertStaffAssistantAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const entry = params.staffAssistant;
   if (!entry || !entry.email) throw new Error('staffAssistant.email required');
+  const prefs = normalizeMailPrefs_(entry);
+  if (!prefs.ok) throw new Error(prefs.error);
+  entry.altEmail = prefs.altEmail;
+  entry.noPrimaryMail = prefs.noPrimaryMail;
   const isDelete = entry.deleted === true;
 
   return withLock_(function () {
@@ -3761,9 +3801,12 @@ function flushRosterNotifications() {
   const ctx = { root: ROOT_FOLDER_ID };
   const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
   const departments = readJsonSafe_('departments.json', ctx, []);
-  const leads = (config.staffLeads || []).filter(function (s) {
-    return s && s.email && s.disabled !== true && s.deleted !== true;
-  }).map(function (s) { return s.email; });
+  // 收件者：每位未停用的主責攤成「登入信箱＋其他收信信箱」（見 mailTargetsForEntry_）
+  const leads = [];
+  (config.staffLeads || []).forEach(function (s) {
+    if (!s || !s.email || s.disabled === true || s.deleted === true) return;
+    mailTargetsForEntry_(s).forEach(function (m) { if (leads.indexOf(m) === -1) leads.push(m); });
+  });
 
   const picked = withLock_(function () {
     const q = readJsonSafe_(ROSTER_NOTIFY_QUEUE_, ctx, { events: [] });

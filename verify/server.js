@@ -38,6 +38,8 @@ function readBody(req) {
   });
 }
 
+let downgradeOnce = false;
+
 function startServers(opts) {
   opts = opts || {};
   const em = createEmulator(opts);
@@ -47,8 +49,22 @@ function startServers(opts) {
     const url = new URL(req.url, 'http://127.0.0.1:8788');
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
+    // 測試用：注入一次「GAS 把 POST 降級成 GET」的回應（GET /downgrade-once 開關）。
+    // 那是 Google 端偶發的行為（2026-07-14、2026-08-11 各一次），本機模擬不出來，
+    // 但前端的自動重試必須測得到——不然那段程式永遠沒被驗證過。
+    if (req.method === 'GET' && url.pathname === '/downgrade-once') {
+      downgradeOnce = true;
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"armed":true}');
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/exec') {
       const raw = await readBody(req);
+      if (downgradeOnce) {
+        downgradeOnce = false;
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        res.end(JSON.stringify({ success: true, data: { ok: true, service: 'SCC Tutor System Drive Proxy (DEV)', via: 'doGet', hasPayload: false } }));
+        return;
+      }
       // proxyCall 送 URLSearchParams（application/x-www-form-urlencoded）：payload=<JSON 字串>
       let payload = new URLSearchParams(raw).get('payload');
       if (!payload) { try { payload = JSON.parse(raw).payload; } catch (e) {} }

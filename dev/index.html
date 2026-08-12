@@ -651,6 +651,16 @@ function hideReloginModal() {
 // 免憑證呼叫：只給 localLogin / localChangePassword 用（它們自己就是認證，
 // 走 proxyCall 會因為「尚未登入」在前端就被擋下）。回傳後端 data 物件原樣，
 // 由呼叫端自行判斷 data.error——後端對這兩個 action 一律回 200＋{error}，不透露帳號是否存在。
+// GAS 偶發把 POST 降級成 GET（打到 doGet，回 {ok,service,via:'doGet',hasPayload:false}）。
+// 2026-07-14 與 2026-08-11 各出現一次，使用者兩次都撞牆。
+// **這個形狀可以安全重試**：hasPayload:false 證明 payload 根本沒送達，doPost 沒被執行過，
+// 不可能有半套寫入——所以連 upsert/刪除這種會改資料的 action 重送都不會重複套用。
+// 只認這個很窄的簽名，其他任何回應一律照舊往上拋，不要把「真的失敗」也悶著重試。
+function isGasDowngradedResponse(data) {
+  return !!data && data.ok === true && typeof data.service === 'string' &&
+    (data.via === 'doGet' || data.hasPayload === false);
+}
+
 async function proxyCallNoAuth(action, params, retryHttp) {
   retryHttp = retryHttp || 0;
   const payload = JSON.stringify(Object.assign({ action: action, rootFolderId: ROOT_FOLDER_ID }, params || {}));
@@ -672,7 +682,12 @@ async function proxyCallNoAuth(action, params, retryHttp) {
   if (!res.ok) throw new Error('伺服器回應 ' + res.status);
   const json = await res.json();
   if (json && json.success === false) throw new Error(json.error || '登入失敗');
-  return (json && json.data) || {};
+  const data = (json && json.data) || {};
+  if (isGasDowngradedResponse(data) && retryHttp < 2) {
+    await sleep(900 * (retryHttp + 1));
+    return proxyCallNoAuth(action, params, retryHttp + 1);
+  }
+  return data;
 }
 
 // ── 帳密登入（系辦助理；GAS 軌與自架軌都可用）────────────────────────────────
@@ -903,6 +918,11 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
   }
 
   const data = await res.json();
+  // 先擋 GAS 的 POST→GET 降級（它長得像成功，但其實什麼都沒執行）
+  if (isGasDowngradedResponse(data && data.data) && retryHttp < 2) {
+    await sleep(900 * (retryHttp + 1));
+    return proxyCall(action, params, retryHttp + 1, retryAuth);
+  }
   const err = (data.success === false)
     ? data.error
     : (data.data && typeof data.data === 'object' && data.data.error) ? data.data.error : null;
@@ -2769,24 +2789,37 @@ document.body.addEventListener('click', function (e) {
 });
 
 // ── 學諮主責／助理 ──
+// 與後端 mailTargetsForEntry_ 同一條規則：預設寄登入信箱；填了其他收信信箱就兩個都寄；
+// 勾了「不寄給登入信箱」就只寄其他那個。這裡只是把結果講成人話顯示在清單上。
+function mailTargetsLabel(s) {
+  const alt = (s && s.altEmail) || '';
+  if (!alt) return '<span class="field-hint">登入信箱</span>';
+  if (s.noPrimaryMail) return escapeHtml(alt) + '<span class="field-hint">（不寄登入信箱）</span>';
+  return '<span class="field-hint">登入信箱＋</span>' + escapeHtml(alt);
+}
+
 function renderAdminStaffTeam() {
   const leads = (bootstrapData.staffLeads || []).filter(notDeleted);
   const assistants = (bootstrapData.staffAssistants || []).filter(notDeleted);
   $('admin-tab-content').innerHTML =
-    '<div class="card"><h3>學諮中心主責</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="card"><h3>學諮中心主責</h3>' +
+    '<p class="field-hint">通知信（名冊異動、登入通知）會寄到「實際收信」欄列出的位址。</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email（登入用）</th><th>姓名</th><th>實際收信</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     leads.map(function (s) {
       return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="實際收信">' + mailTargetsLabel(s) + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="lead-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="lead-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="lead-new" style="margin-top:12px;">新增主責</button></div>' +
     '<div class="card"><h3>學諮中心助理</h3><p class="field-hint">助理在主責的核章關代為動作時，核章顯示掛主責姓名，真實身分只有 admin／學諮端角色看得到。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>綁定主責</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>Email（登入用）</th><th>姓名</th><th>綁定主責</th><th>實際收信</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     assistants.map(function (s) {
       const lead = leads.find(function (l) { return l.email === s.leadEmail; });
       return '<tr><td data-label="Email">' + escapeHtml(s.email) + '</td><td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
         '<td data-label="綁定主責">' + (lead ? escapeHtml(lead.name) + '（' + escapeHtml(lead.email) + '）' : '<span class="field-hint">（找不到，請重新綁定）</span>') + '</td>' +
+        '<td data-label="實際收信">' + mailTargetsLabel(s) + '</td>' +
         '<td data-label="狀態">' + (s.disabled ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="assistant-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="assistant-delete" data-email="' + escapeHtml(s.email) + '">刪除</button></td></tr>';
@@ -3198,6 +3231,11 @@ function openStaffLeadForm(email) {
   const bodyHtml = '<form id="lead-form">' +
     '<div class="field"><label>Email</label><input type="email" id="lead-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
     '<div class="field"><label>姓名</label><input type="text" id="lead-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>其他收信信箱</label>' +
+      '<input type="email" id="lead-alt" value="' + escapeHtml(s.altEmail || '') + '" placeholder="選填，例如校內信箱">' +
+      '<span class="field-hint">有些人的登入帳號（Google）與實際收信的信箱不同。填了這裡，通知信會<b>兩個都寄</b>。</span></div>' +
+    '<div class="field"><label><input type="checkbox" id="lead-noprimary" ' + (s.noPrimaryMail ? 'checked' : '') + '> 不要寄給登入信箱（只寄其他收信信箱）</label>' +
+      '<span class="field-hint">勾這個就必須填上面那一欄，否則這個人收不到任何通知。</span></div>' +
     '<div class="field"><label><input type="checkbox" id="lead-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
@@ -3206,7 +3244,10 @@ function openStaffLeadForm(email) {
     e.preventDefault();
     const targetEmail = $('lead-email').value.trim();
     if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
-    const entry = { email: targetEmail, name: $('lead-name').value.trim(), disabled: $('lead-disabled').checked };
+    const entry = {
+      email: targetEmail, name: $('lead-name').value.trim(), disabled: $('lead-disabled').checked,
+      altEmail: $('lead-alt').value.trim(), noPrimaryMail: $('lead-noprimary').checked,
+    };
     const submitBtn = e.target.querySelector('button[type=submit]');
     try {
       await withBtnPending(submitBtn, async function () {
@@ -3231,6 +3272,11 @@ function openStaffAssistantForm(email) {
       '<option value="">（未綁定）</option>' +
       leads.map(function (l) { return '<option value="' + escapeHtml(l.email) + '"' + (l.email === s.leadEmail ? ' selected' : '') + '>' + escapeHtml(l.name) + '（' + escapeHtml(l.email) + '）</option>'; }).join('') +
     '</select></div>' +
+    '<div class="field"><label>其他收信信箱</label>' +
+      '<input type="email" id="assistant-alt" value="' + escapeHtml(s.altEmail || '') + '" placeholder="選填，例如校內信箱">' +
+      '<span class="field-hint">有些人的登入帳號（Google）與實際收信的信箱不同。填了這裡，通知信會<b>兩個都寄</b>。</span></div>' +
+    '<div class="field"><label><input type="checkbox" id="assistant-noprimary" ' + (s.noPrimaryMail ? 'checked' : '') + '> 不要寄給登入信箱（只寄其他收信信箱）</label>' +
+      '<span class="field-hint">勾這個就必須填上面那一欄，否則這個人收不到任何通知。</span></div>' +
     '<div class="field"><label><input type="checkbox" id="assistant-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
@@ -3242,6 +3288,7 @@ function openStaffAssistantForm(email) {
     const entry = {
       email: targetEmail, name: $('assistant-name').value.trim(),
       leadEmail: $('assistant-lead').value, disabled: $('assistant-disabled').checked,
+      altEmail: $('assistant-alt').value.trim(), noPrimaryMail: $('assistant-noprimary').checked,
     };
     const submitBtn = e.target.querySelector('button[type=submit]');
     try {
