@@ -4235,8 +4235,12 @@ function renderRolloverPreview() {
         '<td data-label="班級">' + escapeHtml(r.displayName || r.name) + '</td>' +
         '<td data-label="現任導師">' + escapeHtml((r.tutors || []).join('、')) + '</td>' +
         '<td data-label="動作">' + actionSel + '</td>' +
-        '<td data-label="接手來源">' + escapeHtml(r.sourceName || '') + '</td>' +
-        '<td data-label="新導師">' + escapeHtml((r.sourceTutors || []).join('、')) + '</td>' +
+        // 這兩欄只在真的會接手（action==='inherit'）時才填：被守門降級成 keep 的列
+        // 其實不會有任何人交接，但 computeRolloverPlan_ 只清 sourceClassId/sourceTutors、
+        // 刻意留著 sourceName 給 reason 措辭用——照 sourceName 印會讓「原樣保留」的列
+        // 看起來像「這班會接手某某班」，而這正是誤按會出事的那張表，不能留這種歧義。
+        '<td data-label="接手來源">' + escapeHtml(r.action === 'inherit' ? (r.sourceName || '') : '') + '</td>' +
+        '<td data-label="新導師">' + escapeHtml(r.action === 'inherit' ? (r.sourceTutors || []).join('、') : '') + '</td>' +
         '<td data-label="說明">' + escapeHtml(r.reason || '') + '</td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<p class="field-hint">標黃列表示系統無法完全確定（如找不到目標班/來源班），請逐列確認動作是否正確。</p>' +
