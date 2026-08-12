@@ -168,6 +168,18 @@ async function main() {
   const roster = await gasCall(env.GAS_EXEC_URL, {
     action: 'deptRosterGet', rootFolderId: env.GAS_ROOT_FOLDER_ID, sessionToken: login.sessionToken,
   });
+  // 形狀守門：GAS 偶爾會把 POST 降級成 GET（回 doGet 的 {ok,service}），那個回應沒有 error
+  // 也沒有 departments——不擋的話這支排程會安靜地當成「0 個系所」跑完，log 看起來像
+  // 「沒東西要同步」，而實際上是這一輪整個沒拉到資料。2026-08-11 實際遇到一次。
+  // 同一個形狀在前端 loadBootstrap 也有守（2026-07-14 那次事故留下的）。
+  if (!Array.isArray(roster.departments) || !Array.isArray(roster.classes) || !Array.isArray(roster.deptIds)) {
+    throw new Error('deptRosterGet 回應形狀異常（可能是 POST 被降級成 GET）：' +
+      JSON.stringify(roster).slice(0, 200));
+  }
+  if (!roster.departments.length) {
+    throw new Error('deptRosterGet 回了 0 個系所——這在正常情況下不可能（服務帳號掛滿所有系所），' +
+      '中止本輪同步以免把空結果當成事實');
+  }
   console.log('[import-from-gas] 取得 ' + (roster.departments || []).length + ' 個系所、' +
     (roster.classes || []).length + ' 個班級');
   const count = (pick) => (roster.classes || []).reduce((n, c) => n + (c.tutors || []).filter(pick).length, 0);
