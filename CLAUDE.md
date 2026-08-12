@@ -48,10 +48,24 @@ scc-server 做 git pull → build-public → restart → healthz，並比對遠�
 `tutorsys-onprem-deploy`。
 
 **GAS＋GitHub Pages 軌已凍結（2026-07-16 A 方案決策）**：下表的 GAS 部署維持現版服務
-既有使用者，**不再接收新功能**（致命 bug 才例外 clasp push）。GitHub Pages 的來源已凍結在
-`gas-frozen` 分支（釘在 `c8bbb43`）——master 的後續 commit 不會影響 Pages 網站。這是刻意的：
-凍結的 GAS 後端配上持續演進的前端會版本錯配。cutover 完成後整軌下架
+既有使用者，**不再接收新功能**（致命 bug 才例外 clasp push）。cutover 完成後整軌下架
 （公告 → 唯讀觀察期 → Pages 換轉址頁 → 下架）。
+
+**「凍結」是指不往這條軌加新功能，不是「這兩個檔案永遠不動」。** GitHub Pages 的來源是
+`gas-frozen` 分支而不是 master，所以平常往 master 推的 commit 不會影響 Pages 網站；
+但**每次「推行到正式版」時，這條軌的兩半要一起跟上**，否則會留下版本錯配：
+
+1. 後端：`clasp push`（根 `.clasp.json` → prod scriptId，`.claspignore` 只放行
+   `Code.gs`＋`appsscript.json`）→ `clasp create-version` → `clasp redeploy <deploymentId> -V <版本>`
+   （deploymentId 就是 `index.html` 裡 `APPS_SCRIPT_URL` 那一串；另一筆 @HEAD 不要動）。
+   clasp 用 `npx -y @google/clasp@latest`（v3；`~/.clasprc.json` 是 v3 格式，用 2.x 會噴
+   `Cannot read properties of undefined (reading 'access_token')`）。
+2. 前端：`git push origin <master 的 commit>:gas-frozen`（快轉，不需 --force）。
+
+**這個釘子的歷史值不要寫死在這裡**（2026-08-12 就是因為這裡還寫著早已過期的 `c8bbb43`，
+導致誤判「Pages 永遠不會更新」、只推了後端就收工，留下舊前端配新後端）。要知道現在釘在哪，
+跑 `git log --oneline -1 origin/gas-frozen`；要確認線上服務的是哪一版，直接抓
+`https://npustscc.github.io/scc-tutorsys/` 下來 grep 該版本才有的字串。
 
 **GAS 軌（凍結中）：**
 
