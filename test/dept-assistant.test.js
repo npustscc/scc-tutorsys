@@ -437,7 +437,7 @@ test('Sheet 版面：前五列是學院名／說明／三列表頭，資料從�
   assert.equal(t.values[0][0], '農學院');
   assert.match(t.values[1][0], /最後同步：2026-08-11 12:00/);
   assert.match(t.values[1][0], /不含導師私人手機/);
-  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
+  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
   assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '', '']);
   // 第 6 列（index 5）起是資料：系別／主任導師／班級都只寫在區塊第一列，其餘留白給合併用
   assert.deepEqual(plain(t.values[5]), ['農園系', '梁佑慎', '6247', '四農園一A', '四技一A', '甲', '1', '啟用']);

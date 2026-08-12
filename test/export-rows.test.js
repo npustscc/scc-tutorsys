@@ -51,21 +51,21 @@ test('一位導師一列；沒有導師的班級仍出一列（那正是要看�
   assert.equal(two[0]['私人手機'], '0911');
 });
 
-test('主任導師排在該系最前面，班級欄標「（主任導師）」', () => {
+test('主任導師排在該系最前面，班級欄標「主任導師(系主任)」', () => {
   const S = load();
   const rows = S.buildRosterExportRows(CLASSES, DEPTS, OPTS);
   assert.equal(rows[0]['系所'], '森林系');
-  assert.equal(rows[0]['班級'], '（主任導師）');
+  assert.equal(rows[0]['班級'], '主任導師(系主任)');
   assert.equal(rows[0]['導師'], '吳羽婷');
   assert.equal(rows[0]['校內分機'], '7149');
   // 沒設主任導師的系所不會多出空白列
-  assert.equal(rows.filter((r) => r['班級'] === '（主任導師）').length, 1);
+  assert.equal(rows.filter((r) => r['班級'] === '主任導師(系主任)').length, 1);
 });
 
 test('班級以顯示名排序、狀態照實寫、學院名走 collegeName 轉換', () => {
   const S = load();
   const rows = S.buildRosterExportRows(CLASSES, DEPTS, OPTS);
-  const forestClasses = rows.filter((r) => r['系所'] === '森林系' && r['班級'] !== '（主任導師）');
+  const forestClasses = rows.filter((r) => r['系所'] === '森林系' && r['班級'] !== '主任導師(系主任)');
   assert.deepEqual(plain([...new Set(forestClasses.map((r) => r['班級']))]), ['四森林一A', '四森林二A']);
   const grad = rows.find((r) => r['班級'] === '碩農園一');
   assert.equal(grad['狀態'], '停用／已畢業(114-2)');

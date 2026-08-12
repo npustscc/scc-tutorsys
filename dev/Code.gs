@@ -3617,7 +3617,7 @@ function buildRosterSheetTabs_(departments, classes, colleges, stamp) {
     values.push([tab, '', '', '', '', '', '', '']);
     values.push(['資料來源：各系導師名冊（系辦助理維護）。最後同步：' + (stamp || '') +
       '　※本表不含導師私人手機，需要時請至系統查詢。', '', '', '', '', '', '', '']);
-    values.push(['系別', '主任導師', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
+    values.push(['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '校內分機', '狀態']);
     values.push(['', '姓名', '校內分機', '', '', '', '', '']);
     values.push(['', '', '', '', '', '', '', '']);
     t.rows.forEach(function (r) { values.push(r); });

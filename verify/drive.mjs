@@ -888,7 +888,7 @@ await flow('G3', async () => {
     expect(rows.length > 300, '列數不對：' + rows.length);
     expect(['學院', '系所', '班級', '導師', '校內分機', '私人手機'].every((k) => k in (rows[0] || {})),
       '缺欄位：' + Object.keys(rows[0] || {}).join('/'));
-    expect(rows.some((r) => r['班級'] === '（主任導師）'), '沒有主任導師列');
+    expect(rows.some((r) => r['班級'] === '主任導師(系主任)'), '沒有主任導師列');
   });
   await check('G3', '選「獸醫學院」→ 系所自動改指獸醫系，表格跟著換系', async () => {
     // 班名不寫死：D 的換學期流程會把獸醫系那班改名（四獸醫四A→四獸醫五A），認「獸醫」就好。

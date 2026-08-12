@@ -2282,7 +2282,7 @@ function buildRosterExportRows(classes, depts, opts) {
     const r = {
       '學院': collegeName(d ? d.collegeId : ''),
       '系所': (d && (d.fullName || d.name)) || (cls && cls.deptId) || '',
-      '班級': isHead ? '（主任導師）' : (cls ? (cls.displayName || cls.name) : ''),
+      '班級': isHead ? '主任導師(系主任)' : (cls ? (cls.displayName || cls.name) : ''),
       '班級名稱(原始)': isHead ? '' : (cls ? cls.name : ''),
       '導師': (tutor && tutor.name) || '',
       '校內分機': (tutor && tutor.ext) || '',
@@ -2402,7 +2402,7 @@ function renderDeptRosterHead(deptId) {
   box.innerHTML =
     '<div class="card" style="margin:12px 0; background:var(--color-bg-subtle, #f7f9fc);">' +
       '<div class="row" style="align-items:baseline; gap:10px;">' +
-        '<b>主任導師（系主任）</b>' +
+        '<b>主任導師(系主任)</b>' +
         '<span>' + (h.name ? escapeHtml(h.name) : '<span style="color:var(--color-warning);">（尚未設定）</span>') + '</span>' +
         (h.email ? '<span class="field-hint">' + escapeHtml(h.email) + '</span>' : '') +
         '<span>校內分機：' + (h.ext ? escapeHtml(h.ext) : miss) + '</span>' +
@@ -2416,7 +2416,7 @@ function openDeptRosterHeadForm() {
   const deptId = deptRosterDeptId;
   if (!deptId) return;
   const h = deptRosterHeadCache[deptId] || { name: '', email: '', ext: '', mobile: '' };
-  openModal('主任導師（系主任）',
+  openModal('主任導師(系主任)',
     '<form id="deptroster-head-form">' +
       '<div class="field"><label>姓名</label>' +
         '<input type="text" id="deptroster-head-name" maxlength="20" value="' + escapeHtml(h.name || '') + '" required></div>' +
@@ -3328,17 +3328,17 @@ function renderAdminDepartments() {
     '<div class="card"><h3>系所清單</h3>' +
     '<p class="field-hint">「名稱」是系統內部用的簡稱名（班級顯示名的系簡稱由它推導，例如 農園系→四農園一A），' +
     '「正式全名」才是對外顯示用的（Google Sheet、匯出、公文）。要一次套用中心的系所清冊請用下方的批次按鈕。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱（內部簡稱）</th><th>正式全名</th><th>系主任</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>ID</th><th>名稱（內部簡稱）</th><th>正式全名</th><th>主任導師(系主任)</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     depts.map(function (d) {
       return '<tr><td data-label="ID">' + escapeHtml(d.id) + '</td><td data-label="名稱">' + escapeHtml(d.name) + '</td>' +
         '<td data-label="正式全名">' + (d.fullName ? escapeHtml(d.fullName) : '<span class="field-hint">（未填）</span>') + '</td>' +
-        '<td data-label="系主任">' + escapeHtml(d.headName || '') + (d.headEmail ? '（' + escapeHtml(d.headEmail) + '）' : '') + '</td>' +
+        '<td data-label="主任導師(系主任)">' + escapeHtml(d.headName || '') + (d.headEmail ? '（' + escapeHtml(d.headEmail) + '）' : '') + '</td>' +
         '<td data-label="狀態">' + (d.active === false ? '停用' : '啟用') + '</td>' +
         '<td data-label="操作"><button class="btn btn-sm" data-action="dept-edit" data-id="' + escapeHtml(d.id) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="dept-delete" data-id="' + escapeHtml(d.id) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
     '<button class="btn btn-primary" data-action="dept-new" style="margin-top:12px;">新增系所</button> ' +
-    '<button class="btn" data-action="depthead-bulk" style="margin-top:12px;">批次匯入主任導師（貼上 JSON）</button> ' +
+    '<button class="btn" data-action="depthead-bulk" style="margin-top:12px;">批次匯入主任導師(系主任)（貼上 JSON）</button> ' +
     '<button class="btn" data-action="deptsheet-bulk" style="margin-top:12px;">批次套用系所清冊（全名＋助理密碼）</button></div>';
 }
 
@@ -3404,7 +3404,7 @@ function openDeptSheetBulkForm() {
 // 批次匯入各系主任導師（＝系主任）。37 個系所逐筆存太痛苦，而名單含 email／分機，
 // 比照系辦助理白名單的做法：資料留在使用者手上，只在匯入當下經過瀏覽器，不進 repo。
 function openDeptHeadBulkForm() {
-  openModal('批次匯入主任導師（系主任）',
+  openModal('批次匯入主任導師(系主任)',
     '<p class="field-hint">貼上 JSON 陣列，每列 <code>{"deptId","name","email","ext"}</code>（ext 選填）。' +
     '<b>email 是核章身分</b>——系主任那一關認的就是它，請填本人可登入的信箱。' +
     '任一列的系所不存在會整批拒絕，不會寫入一半。</p>' +
@@ -3427,7 +3427,7 @@ function openDeptHeadBulkForm() {
       await withBtnPending(e.target, async function () {
         const res = await proxyCall('adminBulkUpsertDeptHeads', { heads: rows });
         bootstrapData.departments = res.departments;
-        showToast('已匯入 ' + res.count + ' 位主任導師', 'success');
+        showToast('已匯入 ' + res.count + ' 位主任導師(系主任)', 'success');
         closeModal();
         renderAdminDepartments();
       });
@@ -3443,8 +3443,8 @@ function openDeptForm(dept) {
     '<p class="field-hint">學生自填的系所會出現在此，可在此改名、補系主任資訊或停用。</p>' +
     '<div class="field"><label>系所 ID</label><input type="text" id="dept-id" value="' + escapeHtml(dept.id || '') + '" ' + (dept.id ? 'readonly' : '') + ' required></div>' +
     '<div class="field"><label>系所名稱</label><input type="text" id="dept-name" value="' + escapeHtml(dept.name || '') + '" required></div>' +
-    '<div class="row"><div class="field"><label>系主任姓名</label><input type="text" id="dept-head-name" value="' + escapeHtml(dept.headName || '') + '"></div>' +
-    '<div class="field"><label>系主任 Email</label><input type="email" id="dept-head-email" value="' + escapeHtml(dept.headEmail || '') + '"></div></div>' +
+    '<div class="row"><div class="field"><label>主任導師(系主任) 姓名</label><input type="text" id="dept-head-name" value="' + escapeHtml(dept.headName || '') + '"></div>' +
+    '<div class="field"><label>主任導師(系主任) Email</label><input type="email" id="dept-head-email" value="' + escapeHtml(dept.headEmail || '') + '"></div></div>' +
     '<div class="field"><label><input type="checkbox" id="dept-active" ' + (dept.active === false ? '' : 'checked') + '> 啟用</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
