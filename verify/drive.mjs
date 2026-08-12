@@ -2,6 +2,8 @@
 // 用法（playwright 裝在 scratchpad）：
 //   node verify/drive.mjs
 // 環境變數：VERIFY_SCRATCH=scratchpad 路徑（預設用本機已知路徑）。
+//          VERIFY_TARGET=dev（預設）｜prod —— prod 時改跑 repo 根目錄的正式版
+//          Code.gs＋index.html（見 verify/README.md「跑正式版檔案」一節，為什麼要有這個能力）。
 // 斷言失敗不中止：記錄 ❌ 後繼續；結束時輸出逐步結果與 console error 清單。
 
 import { createRequire } from 'node:module';
@@ -19,13 +21,21 @@ const SHOTS = path.join(SCRATCH, 'verify-shots');
 const XLSX_REAL = process.env.VERIFY_XLSX ||
   'G:/我的雲端硬碟/00Claude_Working_Directory/forsystems/114-2 班級、家族會議記錄暨班級業務統計.xlsx';
 
+// VERIFY_TARGET=prod → 跑 repo 根目錄的正式版檔案；預設（含未設定）一律 dev，與加這個
+// 能力之前的行為完全一樣。gas-emulator.js／server.js 各自讀同一組 VERIFY_TARGET，
+// 三處共用同一顆常數，不要散落三個字串（曾經是這樣才會漏改）。
+const TARGET = process.env.VERIFY_TARGET === 'prod' ? 'prod' : 'dev';
+const APP_REL = TARGET === 'prod' ? '/index.html' : '/dev/index.html';
+
 const requireScratch = createRequire(path.join(SCRATCH, 'noop.js'));
 const requireRepo = createRequire(path.join(REPO, 'noop.js'));
 const { chromium } = requireScratch('playwright');
 const { startServers } = requireRepo('./verify/server.js');
 
-// ── 從 dev/index.html 讀出實際常數（不寫死，跟著本體走）──
-const indexHtml = fs.readFileSync(path.join(REPO, 'dev', 'index.html'), 'utf8');
+// ── 從被測的那份 index.html 讀出實際常數（不寫死，跟著本體走；prod／dev 的
+//    ROOT_FOLDER_ID 不同，這裡永遠讀對應 target 那一份，emulator 的 ALLOWED_ROOTS
+//    也讀同一個 target 的 .gs，兩邊自洽）──
+const indexHtml = fs.readFileSync(path.join(REPO, APP_REL), 'utf8');
 const APPS_SCRIPT_URL = indexHtml.match(/const APPS_SCRIPT_URL = '([^']+)'/)[1];
 const ROOT_FOLDER_ID = indexHtml.match(/const ROOT_FOLDER_ID\s*=\s*'([^']+)'/)[1];
 
@@ -97,7 +107,8 @@ await context.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({
 }));
 await context.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
 
-// 預塞 localStorage（鍵名/形狀照 dev/index.html LS_USER_KEY/LS_SESSION_KEY 與 load 恢復邏輯）
+// 預塞 localStorage（鍵名/形狀照 index.html LS_USER_KEY/LS_SESSION_KEY 與 load 恢復邏輯，
+// dev／prod 兩份共用同一套鍵名邏輯）
 await context.addInitScript(({ rootId, token, exp }) => {
   localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email: 'admin@test.local', name: '測試管理員', picture: '' }));
   localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email: 'admin@test.local' }));
@@ -111,7 +122,7 @@ page.on('dialog', async (d) => { dialogs.push(d.type() + ': ' + d.message().spli
 const evid = {}; // API 探針回應體存證
 
 // ══ 開場：免登入直接進主畫面 ═══════════════════════════════════════════════════
-await page.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+await page.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
 await check('boot', '載入後直接進主畫面（session 免登入）', async () => {
   await page.locator('#app').waitFor({ state: 'visible', timeout: 15000 });
   await page.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 10000 });
@@ -711,7 +722,7 @@ await flow('G', async () => {
   const page2 = await ctx2.newPage();
   page2.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[G/page2] ' + m.text()); });
   page2.on('pageerror', (e) => consoleErrors.push('[G/page2] pageerror: ' + e.message));
-  await page2.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await page2.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
   await check('G', '系辦助理登入後看得到「導師資料」頁籤、看不到「後台管理」', async () => {
     await page2.locator('.nav-btn', { hasText: '導師資料' }).waitFor({ timeout: 15000 });
     expect(await page2.locator('.nav-btn', { hasText: '後台管理' }).count() === 0, '不該看到後台管理頁籤');
@@ -1071,7 +1082,7 @@ await flow('J', async () => {
   const page3 = await ctx3.newPage();
   page3.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[J/page3] ' + m.text()); });
   page3.on('pageerror', (e) => consoleErrors.push('[J/page3] pageerror: ' + e.message));
-  await page3.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await page3.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
   await check('J', '主責的導覽列＝admin 的導覽列，且兩者都只剩「導師資料／後台管理」', async () => {
     await page3.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 15000 });
     const navs = await page3.locator('.nav-btn').allTextContents();
@@ -1113,7 +1124,7 @@ await flow('K', async () => {
   const page4 = await ctx4.newPage();
   page4.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[K/page4] ' + m.text()); });
   page4.on('pageerror', (e) => consoleErrors.push('[K/page4] pageerror: ' + e.message));
-  await page4.goto(`http://127.0.0.1:${STATIC_PORT}/dev/index.html`);
+  await page4.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
   await check('K', '導師登入後仍看得到「上傳」頁籤，且點得開表單', async () => {
     await page4.locator('.nav-btn', { hasText: '導師個人後台' }).waitFor({ timeout: 15000 });
     const navs = await page4.locator('.nav-btn').allTextContents();

@@ -1,8 +1,9 @@
 // verify/gas-emulator.js — 本機 GAS 模擬器
-// 以 node:vm 載入 dev/Code.gs **本體**（fs 讀入，不複製任何程式碼），sandbox 提供
-// GAS 服務 stub；載入後以「儲存 seam」直接覆寫 readJsonSafe_/writeJsonPath_ 等
-// Drive I/O 函式為 in-memory Map（classic script 的頂層 function 宣告掛在 global 物件上，
-// 內部呼叫走 global 綁定 → 重指派即生效）。dev/Code.gs 一個字都不改。
+// 以 node:vm 載入 dev/Code.gs 或正式版 Code.gs **本體**（依 VERIFY_TARGET 環境變數，預設
+// dev；fs 讀入，不複製任何程式碼），sandbox 提供 GAS 服務 stub；載入後以「儲存 seam」
+// 直接覆寫 readJsonSafe_/writeJsonPath_ 等 Drive I/O 函式為 in-memory Map（classic script
+// 的頂層 function 宣告掛在 global 物件上，內部呼叫走 global 綁定 → 重指派即生效）。
+// 被載入的那份 .gs 一個字都不改。
 //
 // Utilities HMAC 型別對齊（讀自 issueSessionToken_/verifySessionToken_ 的實際用法）：
 //   - base64EncodeWebSafe(輸入)：字串（payload JSON）或 byte array（HMAC 簽章）都要吃；
@@ -15,6 +16,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const crypto = require('node:crypto');
+
+// VERIFY_TARGET=prod → 載入 repo 根目錄的正式版 Code.gs；預設（含未設定）一律 dev。
+// 不可變更既有預設行為：沒設這個環境變數時，行為與加這個能力之前完全一樣。
+const TARGET = process.env.VERIFY_TARGET === 'prod' ? 'prod' : 'dev';
 
 function toSignedBytes(buf) {
   return Array.from(buf, function (b) { return b > 127 ? b - 256 : b; });
@@ -129,8 +134,9 @@ function createEmulator(opts) {
     },
   };
   vm.createContext(sandbox);
-  const gsPath = path.join(__dirname, '..', 'dev', 'Code.gs');
-  vm.runInContext(fs.readFileSync(gsPath, 'utf8'), sandbox, { filename: 'dev/Code.gs' });
+  const gsRelPath = TARGET === 'prod' ? 'Code.gs' : path.join('dev', 'Code.gs');
+  const gsPath = path.join(__dirname, '..', gsRelPath);
+  vm.runInContext(fs.readFileSync(gsPath, 'utf8'), sandbox, { filename: gsRelPath });
 
   // ── 儲存 seam：所有 Drive JSON 讀寫 → in-memory Map ──────────────────────────
   sandbox.readJsonSafe_ = function (p, ctx, fallback) {

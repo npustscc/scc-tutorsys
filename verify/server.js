@@ -6,7 +6,8 @@
 //                          GET  /mint?email=x → 鑄造合法 session token（驅動器/探針用）
 //                          GET  /mails        → MailApp 寄件證據
 //                          GET  /state?path=x → dump in-memory store（證據）
-//   http://127.0.0.1:8787  static  → serve repo 根目錄（/dev/index.html）
+//   http://127.0.0.1:8787  static  → serve repo 根目錄（預設 /dev/index.html；
+//                                     VERIFY_TARGET=prod 時改 serve /index.html）
 // 單獨啟動：node verify/server.js；或由 verify/drive.mjs 以 startServers() 內嵌啟動。
 
 const http = require('node:http');
@@ -16,6 +17,9 @@ const { createEmulator } = require('./gas-emulator');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const EXEC_DELAY_MS = 600;
+// VERIFY_TARGET=prod → static 根路徑預設導向正式版檔案；預設（含未設定）一律 dev，
+// 與加這個能力之前的行為完全一樣。
+const APP_REL = process.env.VERIFY_TARGET === 'prod' ? '/index.html' : '/dev/index.html';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -103,7 +107,7 @@ function startServers(opts) {
   const statics = http.createServer(function (req, res) {
     const url = new URL(req.url, 'http://127.0.0.1:8787');
     let rel = decodeURIComponent(url.pathname);
-    if (rel === '/') rel = '/dev/index.html';
+    if (rel === '/') rel = APP_REL;
     const file = path.join(REPO_ROOT, rel);
     if (!file.startsWith(REPO_ROOT)) { res.writeHead(403); res.end(); return; }
     fs.readFile(file, function (err, buf) {
@@ -119,7 +123,7 @@ function startServers(opts) {
   api.listen(apiPort, '127.0.0.1');
   statics.listen(staticPort, '127.0.0.1');
   console.log('[verify] api    http://127.0.0.1:' + apiPort + '  (POST /exec, GET /mint /mails /state)');
-  console.log('[verify] static http://127.0.0.1:' + staticPort + '/dev/index.html');
+  console.log('[verify] static http://127.0.0.1:' + staticPort + APP_REL);
 
   return {
     em: em,

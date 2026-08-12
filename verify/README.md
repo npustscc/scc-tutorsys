@@ -17,13 +17,39 @@
 # 一次性：在 scratchpad 裝 playwright（repo 不裝任何依賴）
 cd <scratchpad> && npm i playwright && npx playwright install chromium
 
-# 全自動驅動（自帶啟動/關閉 server）
+# 全自動驅動（自帶啟動/關閉 server）——預設跑 dev
 node verify/drive.mjs
 # 環境變數 VERIFY_SCRATCH 可覆寫 scratchpad 路徑（playwright 與截圖輸出所在）
 
 # 只起 server 手動玩（瀏覽器開 http://127.0.0.1:8787/dev/index.html 需自行處理登入攔截）
 node verify/server.js
 ```
+
+### 跑正式版檔案（`VERIFY_TARGET=prod`）
+
+三個檔案都寫死讀 `dev/`（`dev/Code.gs`＋`dev/index.html`）——這是刻意的預設值，因為日常開發
+一律先在 dev 驗證。但這也表示「推行到正式版」（`scripts/promote.mjs`）之後產生的
+repo 根目錄那對正式版檔案（`Code.gs`＋`index.html`）**從來沒有被這套 harness 跑過**：
+promote 只做「複製 dev、換回環境專屬差異」的機械比對，不執行任何程式碼，
+所以 dev 綠燈不代表正式版檔案也是綠燈的。這正是 2026-07-18 那次事故的形狀——
+正式版對外自稱「測試版」掛了三週才被發現。
+
+加 `VERIFY_TARGET=prod` 環境變數，三個檔案改讀 repo 根目錄的 `Code.gs`／`index.html`：
+
+```bash
+node verify/drive.mjs                       # dev（預設，行為不變）
+VERIFY_TARGET=prod node verify/drive.mjs    # 正式版檔案
+```
+
+`gas-emulator.js`／`server.js`／`drive.mjs` 三處各自讀同一個 `VERIFY_TARGET` 環境變數、
+各自算出同一組「該讀哪個路徑」的值（`drive.mjs` 用一顆共用常數 `APP_REL` 給三處 `goto`
+共用，不散落字串）——不要把某一處寫死成別的 target，那樣會讓 emulator 載入的 `.gs`
+（決定 `ALLOWED_ROOTS` 白名單）跟前端讀到的 `ROOT_FOLDER_ID` 來自不同 target，
+在真環境會是「Unauthorized rootFolderId」整版無法登入的那種錯配，
+但在這套 harness 裡會安靜地兩邊都通過（因為 emulator 是 in-memory、不會真的去比對
+Drive 資料夾），所以這一點只能在改動時人工注意，測不出來。
+
+未設定 `VERIFY_TARGET`（或設成非 `prod` 的任何值）時行為與加這個能力之前完全一樣。
 
 ## 關鍵機制（坑）
 
