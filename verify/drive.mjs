@@ -968,6 +968,33 @@ await flow('J', async () => {
     const r = await apiCall('adminUpsertCollege', { college: { id: 'x2', name: '系辦助理不該建得出來' } }, deptAsstToken.token);
     expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
   });
+  // 其他收信信箱：這組設定的失效是安靜的（設錯只會讓人「再也沒收到通知」），所以連
+  // 「被擋下來時不可以留下半套設定」都要驗。
+  await check('J', '主責可設「其他收信信箱」，alt 正規化成小寫存起來', async () => {
+    const r = await apiCall('adminUpsertStaffLead', {
+      staffLead: { email: 'lead@test.local', name: '測試主責', altEmail: '  Lead.Alt@Example.COM ' },
+    }, adminToken.token);
+    const me = ((r.data || {}).staffLeads || []).find((s) => s.email === 'lead@test.local') || {};
+    evid['J-mailprefs-alt'] = JSON.stringify({ altEmail: me.altEmail, noPrimaryMail: me.noPrimaryMail });
+    expect(r.success === true && me.altEmail === 'lead.alt@example.com', '回應=' + JSON.stringify(r).slice(0, 200));
+  });
+  await check('J', '🔒 勾「不寄給登入信箱」又沒填 alt → 拒絕，且原設定不被動到', async () => {
+    const r = await apiCall('adminUpsertStaffLead', {
+      staffLead: { email: 'lead@test.local', name: '測試主責', altEmail: '', noPrimaryMail: true },
+    }, adminToken.token);
+    evid['J-mailprefs-blocked'] = JSON.stringify(r).slice(0, 160);
+    expect(r.success === false && /必須填其他收信信箱/.test(r.error || ''), '回應=' + JSON.stringify(r).slice(0, 200));
+    const boot = await apiCall('bootstrap', {}, adminToken.token);
+    const me = ((boot.data || {}).staffLeads || []).find((s) => s.email === 'lead@test.local') || {};
+    expect(me.altEmail === 'lead.alt@example.com' && me.noPrimaryMail !== true,
+      '被拒後不該留下半套設定：' + JSON.stringify(me));
+  });
+  await check('J', '🔒 alt 格式不對 → 拒絕', async () => {
+    const r = await apiCall('adminUpsertStaffLead', {
+      staffLead: { email: 'lead@test.local', name: '測試主責', altEmail: 'not-an-email' },
+    }, adminToken.token);
+    expect(r.success === false && /格式不正確/.test(r.error || ''), '回應=' + JSON.stringify(r).slice(0, 200));
+  });
   // UI：主責登入後看得到後台管理與導師資料頁籤
   const ctx3 = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await ctx3.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
