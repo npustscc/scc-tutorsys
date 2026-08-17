@@ -1445,6 +1445,113 @@ await flow('M', async () => {
   sb.writeJsonPath_('config.json', cfg, {});
 });
 
+// ══ N：快速版切換（Pages 當入口、後端在執行期決定）═══════════════════════════════
+// FAST_BACKEND_BY_ROOT_ 是編譯期常數，兩個環境現在都還是空字串（對外通道還沒建），
+// 所以這裡把 HTML 就地改一個字串，塞進一個**假的快速版**（用 route 攔截、轉給同一個模擬器）。
+// 驗三件事：上線時按鈕出現且自動走快速版、離線時退回一般版而且系統照常能用、
+// 切換之後 API 真的打到另一個位址。字串替換沒命中就直接失敗，不會安靜地驗了個空氣。
+await flow('N', async () => {
+  const FAKE_FAST = 'https://fast.test.invalid';
+  const DEV_ROOT_KEY = "'" + ROOT_FOLDER_ID + "': ''";
+
+  // 起一個 context：patchHtml 把快速版位址塞進去，fastUp 決定假後端要不要回應 /healthz。
+  async function openWith(fastUp, sessionBackend) {
+    const hits = { healthz: 0, exec: 0, gas: 0 };
+    const c = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    // 頁面本體：注入快速版位址
+    await c.route((u) => u.href.startsWith(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`), async (route) => {
+      const upstream = await fetch(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+      const html = await upstream.text();
+      expect(html.includes(DEV_ROOT_KEY), 'FAST_BACKEND_BY_ROOT_ 的形狀變了，找不到 ' + DEV_ROOT_KEY);
+      const patched = html.replace(DEV_ROOT_KEY, "'" + ROOT_FOLDER_ID + "': '" + FAKE_FAST + "'");
+      await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: patched });
+    });
+    await c.route(FAKE_FAST + '/healthz', async (route) => {
+      hits.healthz++;
+      if (!fastUp) return route.abort('connectionrefused');
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+    });
+    await c.route(FAKE_FAST + '/exec', async (route) => {
+      hits.exec++;
+      const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: route.request().postData() || '' });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+    });
+    await c.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+      hits.gas++;
+      const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: route.request().postData() || '' });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+    });
+    await c.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+      status: 200, contentType: 'text/javascript',
+      body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+    }));
+    await c.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+    await c.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+    // session 要標上「哪個後端簽的」，否則前端會（正確地）作廢它並要求重新登入。
+    // 這一格就是「切換後端＝要重新登入」那個設計的體現，測試不能繞過它，只能配合它。
+    await c.addInitScript(({ rootId, token, exp, backend }) => {
+      localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email: 'admin@test.local', name: '測試管理員', picture: '' }));
+      localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email: 'admin@test.local', backend }));
+    }, { rootId: ROOT_FOLDER_ID, token: adminToken.token, exp: adminToken.exp, backend: sessionBackend });
+    const p = await c.newPage();
+    p.on('console', (m) => {
+      // 快速版離線那一輪，瀏覽器一定會為那個失敗的探測請求記一筆 console error——
+      // fetch 包了 try/catch 也擋不掉（那是網路層記的，不是 JS 例外）。這是預期中的，
+      // 濾掉才不會讓「console error 0」這個指標對真正的問題失去敏感度。
+      if (!fastUp && /ERR_CONNECTION_REFUSED|Failed to load resource/.test(m.text())) return;
+      if (m.type() === 'error') consoleErrors.push('[N] ' + m.text());
+    });
+    p.on('pageerror', (e) => consoleErrors.push('[N] pageerror: ' + e.message));
+    await p.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+    return { c, p, hits };
+  }
+
+  const up = await openWith(true, 'fast');
+  await check('N', '快速版上線 → 自動走快速版，API 打到新位址而不是 GAS', async () => {
+    await up.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 20000 });
+    evid['N-hits-up'] = JSON.stringify(up.hits);
+    expect(up.hits.healthz > 0, '沒有探測 /healthz');
+    expect(up.hits.exec > 0, 'API 沒有打到快速版：' + JSON.stringify(up.hits));
+    expect(up.hits.gas === 0, '仍然打了一般版：' + JSON.stringify(up.hits));
+    const tag = await up.p.locator('#backend-switch-header').textContent();
+    evid['N-tag-fast'] = (tag || '').trim();
+    expect(/快速版/.test(tag || ''), '按鈕沒顯示快速版狀態：' + tag);
+    expect(!/coma|comanage|192\.168|伺服器/i.test(tag || ''), '文案洩漏了主機名稱：' + tag);
+  });
+  await shot(up.p, 'N-快速版上線時的狀態列');
+
+  await check('N', '按「切回一般版」→ 記下選擇、作廢 session、退回登入頁（切換必須重新登入）', async () => {
+    await up.p.locator('#backend-switch-header button[data-backend="normal"]').click();
+    // 重載後：快速版仍然上線，但因為手動覆寫，這一輪要停在一般版。
+    await up.p.locator('#backend-switch-login', { hasText: '已上線' }).waitFor({ timeout: 20000 });
+    const state = await up.p.evaluate(({ rootId }) => ({
+      pref: sessionStorage.getItem('tutor_backend_pref_' + rootId),
+      session: localStorage.getItem('tutor_session_' + rootId),
+      loginVisible: getComputedStyle(document.getElementById('login-page')).display !== 'none',
+    }), { rootId: ROOT_FOLDER_ID });
+    evid['N-after-switch'] = JSON.stringify({ pref: state.pref, hasSession: !!state.session, loginVisible: state.loginVisible });
+    expect(state.pref === 'normal', '沒有記下手動切換的選擇：' + state.pref);
+    expect(!state.session, '另一個後端簽的 session 應該被清掉');
+    expect(state.loginVisible, '切換後端之後應該要求重新登入');
+  });
+  await shot(up.p, 'N-切回一般版之後的登入頁');
+  await up.c.close();
+
+  const down = await openWith(false, 'normal');
+  await check('N', '快速版離線 → 退回一般版，系統照常能用，按鈕標「目前離線」', async () => {
+    await down.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 25000 });
+    evid['N-hits-down'] = JSON.stringify(down.hits);
+    expect(down.hits.gas > 0, '沒有退回一般版：' + JSON.stringify(down.hits));
+    expect(down.hits.exec === 0, '快速版離線卻還是打了它：' + JSON.stringify(down.hits));
+    const tag = (await down.p.locator('#backend-switch-header').textContent()) || '';
+    evid['N-tag-down'] = tag.trim();
+    expect(/離線/.test(tag), '按鈕沒標離線：' + tag);
+    expect(!/切換/.test(tag), '離線時不該還給得出切換入口：' + tag);
+  });
+  await shot(down.p, 'N-快速版離線時的狀態列');
+  await down.c.close();
+});
+
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════
 await check('probe', '🔍 竄改 session token 一字元 → 拒絕', async () => {
   const bad = adminToken.token.slice(0, -2) + (adminToken.token.slice(-2) === 'aa' ? 'bb' : 'aa');

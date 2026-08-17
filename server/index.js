@@ -1,6 +1,8 @@
 // server/index.js — tutorsys 自架 Node 後端進入點（node server/index.js）
 //
-// 單一 http server，同源提供 API 與前端靜態檔（不開 CORS）：
+// 單一 http server，同源提供 API 與前端靜態檔。**預設不開 CORS**；只有在 .env 設了
+// ALLOWED_ORIGINS 時，才對 /exec 與 /healthz 這兩條回應寫死清單的 Access-Control-Allow-Origin
+// （給「GitHub Pages 當入口、後端可切換」用，見 corsHeaders_）。其餘路徑一律不開。
 //   POST /exec     GAS doPost 代理（application/x-www-form-urlencoded，payload=<JSON>；
 //                  也接受 query string 帶 payload，同 GAS 行為，供 curl 探測）
 //   GET  /exec     GAS doGet 代理
@@ -444,6 +446,20 @@ function startServer(config) {
     });
   }
 
+  // ── 跨來源存取（只給 /exec 與 /healthz）─────────────────────────────────────
+  // 「Pages 當入口、後端可切換」：頁面來源是 https://npustscc.github.io，API 打這裡。
+  // 前端送的是 form-encoded 的 POST 與 GET /healthz —— 都是 simple request，**不會觸發
+  // preflight**，所以只要在回應加一個 Allow-Origin 就夠，不必處理 OPTIONS。
+  // 三條規矩：①只回**完全相符**的白名單 origin，永遠不回 '*'；②不送 Allow-Credentials
+  // （這個系統的憑證在請求主體裡，不靠 cookie，開了只會擴大 CSRF 面）；③加 Vary: Origin，
+  // 否則中間的快取會把 A 站拿到的回應餵給 B 站。
+  // 靜態檔與 /login、/change-password、/admin/* 一律不開——那些是自架站自己的頁面在用的。
+  function corsHeaders_(req) {
+    const origin = req.headers.origin;
+    if (!origin || config.allowedOrigins.indexOf(origin) === -1) return { Vary: 'Origin' };
+    return { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' };
+  }
+
   const server = http.createServer(function (req, res) {
     let urlObj;
     try {
@@ -452,6 +468,11 @@ function startServer(config) {
       res.writeHead(400); res.end('bad request'); return;
     }
     const pathname = urlObj.pathname;
+
+    if (pathname === '/exec' || pathname === '/healthz') {
+      const h = corsHeaders_(req);
+      Object.keys(h).forEach(function (k) { res.setHeader(k, h[k]); });
+    }
 
     if (req.method === 'GET' && pathname === '/healthz') {
       logLine('GET', '/healthz', 200);

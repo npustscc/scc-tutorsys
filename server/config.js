@@ -72,6 +72,13 @@ function loadConfig(opts) {
     smtpUser: env.SMTP_USER || '',
     smtpPass: env.SMTP_PASS || '',
     mailFromName: env.MAIL_FROM_NAME || '',
+    // 跨來源存取白名單（選填，逗號分隔的完整 origin）。這個服務原本刻意同源、完全不開 CORS；
+    // 「Pages 當入口、後端可切換」需要 https://npustscc.github.io 打得到這裡，所以開一道
+    // **寫死清單**的縫。留空＝維持原本完全不開的狀態（預設 fail-closed）。
+    // 一律不接受 '*'：那會讓任何網站的 JS 都能拿使用者的 session token 打這個後端。
+    allowedOrigins: String(env.ALLOWED_ORIGINS || '').split(',')
+      .map(function (s) { return s.trim(); })
+      .filter(function (s) { return s && s !== '*'; }),
     repoRoot: repoRoot,
   };
 }

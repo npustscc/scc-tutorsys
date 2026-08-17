@@ -112,6 +112,8 @@ async function main() {
     'DATA_DIR=' + dataDir,
     'PUBLIC_DIR=' + publicDir,
     'LOGIN_THROTTLE_MS=1500',
+    // 白名單刻意混一個 '*'：config.js 必須把它丟掉（見第 19 項）。
+    'ALLOWED_ORIGINS=https://npustscc.github.io,*',
     '',
   ].join('\n'));
 
@@ -386,6 +388,41 @@ async function main() {
     // 確保是伺服器端的防護邏輯真正被觸發（見 server/index.js serveStatic 註解）。
     const traversalRes = await fetch(base2 + '/%2e%2e/%2e%2e/server/.env');
     check('18 路徑穿越被擋（404/403）', traversalRes.status === 404 || traversalRes.status === 403, 'status=' + traversalRes.status);
+
+    // ── 19. 跨來源存取白名單（「Pages 當入口、後端可切換」用；見 corsHeaders_）─────
+    // 這是這個服務唯一對外開的縫，所以四個方向都要釘：白名單內放行、白名單外不放行、
+    // 沒帶 Origin 不放行、以及**其他路徑一律不開**（/login 帶著白名單 origin 也不能有頭）。
+    const ALLOWED = 'https://npustscc.github.io';
+    const acao = (r) => r.headers.get('access-control-allow-origin');
+    const base2b = 'http://127.0.0.1:' + handle2.port;
+
+    let cr = await fetch(base2b + '/healthz', { headers: { Origin: ALLOWED } });
+    check('19a 白名單內的 origin → 回應帶 Allow-Origin（且是完整比對不是 *）',
+      acao(cr) === ALLOWED && (cr.headers.get('vary') || '').includes('Origin'),
+      'acao=' + acao(cr) + ' vary=' + cr.headers.get('vary'));
+
+    cr = await fetch(base2b + '/healthz', { headers: { Origin: 'https://evil.example.com' } });
+    check('19b 白名單外的 origin → 沒有 Allow-Origin', acao(cr) === null, 'acao=' + acao(cr));
+
+    cr = await fetch(base2b + '/healthz');
+    check('19c 沒帶 Origin → 沒有 Allow-Origin', acao(cr) === null, 'acao=' + acao(cr));
+
+    cr = await fetch(base2b + '/exec', {
+      method: 'POST', headers: { Origin: ALLOWED, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'payload=' + encodeURIComponent(JSON.stringify({ action: 'ping', rootFolderId: rootFolderId })),
+    });
+    check('19d /exec 也在白名單範圍內（前端所有 API 都走這條）', acao(cr) === ALLOWED, 'acao=' + acao(cr));
+
+    cr = await fetch(base2b + '/login', {
+      method: 'POST', headers: { Origin: ALLOWED, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'nobody@test.local', password: 'x' }),
+    });
+    check('19e /login 不開 CORS（自架站自己的登入頁在用，不該被別的來源打）',
+      acao(cr) === null, 'acao=' + acao(cr));
+
+    check('19f 白名單裡的 "*" 被丟掉，沒有進到設定裡',
+      config.allowedOrigins.length === 1 && config.allowedOrigins[0] === ALLOWED,
+      JSON.stringify(config.allowedOrigins));
 
     await handle2.close();
   } finally {
