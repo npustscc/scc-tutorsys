@@ -6,9 +6,12 @@
 // 讀寫 JSON + LockService read-modify-write。與 infosys 的關鍵差異：
 //   - infosys 是「通用 Drive JSON 讀寫代理」（readJson/updateJson/query 等泛用 action，
 //     授權靠單一 isAuthorizedUser_ 允許清單閘）。
-//   - 本系統的「學生」角色 = 任何登入的 Google 帳號（免預建名單），沒有全域允許清單可比對，
+//   - 本系統的「學生」角色 = 任何登入的 Google 帳號（免預建名單），沒有預建名單可比對，
 //     因此改成「具名業務 action」（recordSubmit / recordApprove / ...），每個 action 內部
 //     依動態角色解析（resolveRoles_）與紀錄狀態做 default-deny 授權判斷。
+//     **2026-08-17 起另外多了一道全域登入閘門**（checkSystemAccess_，見 doPost）：先依角色
+//     決定「這個人現在准不准進系統」，通過之後才輪到各 action 自己的授權判斷。兩層是獨立的，
+//     閘門放行不代表有權做任何事；閘門的允許集合存在設定檔，不是硬編碼名單。
 //   - 所有寫入 action 一律包在 withLock_（LockService.getScriptLock）內做 read-modify-write，
 //     並在同一個臨界區內 append audit_log.json（比照 infosys casesUpsert_ 的 RMW 模式，
 //     但這裡通用化成每個寫入 action 都套用，而不是只有單一函式）。
@@ -24,7 +27,29 @@ ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'prod' };
 // 緊急備援名單：即使 config.json 讀不到或帳號不在名單，這些帳號仍可視為 admin 登入以修復系統。
 // 註：列出 email 不構成後門——仍須持有該帳號的 Google 憑證（有效 ID token）才通過，
 // 攻擊者知道 email 也無法冒充。
-const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw'];
+// linkinlol528101@gmail.com＝系統維護者（2026-08-17 加）。放這裡而不是各環境的 config.users
+// 是刻意的：①一次涵蓋四個環境（含 GAS 正式版，那邊沒有可寫 config 的憑證）
+// ②全域登入閘門上線後，維護者不會因為「config 裡沒有自己的角色」被鎖在外面
+// ③設定檔壞掉時仍進得去，這正是這份名單的用途。
+// 代價：這是**硬編碼**的 admin，後台停用不了，要收回得改這一行並重新部署兩軌。
+// 想改成可從後台停用的形式，就從這裡移除、改在各環境 config.users 設 role:'admin'。
+const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw', 'linkinlol528101@gmail.com'];
+
+// ── 全域登入閘門（2026-08-17 使用者決策：關閉一般入口）─────────────────────────
+// 本系統原本刻意**沒有**全域允許清單（見檔頭：學生＝任何登入的 Google 帳號），授權全散在
+// 各 action 內。2026-08-17 起改成「先關門，再依角色放行」：只有學諮中心人員與各系系辦助理
+// 進得來，導師/系主任/學生一律擋在門外。
+//
+// 為什麼是 doPost 裡的單一位置，而不是逐個 action 加條件：本系統的 default-deny 是
+// 「每個 action 各自判斷」，逐點補條件必定漏掉日後新增的 action——這與 resolveRoles_ 裡
+// 「主責 ⇒ isAdmin 寫成單一條規則」的理由完全相同。
+//
+// 允許集合是**資料驅動**的（config.settings.accessAllowRoles），要開系主任入口只要在設定
+// 加上 'deptHead'，不必改這份程式碼、不必重新部署（使用者 2026-08-17：「另外保留系主任的
+// 登入入口，之後再做」）。可用的角色鍵見 checkSystemAccess_ 的 has 表。
+const DEFAULT_ACCESS_ALLOW_ROLES_ = ['admin', 'staffAssistant', 'deptAssistant'];
+const DEFAULT_ACCESS_DENIED_MESSAGE_ =
+  '系統目前僅開放學諮中心人員與各系系辦助理使用。若您是導師或系主任，請洽學生諮商中心。';
 
 // 導師制度預設種子（bootstrap 時若 tutorSystems.json 不存在則以此建立；admin 可事後修改/停用）。
 // durationYears = 修業年限（年級升級/畢業判斷用，Ticket D）。注意：種子只在檔案不存在時
@@ -95,6 +120,13 @@ function doPost(e) {
       userEmail = idToken ? verifyIdToken_(idToken) : null;
       if (!userEmail) return jsonResp_({ error: 'Unauthorized' });
     }
+
+    // 全域登入閘門（見 DEFAULT_ACCESS_ALLOW_ROLES_ 與 checkSystemAccess_）。
+    // 位置是刻意的：認證之後（要先知道是誰）、switch 之前（這是唯一所有 action 都會經過的點）。
+    // 回應碼與 'Unauthorized' 分開，因為前端對 Unauthorized 會靜默重走 Google 登入再重試一次——
+    // 對「這個人本來就不准進來」重試只會多打一輪後端，且畫面停在無訊息的失敗上。
+    const denied = checkSystemAccess_(userEmail, ctx);
+    if (denied) return jsonResp_({ error: denied.code, message: denied.message });
 
     let result;
     switch (action) {
@@ -403,6 +435,13 @@ function localLoginAction_(params, ctx) {
   }
 
   clearLoginFail_(email);
+  // 全域登入閘門也要套在這條路上——localLogin 免認證（它自己就是認證），走不到 dispatcher
+  // 那道檢查。放在帳密驗過之後：對帳密錯的人先回「帳號或密碼錯誤」，不會因為訊息不同而
+  // 洩漏「這個帳號存在但沒有權限」。回的是人話訊息而非 code，因為前端這條路（帳密登入表單）
+  // 直接把 error 字串顯示出來。
+  const denied = checkSystemAccess_(email, ctx);
+  if (denied) return { error: denied.message };
+
   const issued = issueSessionToken_(email);
   return {
     sessionToken: issued.token, exp: issued.exp, email: email,
@@ -438,6 +477,11 @@ function localChangePasswordAction_(params, ctx) {
     bumpLoginFail_(email); return { error: '帳號或目前密碼錯誤' };
   }
   if (current === next) return { error: '新密碼不能與目前密碼相同' };
+
+  // 同 localLoginAction_：這條路免認證，走不到 dispatcher 的閘門。進不了系統的人也不該
+  // 還能改動自己的帳號。放在帳密驗過之後，理由與那邊相同（不因訊息差異洩漏帳號存在與否）。
+  const deniedPw = checkSystemAccess_(email, ctx);
+  if (deniedPw) return { error: deniedPw.message };
 
   clearLoginFail_(email);
   const newHash = hashPasswordGas_(next);   // 同上：慢的一步留在鎖外
@@ -556,6 +600,50 @@ function maintenanceStatus() {
     classes: readJsonSafe_('classes.json', ctx, []).length,
     deptAssistants: (config.deptAssistants || []).length,
     localAccounts: Object.keys(accounts).length,
+  });
+  Logger.log(out);
+  return out;
+}
+
+// 開關全域登入閘門（見 DEFAULT_ACCESS_ALLOW_ROLES_）。三個參數都可傳 null＝該欄不動。
+//   maintenanceSetAccessPolicy('restricted', null, null)                       關門（預設允許集合）
+//   maintenanceSetAccessPolicy(null, '["admin","staffAssistant","deptAssistant","deptHead"]', null)
+//                                                                              開系主任入口
+//   maintenanceSetAccessPolicy('open', null, null)                             完全恢復對外開放
+// **自架軌沒有 clasp、也叫不到這支**：直接改 <DATA_DIR>/store/config.json 的
+// settings.accessMode / settings.accessAllowRoles / settings.accessMessage，欄位名一模一樣。
+function maintenanceSetAccessPolicy(mode, allowRolesJson, message) {
+  const who = requireMaintenanceOwner_();
+  const ctx = { root: ROOT_FOLDER_ID };
+  if (mode !== null && mode !== undefined && mode !== 'open' && mode !== 'restricted') {
+    throw new Error("mode 只能是 'open' / 'restricted' / null");
+  }
+  let roles = null;
+  if (allowRolesJson !== null && allowRolesJson !== undefined && allowRolesJson !== '') {
+    roles = JSON.parse(allowRolesJson);
+    if (!Array.isArray(roles) || !roles.length) throw new Error('allowRolesJson 必須是非空的 JSON 陣列');
+    const known = ['admin', 'director', 'staffLead', 'staffAssistant', 'deptAssistant', 'deptHead', 'tutor', 'anyone'];
+    // 打錯字的角色鍵在 checkSystemAccess_ 裡只會安靜地永遠不命中（＝把人擋在外面而設定看起來
+    // 是對的），所以在寫入的這一端就擋下來，不要讓它進到設定檔裡。
+    roles.forEach(function (r) { if (known.indexOf(r) === -1) throw new Error('未知的角色鍵：' + r); });
+  }
+  const out = withLock_(function () {
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    if (!config.settings || typeof config.settings !== 'object') config.settings = {};
+    if (mode !== null && mode !== undefined) config.settings.accessMode = mode;
+    if (roles) config.settings.accessAllowRoles = roles;
+    if (typeof message === 'string') config.settings.accessMessage = message;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, {
+      action: 'maintenanceSetAccessPolicy', by: who, at: new Date().toISOString(),
+      accessMode: config.settings.accessMode || null,
+      accessAllowRoles: config.settings.accessAllowRoles || null,
+    });
+    return JSON.stringify({
+      accessMode: config.settings.accessMode || '(未設定＝restricted)',
+      accessAllowRoles: config.settings.accessAllowRoles || DEFAULT_ACCESS_ALLOW_ROLES_,
+      accessMessage: config.settings.accessMessage || DEFAULT_ACCESS_DENIED_MESSAGE_,
+    });
   });
   Logger.log(out);
   return out;
@@ -1456,6 +1544,52 @@ function resolveRoles_(email, config, departments, classes) {
   });
 
   return roles;
+}
+
+// 全域登入閘門的判斷本體：回 null＝放行，回 {code,message}＝擋下。
+// 政策說明與「為什麼放在 doPost 單一位置」見 DEFAULT_ACCESS_ALLOW_ROLES_ 上方那段。
+//
+// fail-closed 的三個面向：
+//   ① `accessMode` 只有**明確等於 'open'** 才開放——缺值、拼錯、被誤刪一律視為關閉。
+//      反過來（缺值＝開放）會讓「設定檔壞掉」變成「大門敞開」，那是最糟的失效方向。
+//   ② config.json 讀不到時 readJsonSafe_ 回空設定 → 同樣是關閉，但 BOOTSTRAP_ADMINS 的判斷
+//      不依賴 config，所以維護者永遠進得來把系統修回來。這正是那份硬編碼名單存在的理由。
+//   ③ 被擋的請求**不寫 audit_log**：那等於讓任何未授權的人都能觸發一次帶 LockService 的寫入。
+function checkSystemAccess_(email, ctx) {
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const settings = (config && config.settings) || {};
+  if (settings.accessMode === 'open') return null;
+
+  const configured = settings.accessAllowRoles;
+  const allow = (Array.isArray(configured) && configured.length) ? configured : DEFAULT_ACCESS_ALLOW_ROLES_;
+  // 'anyone' ＝ 關閉之前的原始行為（任何通過認證的帳號）。保留這個鍵是為了緊急恢復：
+  // 不必改程式碼、不必重新部署，改一個設定就能把系統開回原樣。
+  if (allow.indexOf('anyone') !== -1) return null;
+
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  // classes.json 是這裡面最大的一個檔（300+ 班），只為了算 tutorOf 就讓**每個請求**多讀一次
+  // 並不划算，所以預設傳 []。寫成條件讀取而不是固定傳 [] 是重點：固定傳 [] 的話，日後有人
+  // 在設定裡加了 'tutor'，tutorOf 會永遠是空的，導師被安靜地擋在外面而設定看起來是對的。
+  const classes = (allow.indexOf('tutor') !== -1) ? readJsonSafe_('classes.json', ctx, []) : [];
+  const roles = resolveRoles_(email, config, departments, classes);
+
+  const has = {
+    admin:          !!roles.isAdmin,            // 含 BOOTSTRAP_ADMINS 與「主責 ⇒ isAdmin」
+    director:       !!roles.isDirector,
+    staffLead:      !!roles.isStaffLead,
+    staffAssistant: !!roles.isStaffAssistant,
+    deptAssistant:  (roles.deptAssistantOf || []).length > 0,
+    deptHead:       (roles.deptHeadOf || []).length > 0,
+    tutor:          (roles.tutorOf || []).length > 0,
+  };
+  for (let i = 0; i < allow.length; i++) {
+    if (has[allow[i]] === true) return null;
+  }
+  return {
+    code: 'AccessRestricted',
+    message: (typeof settings.accessMessage === 'string' && settings.accessMessage.trim())
+      ? settings.accessMessage.trim() : DEFAULT_ACCESS_DENIED_MESSAGE_,
+  };
 }
 
 // 上傳白名單判斷：導師本人一定可以上傳；白名單為空 = 不限（任何登入帳號皆可上傳該班）；
@@ -3089,9 +3223,10 @@ function bootstrapAction_(params, ctx, userEmail) {
 }
 
 // sessionStart：以 Google idToken 換發自建 session token（效期至當日台北 24:00）。
-// 與 infosys 的關鍵差異：本系統「學生」= 任何已登入 Google 帳號、沒有全域允許清單閘門，
-// 因此任何通過 verifyIdToken_ 的帳號都直接簽發；簽發 session ≠ 授權任何操作——授權仍由
-// 各 action 內部 resolveRoles_ default-deny 判斷。
+// 走到這裡的人已經通過 doPost 的全域登入閘門（checkSystemAccess_，2026-08-17 加），
+// 所以這支不必再判斷一次；簽發 session ≠ 授權任何操作——授權仍由各 action 內部
+// resolveRoles_ default-deny 判斷。閘門開放（accessMode:'open'）時行為回到原始設計：
+// 任何通過 verifyIdToken_ 的帳號都直接簽發。
 // 登入通知信只寄給「有角色」的帳號（admin/director/staffLead/staffAssistant/系主任/導師），
 // 一般學生登入不寄（兼顧 MailApp 每日配額與擾民）；寄信失敗不阻斷登入（mailSent:false）。
 function sessionStartAction_(params, ctx, userEmail) {

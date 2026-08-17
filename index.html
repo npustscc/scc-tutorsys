@@ -54,6 +54,10 @@
   .nav-btn:hover{background:var(--color-bg);}
   .nav-btn.active{background:var(--color-primary); color:#fff;}
   .user-box{display:flex; align-items:center; gap:8px; margin-left:auto;}
+  .backend-switch{display:flex; align-items:center; gap:6px; justify-content:center; margin-top:12px;}
+  .user-box .backend-switch{margin-top:0;}
+  .backend-tag{font-size:.78rem; font-weight:600; color:#0b6b3a; background:#e6f6ec; border-radius:999px; padding:3px 10px;}
+  .backend-tag-off{color:var(--color-text-muted, #6b7280); background:#f1f2f4; font-weight:500;}
   .user-avatar{width:30px; height:30px; border-radius:50%; background:var(--color-border);}
   .user-name{font-size:.85rem; font-weight:600; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .page-root{flex:1; padding:20px; max-width:1180px; width:100%; margin:0 auto; box-sizing:border-box;}
@@ -267,6 +271,9 @@
       </div>
     </div>
     <p id="login-error" class="login-error" style="display:none;"></p>
+    <!-- 快速版狀態／切換（見 renderBackendSwitch）。登入頁也放一個：後端決定 session 簽在哪一邊，
+         在登入之前就看得到、切得動，比登入之後才發現走錯邊好。 -->
+    <div id="backend-switch-login" class="backend-switch" style="display:none;"></div>
   </div>
 </div>
 
@@ -275,6 +282,7 @@
     <div class="app-title">導師資訊系統</div>
     <nav id="main-nav" class="main-nav"></nav>
     <div class="user-box">
+      <div id="backend-switch-header" class="backend-switch" style="display:none;"></div>
       <img id="user-avatar" class="user-avatar" alt="" />
       <span id="user-name" class="user-name"></span>
       <button id="login-history-btn" class="btn btn-ghost btn-sm">登入紀錄</button>
@@ -311,7 +319,27 @@ const ROOT_FOLDER_ID  = '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik';
 // localStorage 鍵（dev/prod 同源 npustscc.github.io，必須以 ROOT_FOLDER_ID 命名空間隔離，
 // 否則 dev 密鑰簽的 session token 會被 prod 頁面撈去打 prod 後端）
 const LS_USER_KEY    = 'tutor_user_' + ROOT_FOLDER_ID;      // { email, name, picture }
-const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, email }
+const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, email, backend }
+
+// ── 快速版（可切換的第二個後端）─────────────────────────────────────────────────
+// 入口固定是這個 GitHub Pages 網址，**後端在執行期決定**：一般版＝GAS，快速版＝中心自架的
+// 後端。載入時探測一次，通了就自動用快速版（使用者 2026-08-17 決策），畫面上有按鈕可切回。
+//
+// 網址刻意**不寫成第 14／15 個環境專屬常數**，而是用 ROOT_FOLDER_ID 當鍵查表：
+// ROOT_FOLDER_ID 本來就是 promote.mjs 與 check-env-constants 守著的環境常數，用它推導出來的
+// 值不可能跟環境錯配，也不必把推行規則表從 13 條擴到 15 條——那張表每多一條就多一個漏改的
+// 機會，而 2026-07-18 的事故就是漏改造成的。這張表在 dev 與 prod 兩份檔案裡是一模一樣的。
+// 值為空字串＝這個環境還沒有快速版，按鈕整個不出現（對外通道建好才填）。
+const FAST_BACKEND_BY_ROOT_ = {
+  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': '',   // 正式版
+  '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT': '',   // 測試版
+};
+const FAST_BACKEND_URL = FAST_BACKEND_BY_ROOT_[ROOT_FOLDER_ID] || '';   // origin，不含路徑
+// 手動切回一般版的覆寫。用 sessionStorage 不用 localStorage：使用者決策是「自動優先快速版」，
+// 所以這個覆寫只在這個分頁有效，下次重新打開網址仍然自動優先快速版。
+// （不存的話「切回一般版」會在重新載入時被自動優先立刻推回去，按鈕等於沒有作用。）
+const SS_BACKEND_PREF_KEY = 'tutor_backend_pref_' + ROOT_FOLDER_ID;
+const FAST_PROBE_TIMEOUT_MS = 1200;
 
 // 學期物件若未設定額度，回退到系統設計的預設值（每學期 5 份班會 + 1 份導生活動）。
 const DEFAULT_QUOTA_MEETING  = 5;
@@ -341,6 +369,11 @@ let bootstrapData = null;   // 最近一次 bootstrap 回傳（含 roles/departm
 let currentPage   = null;
 let refreshPromise = null;
 let refreshResolve = null;
+// 這次載入實際要打的後端（見 FAST_BACKEND_BY_ROOT_）。所有 proxyCall 都走 activeBackendUrl，
+// 不要再直接用 APPS_SCRIPT_URL——那個常數現在只代表「一般版的位址」，不代表「現在打誰」。
+let activeBackendUrl = APPS_SCRIPT_URL;
+let activeBackend    = 'normal';   // 'normal'（GAS）或 'fast'（自架）
+let fastBackendOnline = false;     // 這次載入的探測結果（給按鈕顯示用）
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ── 小工具 ───────────────────────────────────────────────────────────────────
@@ -356,7 +389,11 @@ function saveSession(token, exp) {
   sessionToken = token;
   sessionExp = Number(exp) || 0;
   try {
-    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({ token: token, exp: sessionExp, email: currentUser && currentUser.email }));
+    // backend：這個 token 是哪個後端簽的。兩個後端的 SESSION_SECRET 各自產生，一邊簽的
+    // token 在另一邊必然驗不過——不記下來的話，切換後端後會拿著注定失敗的 token 一直重試。
+    localStorage.setItem(LS_SESSION_KEY, JSON.stringify({
+      token: token, exp: sessionExp, email: currentUser && currentUser.email, backend: activeBackend,
+    }));
   } catch (e) {}
 }
 function clearSession() {
@@ -602,10 +639,16 @@ function formatDateTime(iso) {
 // ══════════════════════════════════════════════════════════════════════════════
 // ── Google Identity Services 登入 ───────────────────────────────────────────
 // ══════════════════════════════════════════════════════════════════════════════
-window.addEventListener('load', () => {
+window.addEventListener('load', async () => {
   applyTrackBranding();
   // 帳密登入不依賴 Google，先接起來——即使 GIS 掛掉（被擋、離線）系辦助理仍能登入。
   wireLocalLogin();
+
+  // 先決定這次要打哪個後端，**再**初始化 Google 登入：auto_select 會自己觸發
+  // handleCredentialResponse → sessionStart，後端沒選好的話 session 會簽在錯的一邊。
+  // 探測最多 FAST_BACKEND_URL 設定的逾時（通常 <100ms），沒設定快速版時整段直接跳過。
+  await resolveBackend();
+  renderBackendSwitch();
 
   if (!CLIENT_ID || CLIENT_ID.indexOf('__') === 0) {
     showLoginError('尚未設定 Google OAuth Client ID。');
@@ -644,8 +687,12 @@ window.addEventListener('load', () => {
   }
   if (storedUser && storedUser.email) {
     currentUser = storedUser;
+    // 後端不同的 session 一律作廢：兩邊的 SESSION_SECRET 各自產生，另一邊簽的 token 拿去
+    // 驗必然是 'Session expired'，留著只會多打一輪後端再靜默重登。舊資料沒有 backend 欄位，
+    // 視為一般版（那時只有一個後端）。
+    const sameBackend = (storedSession && (storedSession.backend || 'normal')) === activeBackend;
     const valid = storedSession && storedSession.token &&
-                  storedSession.email === storedUser.email &&
+                  storedSession.email === storedUser.email && sameBackend &&
                   Number(storedSession.exp) > Math.floor(Date.now() / 1000) + 30;
     if (valid) {
       sessionToken = storedSession.token;
@@ -700,6 +747,14 @@ async function handleCredentialResponse(response) {
     // 有角色的帳號會收到登入通知信；Gmail 可能把它分到垃圾郵件/促銷，主動提醒一次
     if (s.mailSent) showToast('已寄出登入通知信；若未在收件匣，請檢查垃圾郵件分類', 'info');
   } catch (e) {
+    // 被全域登入閘門擋下不是「簽發失敗」，不能降級繼續——降級的話會接著跑 afterLogin，
+    // 使用者先看到一個誤導的「憑證簽發失敗」toast，再看到真正的原因。就停在這裡說明。
+    if (e && e.accessRestricted) {
+      gIdToken = null;
+      if (refreshResolve) { const r = refreshResolve; refreshResolve = null; refreshPromise = null; r(false); }
+      showLoginError(e.message);
+      return;
+    }
     console.error('sessionStart 失敗，降級為一小時效期登入：', e);
     showToast('登入憑證簽發失敗，本次以一小時效期登入', 'error');
   }
@@ -763,7 +818,7 @@ async function proxyCallNoAuth(action, params, retryHttp) {
   form.append('payload', payload);
   let res;
   try {
-    res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
+    res = await fetch(activeBackendUrl, { method: 'POST', body: form });
   } catch (e) {
     throw new Error('網路連線失敗，請確認網路後再試一次。');
   }
@@ -887,8 +942,73 @@ function showForcedChangePassword(email, currentPassword) {
 // 自架伺服器版？——build-public.js 會把 APPS_SCRIPT_URL 換成本機 origin，所以「不是
 // script.google.com」就是自架軌。自架軌**沒有 Google 登入**（區網 IP 不是 Google OAuth 的
 // 合法 origin），登入一律走 server 提供的 login.html 本地帳密。
+// 注意：這問的是「**這份前端**是誰服務的」，不是「現在打哪個後端」。從 Pages 切到快速版時
+// 這個函式仍然回 false——頁面來源還是 npustscc.github.io，Google 登入照樣可用（這正是
+// 「Pages 當入口、後端可切換」比「直接連自架站」好的地方）。要問後端看 activeBackend。
 function isSelfHosted() {
   return !/^https:\/\/script\.google\.com\//.test(APPS_SCRIPT_URL);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 快速版：探測、選擇、切換 ─────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+// 探測是 GET /healthz，簡單請求；快速版那端必須回 Access-Control-Allow-Origin 才讀得到。
+// 失敗（離線、逾時、CORS 沒開、憑證有問題）一律當成離線——fail-closed 到一般版，
+// 那是永遠在的那一個。
+async function probeFastBackend() {
+  if (!FAST_BACKEND_URL) return false;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FAST_PROBE_TIMEOUT_MS);
+  try {
+    const r = await fetch(FAST_BACKEND_URL + '/healthz', { signal: ctrl.signal, cache: 'no-store' });
+    return r.ok;
+  } catch (e) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 決定這次載入要打誰。**必須在 Google 登入初始化之前跑完**：auto_select 會自己觸發
+// handleCredentialResponse → sessionStart，那時後端要是還沒選好，session 就會簽在錯的一邊。
+async function resolveBackend() {
+  if (isSelfHosted() || !FAST_BACKEND_URL) return;   // 已經在自架站上／這個環境還沒有快速版
+  fastBackendOnline = await probeFastBackend();
+  let pref = null;
+  try { pref = sessionStorage.getItem(SS_BACKEND_PREF_KEY); } catch (e) {}
+  const useFast = fastBackendOnline && pref !== 'normal';
+  activeBackend = useFast ? 'fast' : 'normal';
+  activeBackendUrl = useFast ? (FAST_BACKEND_URL + '/exec') : APPS_SCRIPT_URL;
+}
+
+// 切換＝寫下覆寫、清掉 session（另一邊驗不過）、重新載入。整頁重載是刻意的：
+// 後端換了之後 bootstrap、快取、附件路徑全都要重來，就地換比重載更容易留下不一致的狀態。
+function switchBackend(to) {
+  try { sessionStorage.setItem(SS_BACKEND_PREF_KEY, to); } catch (e) {}
+  clearSession();
+  location.reload();
+}
+
+// 按鈕：登入頁與主畫面各一個容器，同一段狀態。文案不出現任何伺服器/主機名稱。
+function renderBackendSwitch() {
+  const boxes = [$('backend-switch-login'), $('backend-switch-header')].filter(Boolean);
+  if (!boxes.length) return;
+  const show = !isSelfHosted() && !!FAST_BACKEND_URL;
+  boxes.forEach((box) => {
+    box.style.display = show ? '' : 'none';
+    if (!show) return;
+    if (activeBackend === 'fast') {
+      box.innerHTML = '<span class="backend-tag">⚡ 快速版</span>' +
+        '<button type="button" class="btn btn-ghost btn-sm" data-backend="normal">切回一般版</button>';
+    } else if (fastBackendOnline) {
+      box.innerHTML = '<button type="button" class="btn btn-ghost btn-sm" data-backend="fast">⚡ 快速版：已上線 ▸ 切換</button>';
+    } else {
+      box.innerHTML = '<span class="backend-tag backend-tag-off">快速版：目前離線</span>';
+    }
+    box.querySelectorAll('button[data-backend]').forEach((b) => {
+      b.addEventListener('click', () => switchBackend(b.getAttribute('data-backend')));
+    });
+  });
 }
 
 // 本機登出（清鍵）；主動按「登出」時先請後端註銷該帳號全部裝置的 token（best-effort）。
@@ -999,7 +1119,7 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
 
   let res;
   try {
-    res = await fetch(APPS_SCRIPT_URL, { method: 'POST', body: form });
+    res = await fetch(activeBackendUrl, { method: 'POST', body: form });
   } catch (e) {
     throw new Error('網路連線失敗，請確認網路後再試一次。');
   }
@@ -1023,6 +1143,17 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
     : (data.data && typeof data.data === 'object' && data.data.error) ? data.data.error : null;
 
   if (err) {
+    // 全域登入閘門擋下（後端 checkSystemAccess_）：這個人本來就不准進來，重試沒有意義，
+    // 也不要走下面那條「靜默重走 Google 登入」——那會讓畫面卡在登入迴圈而不是說明原因。
+    // 清掉 session 避免下次載入又拿著憑證重來一輪。
+    if (err === 'AccessRestricted') {
+      const msg = (data.data && data.data.message) ||
+        '系統目前僅開放學諮中心人員與各系系辦助理使用。';
+      clearSession();
+      const e = new Error(msg);
+      e.accessRestricted = true;   // afterLogin 據此改用原文顯示，不加「讀取資料失敗：」前綴
+      throw e;
+    }
     // 過午夜或 token 失效/竄改：清 session → 靜默重走 Google 登入（handleCredentialResponse
     // 會自動打 sessionStart 換新 session）→ 重試一次。sessionStart 自己失敗不重試
     // （防 refreshIdToken → sessionStart → 又失敗的迴圈），retryAuth < 1 防整體重試迴圈。
@@ -1066,10 +1197,13 @@ async function afterLogin() {
     renderNav();
     showPage(defaultPageId());
   } catch (e) {
-    console.error(e);
+    // 被全域登入閘門擋下不寫 console.error：那不是錯誤，是設計好的狀態。
+    // （e2e 把 console error 當成品質指標，把預期中的狀態記成錯誤會讓那個指標失去意義。）
+    if (!(e && e.accessRestricted)) console.error(e);
     $('app').style.display = 'none';
     $('login-page').style.display = '';
-    showLoginError('讀取資料失敗：' + e.message);
+    // 被全域登入閘門擋下：那不是「失敗」，是系統現在就不開放給這個人，照原文顯示。
+    showLoginError(e && e.accessRestricted ? e.message : '讀取資料失敗：' + e.message);
   } finally {
     hideLoading();
   }
