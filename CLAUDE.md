@@ -53,13 +53,25 @@ scc-server 做 git pull → build-public → restart → healthz，並比對遠�
 維運細節（登入機制、SMTP、備份、資料匯入）見 `server/README.md` 與 memory
 `tutorsys-onprem-deploy`。
 
-**GAS＋GitHub Pages 軌已凍結（2026-07-16 A 方案決策）**：下表的 GAS 部署維持現版服務
-既有使用者，**不再接收新功能**（致命 bug 才例外 clasp push）。cutover 完成後整軌下架
-（公告 → 唯讀觀察期 → Pages 換轉址頁 → 下架）。
+**⚠️ 2026-08-17 起「凍結」政策取消**：使用者當日決定「入口固定留在 GitHub Pages、後端在執行期
+決定」（一般版／快速版），所以 **Pages＋GAS prod 就是現在對外的公開入口**，
+每次「推行到正式版」這條軌的兩半都要跟上，**不再是「致命 bug 才例外」**。
+（原本 2026-07-16 A 方案的凍結敘述已作廢；cutover 完成後仍會整軌下架：
+公告 → 唯讀觀察期 → Pages 換轉址頁 → 下架。）
 
-**「凍結」是指不往這條軌加新功能，不是「這兩個檔案永遠不動」。** GitHub Pages 的來源是
-`gas-frozen` 分支而不是 master，所以平常往 master 推的 commit 不會影響 Pages 網站；
-但**每次「推行到正式版」時，這條軌的兩半要一起跟上**，否則會留下版本錯配：
+**這條政策留在原地不改，就已經造成過一次事故：** `0d59cdf`（08-17）「推行到正式版：全域登入
+閘門」只快轉了 `gas-frozen`（前端），後端沒 clasp push，GAS prod 一直服務 @10（08-12 的碼）
+→ **公開站的登入閘門整整五天沒有在跑**，導師／系主任／學生照樣進得去，而 git log 看起來是
+完成的。08-17 22:30 才補上（@11）。**commit 訊息寫的是意圖，不是事實。**
+
+驗收要兩半各自驗，不要只看 git log：
+- 後端：`clasp deployments` 看 `@N` 有沒有前進；要更確定就把部署中那版拉下來 grep
+  （暫存目錄放只含 scriptId 的 `.clasp.json` → `clasp pull --versionNumber <N>`，唯讀）。
+- 前端：抓 `https://npustscc.github.io/scc-tutorsys/` 下來與本機 `index.html` 比 sha256
+  （Pages 有快取，通常 30 秒～2 分鐘後才一致）。
+
+GitHub Pages 的來源是 `gas-frozen` 分支而不是 master，所以平常往 master 推的 commit
+不會影響 Pages 網站；但**每次「推行到正式版」時，這條軌的兩半要一起跟上**，否則會留下版本錯配：
 
 1. 後端：`clasp push`（根 `.clasp.json` → prod scriptId，`.claspignore` 只放行
    `Code.gs`＋`appsscript.json`）→ `clasp create-version` → `clasp redeploy <deploymentId> -V <版本>`
@@ -167,7 +179,8 @@ cyber 類內容，官方也說它的找 bug 優勢不含資安導向分析）。
   改壞即紅燈；見 `test/README.md`）
 - 完成後 `git add dev/Code.gs dev/index.html`（視改動範圍）、`git commit`、`git push origin master`
 - 部署：`node scripts/deploy-onprem.mjs dev` → 使用者在 `http://192.168.100.123:8790/` 驗證
-  （GAS 軌已凍結，不再 clasp push）
+  （**dev 的驗證一律在自架 8790 做，不必推 GAS dev**——那條軌只是備用；
+  正式版就不一樣了，見下節）
 
 **推行到正式版（使用者明確說「推行到正式版」或「promote」）：**
 
@@ -179,7 +192,24 @@ node --test test/*.test.js
 git add Code.gs index.html dev/Code.gs dev/index.html
 git commit -m "推行到正式版：[功能說明]"
 git push origin master
-node scripts/deploy-onprem.mjs prod  # 部署到自架正式實例（GAS 軌凍結，不 clasp push）
+node scripts/deploy-onprem.mjs prod  # 1/3 自架正式實例
+
+# 2/3 GAS prod 後端（**不能省**——這裡就是對外公開入口的後端；漏掉它就是 0d59cdf 那次事故）
+#     Code.gs 沒變才可以跳過，先用 git diff <上次推的 commit>..HEAD -- Code.gs 確認
+npx -y @google/clasp@latest push -f
+npx -y @google/clasp@latest create-version "<功能說明>（<commit>）"
+npx -y @google/clasp@latest redeploy <index.html 裡 APPS_SCRIPT_URL 那一串> -V <新版本> -d "同上"
+
+# 3/3 Pages 前端
+git push origin <剛才的 commit>:gas-frozen
+```
+
+**推完的驗收（三處都要看，不要只看 git log）：**
+
+```bash
+npx -y @google/clasp@latest deployments        # @N 有沒有前進
+curl -s https://npustscc.github.io/scc-tutorsys/ | sha256sum   # 與本機 index.html 比（等 30s～2min）
+curl -sL "<APPS_SCRIPT_URL>"                  # 應回 service:"… (PROD)"
 ```
 
 **不要再用手動 `Copy-Item`／`cp` 複製 dev→prod**（原本的 PowerShell 流程在 Linux 端也照抄不動）。
