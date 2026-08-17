@@ -700,6 +700,14 @@ async function handleCredentialResponse(response) {
     // 有角色的帳號會收到登入通知信；Gmail 可能把它分到垃圾郵件/促銷，主動提醒一次
     if (s.mailSent) showToast('已寄出登入通知信；若未在收件匣，請檢查垃圾郵件分類', 'info');
   } catch (e) {
+    // 被全域登入閘門擋下不是「簽發失敗」，不能降級繼續——降級的話會接著跑 afterLogin，
+    // 使用者先看到一個誤導的「憑證簽發失敗」toast，再看到真正的原因。就停在這裡說明。
+    if (e && e.accessRestricted) {
+      gIdToken = null;
+      if (refreshResolve) { const r = refreshResolve; refreshResolve = null; refreshPromise = null; r(false); }
+      showLoginError(e.message);
+      return;
+    }
     console.error('sessionStart 失敗，降級為一小時效期登入：', e);
     showToast('登入憑證簽發失敗，本次以一小時效期登入', 'error');
   }
@@ -1023,6 +1031,17 @@ async function proxyCall(action, params, retryHttp, retryAuth) {
     : (data.data && typeof data.data === 'object' && data.data.error) ? data.data.error : null;
 
   if (err) {
+    // 全域登入閘門擋下（後端 checkSystemAccess_）：這個人本來就不准進來，重試沒有意義，
+    // 也不要走下面那條「靜默重走 Google 登入」——那會讓畫面卡在登入迴圈而不是說明原因。
+    // 清掉 session 避免下次載入又拿著憑證重來一輪。
+    if (err === 'AccessRestricted') {
+      const msg = (data.data && data.data.message) ||
+        '系統目前僅開放學諮中心人員與各系系辦助理使用。';
+      clearSession();
+      const e = new Error(msg);
+      e.accessRestricted = true;   // afterLogin 據此改用原文顯示，不加「讀取資料失敗：」前綴
+      throw e;
+    }
     // 過午夜或 token 失效/竄改：清 session → 靜默重走 Google 登入（handleCredentialResponse
     // 會自動打 sessionStart 換新 session）→ 重試一次。sessionStart 自己失敗不重試
     // （防 refreshIdToken → sessionStart → 又失敗的迴圈），retryAuth < 1 防整體重試迴圈。
@@ -1066,10 +1085,13 @@ async function afterLogin() {
     renderNav();
     showPage(defaultPageId());
   } catch (e) {
-    console.error(e);
+    // 被全域登入閘門擋下不寫 console.error：那不是錯誤，是設計好的狀態。
+    // （e2e 把 console error 當成品質指標，把預期中的狀態記成錯誤會讓那個指標失去意義。）
+    if (!(e && e.accessRestricted)) console.error(e);
     $('app').style.display = 'none';
     $('login-page').style.display = '';
-    showLoginError('讀取資料失敗：' + e.message);
+    // 被全域登入閘門擋下：那不是「失敗」，是系統現在就不開放給這個人，照原文顯示。
+    showLoginError(e && e.accessRestricted ? e.message : '讀取資料失敗：' + e.message);
   } finally {
     hideLoading();
   }

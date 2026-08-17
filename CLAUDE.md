@@ -23,10 +23,16 @@
    `CLIENT_ID` / `APPS_SCRIPT_URL` / `ROOT_FOLDER_ID` 直接呼叫後端。因此每個 action 內部
    都必須依動態角色解析（`resolveRoles_`）做 default-deny 授權判斷；新增 action 時預設它
    「需要授權」，並在該 action 內明確寫出誰能呼叫、檢查什麼。
-   - 與 infosys 不同：本系統「學生」角色 = 任何已登入的 Google 帳號（免預建名單），因此
-     **沒有** infosys 那種 doPost 層級的全域 `isAuthorizedUser_` 允許清單閘門——認證
-     （`verifyIdToken_`，所有 action 都要過）與授權（各 action 內依角色/紀錄狀態判斷）是
-     分開的兩層，不要混淆。
+   - 認證（`verifyIdToken_`／`verifySessionToken_`，所有 action 都要過）與授權（各 action
+     內依角色/紀錄狀態判斷）是分開的兩層，不要混淆。
+   - **2026-08-17 起在兩層之間多了第三層：全域登入閘門 `checkSystemAccess_`**（doPost 認證後、
+     switch 前）。使用者決策「關閉一般入口」：只有管理員／學諮中心助理／系辦助理進得來，
+     導師、系主任、學生一律擋下。允許集合資料驅動（`config.settings.accessAllowRoles`，
+     角色鍵見該函式），**預設 fail-closed**（沒設定＝關閉）；要開系主任入口只要加 `'deptHead'`，
+     不必改程式碼。GAS 軌用 `maintenanceSetAccessPolicy()` 改，自架軌直接改
+     `<DATA_DIR>/store/config.json`。**閘門放行 ≠ 有權做任何事**，各 action 的 default-deny 照舊。
+   - 自架軌的 `/login`、`/change-password` 不經過 doPost，由 `server/index.js` 自己呼叫
+     `host.checkAccess()`——新增任何「不走 doPost 的入口」時必須一併補上，否則閘門在那條路上等於沒有。
 2. **機密與個資永不進 repo。** `creds.json`（OAuth client secret）、`*.csv`、`*.docx`/`*.xlsx`/`*.xlsm`、
    `.drive-token.json`、`.clasprc.json` 已列入 `.gitignore`；新增這類檔案前先確認被 ignore。
    絕不 `git add -A` 一把梭，commit 前用 `git status` 檢查 staged 內容。

@@ -183,7 +183,11 @@ function createEmulator(opts) {
       users: { 'admin@test.local': { name: '測試管理員', role: 'admin' } },
       staffLeads: [{ email: 'lead@test.local', name: '測試主責', disabled: false }],
       staffAssistants: [{ email: 'assistant@test.local', name: '測試助理', leadEmail: 'lead@test.local', disabled: false }],
-      settings: {},
+      // accessMode:'open' ＝ 全域登入閘門（2026-08-17，checkSystemAccess_）之前的行為。
+      // e2e 的主體是導師上傳→系主任核章→中心核章這條線，而閘門預設就是把導師與系主任
+      // 擋在門外；不開的話這裡的 flow 幾乎全部走不完。閘門本身的覆蓋在
+      // test/access-gate.test.js（純函式）與 server/scripts/smoke.mjs（自架軌 /login 路徑）。
+      settings: { accessMode: 'open' },
     }, {});
     sb.writeJsonPath_('colleges.json', [
       { id: '農學院', name: '農學院', order: 0, disabled: false },

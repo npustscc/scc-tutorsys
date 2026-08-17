@@ -368,12 +368,19 @@ function createHost(opts) {
   function sessionStart(email, ua, ip) {
     return sandbox.sessionStartAction_({ ua: ua, ip: ip }, { root: rootFolderId }, email);
   }
+  // 全域登入閘門（Code.gs 的 checkSystemAccess_）。自架軌的 /login 不經過 doPost，
+  // 所以那道閘門碰不到它——必須由 server/index.js 在簽發 session 之前自己叫一次。
+  // 判斷邏輯不在這裡重寫一份：兩軌永遠跑同一份 Code.gs，這是這個 server/ 的核心前提。
+  function checkAccess(email) {
+    return sandbox.checkSystemAccess_(email, { root: rootFolderId });
+  }
 
   return {
     sandbox: sandbox,
     exec: exec,
     doGet: doGetCall,
     sessionStart: sessionStart,
+    checkAccess: checkAccess,
     rootFolderId: rootFolderId,
   };
 }

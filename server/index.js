@@ -195,6 +195,23 @@ function startServer(config) {
     }
 
     failMap.delete(key);
+
+    // 全域登入閘門（Code.gs 的 checkSystemAccess_）。這條路不經過 doPost，所以那道閘門
+    // 碰不到它——漏掉這一段的話「關閉一般入口」在自架軌等於沒做。放在帳密驗過之後：
+    // 密碼錯的人先看到「帳號或密碼錯誤」，訊息差異不會洩漏帳號存不存在。
+    let denied = null;
+    try {
+      denied = host.checkAccess(email);
+    } catch (e) {
+      // 閘門本身壞掉時 fail-closed：寧可擋下也不要在判斷不了的狀態下放人進來。
+      logLine('POST', '/login', 200, 'access gate error');
+      return sendJson(res, 200, { success: false, error: '系統暫時無法驗證登入權限，請稍後再試' });
+    }
+    if (denied) {
+      logLine('POST', '/login', 200, 'access restricted');
+      return sendJson(res, 200, { success: false, error: denied.message });
+    }
+
     const ua = String(req.headers['user-agent'] || '').slice(0, 200);
     let result;
     try {
@@ -256,6 +273,20 @@ function startServer(config) {
     }
 
     failMap.delete(key);
+
+    // 同 /login：進不了系統的人也不該還能改動自己的帳號（見 handleLogin 的閘門段）。
+    let deniedPw = null;
+    try {
+      deniedPw = host.checkAccess(email);
+    } catch (e) {
+      logLine('POST', '/change-password', 200, 'access gate error');
+      return sendJson(res, 200, { success: false, error: '系統暫時無法驗證登入權限，請稍後再試' });
+    }
+    if (deniedPw) {
+      logLine('POST', '/change-password', 200, 'access restricted');
+      return sendJson(res, 200, { success: false, error: deniedPw.message });
+    }
+
     // 重讀一次再寫，縮小與 admin 端同時改同一份 users.json 的覆寫窗口。
     const fresh = readUsersSync_(config.dataDir);
     const target = fresh[email] || entry;

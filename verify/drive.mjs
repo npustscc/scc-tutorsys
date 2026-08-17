@@ -1386,6 +1386,65 @@ await flow('H', async () => {
   });
 });
 
+// ══ M：全域登入閘門關閉時，被擋的人看到的是說明而不是錯誤 ═══════════════════════
+// 這一段驗的是**使用者真的會看到的那個畫面**。閘門的判斷邏輯有單元測試（access-gate）、
+// 自架軌的 /login 路徑有 smoke 蓋到，但「導師拿著有效 session 進來會看到什麼」只有這裡驗得到——
+// 而那正是這個功能對外的全部樣貌。放在最後：它會把 config 切成 restricted，跑完再切回來。
+await flow('M', async () => {
+  const sb = servers.em.sandbox;
+  const cfg = sb.readJsonSafe_('config.json', {}, {});
+  const savedSettings = cfg.settings;
+  cfg.settings = {};                                   // 缺 accessMode ＝ restricted（fail-closed）
+  sb.writeJsonPath_('config.json', cfg, {});
+
+  async function openAs(email, name) {
+    const t = servers.em.mint(email);
+    const c = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await c.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+      const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: route.request().postData() || '' });
+      await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+    });
+    await c.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+      status: 200, contentType: 'text/javascript',
+      body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+    }));
+    await c.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+    await c.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+    await c.addInitScript(({ rootId, token, exp, email, name }) => {
+      localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email, name, picture: '' }));
+      localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email }));
+    }, { rootId: ROOT_FOLDER_ID, token: t.token, exp: t.exp, email, name });
+    const p = await c.newPage();
+    p.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[M] ' + m.text()); });
+    p.on('pageerror', (e) => consoleErrors.push('[M] pageerror: ' + e.message));
+    await p.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+    return { c, p };
+  }
+
+  const tutor = await openAs('lee@test.local', '李新師');
+  await check('M', '閘門關閉：導師帶著有效 session 也進不去，且畫面說明原因（不是原始錯誤碼）', async () => {
+    await tutor.p.locator('#login-error').waitFor({ state: 'visible', timeout: 15000 });
+    const msg = (await tutor.p.locator('#login-error').textContent()) || '';
+    evid['M-blocked-message'] = msg.trim();
+    expect(/僅開放/.test(msg), '訊息不像人話：' + msg);
+    expect(!/AccessRestricted|讀取資料失敗/.test(msg), '把內部錯誤碼或誤導的前綴顯示出來了：' + msg);
+    const appVisible = await tutor.p.locator('#app').isVisible();
+    expect(!appVisible, '被擋下的人不該看到系統畫面');
+  });
+  await shot(tutor.p, 'M-閘門關閉時導師看到的畫面');
+  await tutor.c.close();
+
+  const admin = await openAs('admin@test.local', '測試管理員');
+  await check('M', '閘門關閉時管理員照樣進得去（否則就是把自己也鎖在外面了）', async () => {
+    await admin.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 20000 });
+    expect(await admin.p.locator('#app').isVisible(), '管理員應該看得到系統畫面');
+  });
+  await admin.c.close();
+
+  cfg.settings = savedSettings;                        // 切回 open，不影響後面的探針
+  sb.writeJsonPath_('config.json', cfg, {});
+});
+
 // ══ 🔍 加碼探針 ═══════════════════════════════════════════════════════════════
 await check('probe', '🔍 竄改 session token 一字元 → 拒絕', async () => {
   const bad = adminToken.token.slice(0, -2) + (adminToken.token.slice(-2) === 'aa' ? 'bb' : 'aa');

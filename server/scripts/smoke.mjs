@@ -66,7 +66,11 @@ function seedStore(dataDir) {
     users: { 'admin@test.local': { name: '測試管理員', role: 'admin' } },
     staffLeads: [{ email: 'lead@test.local', name: '測試主責', disabled: false }],
     staffAssistants: [],
-    settings: {},
+    // accessMode:'open' ＝ 全域登入閘門（2026-08-17）之前的行為。這支 smoke 的主體是
+    // 導師上傳→核章的完整流程，而閘門預設就是把導師擋在門外——不開的話下面十幾項全部
+    // 驗不到。**閘門本身不是靠這裡驗的**：純函式在 test/access-gate.test.js，
+    // 自架軌 /login 這條路徑則由下面第 10a-0 項專門測（那項會把它切回 restricted）。
+    settings: { accessMode: 'open' },
   });
   writeJson_(path.join(storeDir, 'colleges.json'), [
     { id: '農學院', name: '農學院', order: 0, disabled: false },
@@ -222,6 +226,29 @@ async function main() {
     // 10. 亂湊 idToken → 'Unauthorized'（驗證 UrlFetchApp 防漏 throw 被 verifyIdToken_ 吃掉、fail-closed）。
     r = await call(base, { action: 'ping', rootFolderId: rootFolderId, idToken: 'not-a-real-jwt-garbage' });
     check('10 亂湊 idToken → Unauthorized', r.success === true && r.data.error === 'Unauthorized', JSON.stringify(r));
+
+    // 10a-0. 全域登入閘門在**自架軌的 /login 這條路徑**上真的有效（2026-08-17）。
+    // 這條路不經過 doPost，所以 Code.gs 的 dispatcher 閘門碰不到它；漏掉這一段的話
+    // 「關閉一般入口」在自架軌等於沒做，而且畫面上完全看不出來。
+    // 做法是把 config.json 切回 restricted 跑兩次登入，驗完再切回 open 讓後面的流程照跑
+    // （settings 是每個請求現讀的，不必重啟服務）。
+    {
+      const cfgPath = path.join(dataDir, 'store', 'config.json');
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+      cfg.settings = {};                                   // 缺 accessMode ＝ restricted
+      fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+
+      r = await login(base, 'wang@test.local', 'wangpass123');
+      check('10a-0 閘門關閉時導師帳號被擋（密碼是對的）',
+        r.success === false && /僅開放/.test(String(r.error || '')), JSON.stringify(r));
+
+      r = await login(base, 'admin@test.local', 'brandnewpass1');   // 第 5g 項改過的密碼
+      check('10a-1 閘門關閉時管理員照樣進得來',
+        r.success === true && !!(r.data && r.data.sessionToken), JSON.stringify(r));
+
+      cfg.settings = { accessMode: 'open' };
+      fs.writeFileSync(cfgPath, JSON.stringify(cfg));
+    }
 
     // 導師 wang@test.local 另開一個 session（在第 15 項登出 admin 之前先開好，
     // 用來在第 16 項證明「未受影響的另一帳號 session」在重啟後仍然有效）。
