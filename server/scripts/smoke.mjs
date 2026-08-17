@@ -457,6 +457,21 @@ async function main() {
       config.allowedOrigins.length === 1 && config.allowedOrigins[0] === ALLOWED,
       JSON.stringify(config.allowedOrigins));
 
+    // 20. Google tokeninfo 這條路真的通得到（Pages 當入口之後，Google 登入靠它）。
+    // 阻擋清單的部分在 test/urlfetch-guard.test.js（離線可測）；這裡驗的是**真的打得出去**——
+    // 那正是 2026-08-17 壞掉的地方（host 把它跟 Drive REST 一起擋，於是 Pages 一切到自架
+    // 後端就每個人都 Unauthorized，而畫面上只看得到「Unauthorized」四個字）。
+    // 需要外網。假 token 預期回 4xx；回 0 代表連不出去，那就是這條路壞了。
+    try {
+      const probe = handle2.host.sandbox.UrlFetchApp.fetch(
+        'https://oauth2.googleapis.com/tokeninfo?id_token=smoke-not-a-real-token');
+      check('20 Google tokeninfo 打得出去（Google 登入靠這條）',
+        probe.getResponseCode() >= 400 && probe.getResponseCode() < 500,
+        'HTTP ' + probe.getResponseCode() + '（0 = 連不出去）');
+    } catch (e) {
+      check('20 Google tokeninfo 打得出去（Google 登入靠這條）', false, e.message);
+    }
+
     await handle2.close();
   } finally {
     try { fs.rmSync(tmpRoot, { recursive: true, force: true }); } catch (e) { /* 清理失敗不影響結果判定 */ }

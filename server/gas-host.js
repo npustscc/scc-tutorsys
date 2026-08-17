@@ -205,12 +205,46 @@ function createHost(opts) {
       },
     },
     UrlFetchApp: {
-      // 防漏檢查：自架環境不該有任何 Drive REST API / tokeninfo 外部 HTTP 呼叫
-      // （所有 Drive I/O 都由下方的儲存 seam 接管）。verifyIdToken_ 內部有 try/catch，
-      // 收到 throw 會回 null → doPost 回 Unauthorized，這是預期的 fail-closed 行為，
-      // 不是 bug——本系統不支援自架環境下的 Google 登入，一律走 /login 本地帳密。
-      fetch: function (url) {
-        throw new Error('UrlFetchApp.fetch 不應被呼叫（自架伺服器防漏檢查）：' + String(url));
+      // 防漏檢查（放行清單）：自架環境**不該有任何 Drive REST API 呼叫**——所有 Drive I/O 都由
+      // 下方的儲存 seam 接管，漏一個就是把本機資料寫去 Drive 或反過來，所以預設一律 throw。
+      //
+      // **唯一的例外是 Google 的 tokeninfo**（2026-08-17 開的）：入口搬到 GitHub Pages、
+      // 後端在執行期切換之後，使用者是在 Pages 上用 Google 登入、把 idToken 送來這台驗，
+      // 這一步非打 Google 不可。原本這裡連它一起擋，於是 Pages 一切到自架後端，
+      // 每個人都拿到 Unauthorized（2026-08-17 實際踩到）。
+      //
+      // 放行條件寫得很窄：**只認 https://oauth2.googleapis.com/tokeninfo 這個 origin+path**，
+      // 用解析後的 URL 物件比對而不是字串 startsWith（'https://oauth2.googleapis.com.evil.tw/…'
+      // 會通過 startsWith）。其餘一律照舊 throw。
+      fetch: function (url, params) {
+        const u = String(url);
+        let parsed = null;
+        try { parsed = new URL(u); } catch (_) { parsed = null; }
+        const isTokenInfo = parsed
+          && parsed.protocol === 'https:'
+          && parsed.hostname === 'oauth2.googleapis.com'
+          && parsed.pathname === '/tokeninfo';
+        if (!isTokenInfo) {
+          throw new Error('UrlFetchApp.fetch 不應被呼叫（自架伺服器防漏檢查）：' + u);
+        }
+        // Code.gs 的 doPost 全程同步，所以這裡也必須是同步的 HTTP。Node 沒有同步 https，
+        // 用一個子行程去打（零外部依賴：跑的是同一個 node）。逾時 8 秒——驗不到就當作驗證失敗，
+        // verifyIdToken_ 收到 throw 會回 null → Unauthorized，是 fail-closed 的方向。
+        const script = 'const https=require("https");' +
+          'https.get(process.argv[1],{timeout:8000},r=>{let b="";' +
+          'r.on("data",c=>{b+=c});r.on("end",()=>{' +
+          'process.stdout.write(JSON.stringify({code:r.statusCode,body:b}))})})' +
+          '.on("error",e=>{process.stdout.write(JSON.stringify({code:0,body:String(e.message)}))})' +
+          '.on("timeout",function(){this.destroy(new Error("timeout"))});';
+        const out = require('node:child_process').execFileSync(
+          process.execPath, ['-e', script, u],
+          { encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 }
+        );
+        const res = JSON.parse(out || '{"code":0,"body":""}');
+        return {
+          getResponseCode: function () { return res.code; },
+          getContentText: function () { return res.body; },
+        };
       },
     },
   };
