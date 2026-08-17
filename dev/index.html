@@ -3397,7 +3397,7 @@ document.body.addEventListener('click', async function (e) {
           failed.map(function (f) { return '<li>' + escapeHtml(f.email) + '：' + escapeHtml(f.error) + '</li>'; }).join('') +
           '</ul></div>' : '');
       showToast('匯入完成：成功 ' + ok + ' 筆', failed.length ? 'info' : 'success');
-      renderAdminDeptAssistants();
+      enterAdminDeptAssistants();   // 同上：不重抓的話新匯入的人不會出現在畫面上
     });
   } catch (err) { showToast('匯入失敗：' + err.message, 'error'); }
 });
@@ -3411,7 +3411,11 @@ function openDeptAssistantForm(email) {
   }).slice().sort(function (a, b) { return String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-Hant'); });
 
   const bodyHtml = '<form id="deptasst-form">' +
-    '<div class="field"><label>Email</label><input type="email" id="deptasst-email" value="' + escapeHtml(email || '') + '" ' + (email ? 'readonly' : '') + ' required></div>' +
+    '<div class="field"><label>Email</label><input type="email" id="deptasst-email" value="' + escapeHtml(email || '') + '" required>' +
+      (email ? '<span class="field-hint">系辦助理換人或換信箱時可以直接改這一欄。改了以後：' +
+        '<b>舊 email 立刻失去所有權限</b>，舊的登入帳號也會一併刪除，' +
+        '新 email 要用右邊的「建立帳號」重新發初始密碼。</span>' : '') +
+      '</div>' +
     '<div class="field"><label>姓名</label><input type="text" id="deptasst-name" value="' + escapeHtml(s.name || '') + '"></div>' +
     '<div class="field"><label>校內分機</label><input type="text" id="deptasst-ext" maxlength="20" value="' + escapeHtml(s.ext || '') + '" placeholder="例：7903（純聯絡用，不影響權限）"></div>' +
     '<div class="field"><label>負責系所（可複選）</label>' +
@@ -3425,10 +3429,16 @@ function openDeptAssistantForm(email) {
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
   openModal(email ? '編輯系辦助理' : '新增系辦助理', bodyHtml);
+  const originalEmail = String(email || '').trim().toLowerCase();
   $('deptasst-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     const targetEmail = $('deptasst-email').value.trim().toLowerCase();
     if (!targetEmail) { showToast('請輸入 Email', 'error'); return; }
+    const isRename = !!originalEmail && targetEmail !== originalEmail;
+    if (isRename && !confirm('要把「' + originalEmail + '」改成「' + targetEmail + '」嗎？\n\n' +
+      '‧ ' + originalEmail + ' 會立刻失去所有系所權限，就算還開著頁面也一樣。\n' +
+      '‧ 兩個信箱的舊登入帳號都會刪掉（避免舊密碼還能用），' + targetEmail + ' 要重新按「建立帳號」發初始密碼。\n' +
+      '‧ 這位助理已經填過的導師名冊資料不受影響。')) return;
     const deptIds = Array.prototype.slice.call(document.querySelectorAll('[data-deptasst-dept]'))
       .filter(function (cb) { return cb.checked; })
       .map(function (cb) { return cb.dataset.deptasstDept; });
@@ -3440,11 +3450,26 @@ function openDeptAssistantForm(email) {
     const submitBtn = e.target.querySelector('button[type=submit]');
     try {
       await withBtnPending(submitBtn, async function () {
+        // 順序有意義：先搬白名單（授權），再收登入帳號（認證）。反過來的話，萬一搬白名單失敗，
+        // 這個人就變成「還有權限但登不進來」；照這個順序失敗頂多留下一個沒有任何權限的孤兒帳號。
+        if (isRename) await proxyCall('adminRenameDeptAssistant', { fromEmail: originalEmail, toEmail: targetEmail });
         const res = await proxyCall('adminUpsertDeptAssistant', { deptAssistant: entry });
         bootstrapData.deptAssistants = res.deptAssistants;
-        showToast('已儲存', 'success');
+        let acctWarn = '';
+        if (isRename) {
+          // 舊信箱：帳號要跟著權限一起消失。新信箱：可能留著上一任的孤兒帳號（白名單軟刪除
+          // 不會動 users.json），不清掉的話新人一被加進白名單，舊密碼就又能登入。
+          const me = String((currentUser && currentUser.email) || '').toLowerCase();
+          for (const dead of [originalEmail, targetEmail]) {
+            if (dead === me) continue;   // 自架軌的帳密是自己唯一的入口，別把自己刪出去
+            try { await serverAdminCall('delete', { email: dead }); }
+            catch (err) { acctWarn += '（' + dead + ' 的舊登入帳號沒刪成功：' + err.message + '）'; }
+          }
+        }
+        showToast(isRename ? '已改為 ' + targetEmail + '，請記得建立登入帳號' + acctWarn : '已儲存',
+          acctWarn ? 'info' : 'success');
         closeModal();
-        renderAdminDeptAssistants();
+        enterAdminDeptAssistants();
       });
     } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
   });
@@ -3463,7 +3488,9 @@ document.body.addEventListener('click', function (e) {
     deleteEntity({
       btn: del, name: s.name || s.email, action: 'adminUpsertDeptAssistant',
       payload: { deptAssistant: { email: s.email, deleted: true } },
-      onDone: function (res) { bootstrapData.deptAssistants = res.deptAssistants; renderAdminDeptAssistants(); },
+      // enterAdminDeptAssistants（而不是 renderAdminDeptAssistants）：列的來源優先是
+      // serverAdminCall('list') 的快取，不重抓的話剛刪掉的人還會留在畫面上。
+      onDone: function (res) { bootstrapData.deptAssistants = res.deptAssistants; enterAdminDeptAssistants(); },
     });
     return;
   }

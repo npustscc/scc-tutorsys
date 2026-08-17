@@ -378,6 +378,20 @@ function startServer(config) {
       return sendJson(res, 200, { success: true, data: { email: targetEmail, disabled: (body && body.disabled) === true } });
     }
 
+    // delete：整筆移除本機帳號（含密碼雜湊）。換 email 時收掉舊信箱的帳號，並清掉新信箱可能
+    // 殘留的孤兒帳號。找不到不算失敗——呼叫端是清理，不是查詢。op 名稱與 GAS 軌的
+    // adminLocalAccounts 一致（前端同一套 UI 只換傳輸方式）。
+    if (op === 'delete') {
+      const fresh = readUsersSync_(config.dataDir);
+      const existed = !!fresh[targetEmail];
+      if (existed) {
+        delete fresh[targetEmail];
+        writeUsersSync_(config.dataDir, fresh);
+      }
+      logLine('POST', '/admin/accounts', 200, 'delete ' + targetEmail + (existed ? '' : '（原本就沒有）'));
+      return sendJson(res, 200, { success: true, data: { email: targetEmail, deleted: existed } });
+    }
+
     return sendJson(res, 200, { success: false, error: 'unknown op: ' + op });
   }
 

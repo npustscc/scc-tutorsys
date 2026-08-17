@@ -503,3 +503,146 @@ test('通知合併：空佇列不炸、也不會產生空批次', () => {
   assert.equal(res.keep.length, 0);
   assert.equal(S.selectNotifyBatches_(null, Date.now(), 1000, 2000).ready.length, 0);
 });
+
+// ── 換 email（系辦助理換人／換信箱）───────────────────────────────────────────
+// 這一步等於把一個系的名冊權限從甲交給乙，所以測的重點是：舊 email 立刻沒有權限、
+// 撞名不合併、服務帳號動不了。
+function makeRenameSandbox() {
+  return load(['planDeptAssistantRename_', 'resolveRoles_', 'isClassTutor_'], {
+    BOOTSTRAP_ADMINS: ['boot@heartnpust.tw'],
+    IMPORTER_ACCOUNT_EMAIL_: 'importer@heartnpust.tw',
+  });
+}
+const NOW = '2026-08-17T12:00:00.000Z';
+const ACTOR = 'admin@x.com';
+function baseList() {
+  return [{ email: 'old@x.com', name: '甲助理', ext: '1234', deptIds: ['農園系', '森林系'] }];
+}
+
+test('換 email：新那筆帶著系所/姓名/分機搬過去，舊那筆變成帶 renamedTo 的墓碑', () => {
+  const S = makeRenameSandbox();
+  const r = S.planDeptAssistantRename_(baseList(), 'old@x.com', 'New@X.com', ACTOR, NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.to, 'new@x.com');                       // 一律小寫，與登入時的比對一致
+  const tomb = r.deptAssistants.find((e) => e.email === 'old@x.com');
+  const moved = r.deptAssistants.find((e) => e.email === 'new@x.com');
+  assert.equal(tomb.deleted, true);
+  assert.equal(tomb.renamedTo, 'new@x.com');
+  assert.equal(tomb.deletedBy, ACTOR);
+  assert.equal(moved.deleted, false);
+  assert.equal(moved.renamedFrom, 'old@x.com');
+  assert.deepEqual(moved.deptIds, ['農園系', '森林系']);
+  assert.equal(moved.name, '甲助理');
+  assert.equal(moved.ext, '1234');
+  assert.equal(moved.deletedAt, undefined);              // 墓碑的欄位不能跟著搬過去
+  assert.equal(moved.renamedTo, undefined);
+});
+
+test('🔒 換完 email：舊 email 立刻沒有任何系所，新 email 接手', () => {
+  const S = makeRenameSandbox();
+  const r = S.planDeptAssistantRename_(baseList(), 'old@x.com', 'new@x.com', ACTOR, NOW);
+  const config = cfg(r.deptAssistants);
+  assert.deepEqual(S.resolveRoles_('old@x.com', config, DEPTS, []).deptAssistantOf, []);
+  assert.deepEqual(S.resolveRoles_('new@x.com', config, DEPTS, []).deptAssistantOf, ['農園系', '森林系']);
+});
+
+test('🔒 新 email 已經在名單上（含只是停用的）→ 拒絕，不合併兩個人的系所', () => {
+  const S = makeRenameSandbox();
+  [{}, { disabled: true }].forEach(function (extra) {
+    const list = baseList().concat([Object.assign({ email: 'new@x.com', deptIds: ['植醫系'] }, extra)]);
+    const r = S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+    assert.equal(r.ok, false);
+    assert.match(r.error, /已經有/);
+  });
+});
+
+test('新 email 只剩軟刪除的墓碑 → 允許，並整筆覆蓋掉那個墓碑（同一信箱先刪後回來）', () => {
+  const S = makeRenameSandbox();
+  const list = baseList().concat([{ email: 'new@x.com', deptIds: ['植醫系'], deleted: true }]);
+  const r = S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(r.ok, true);
+  const alive = r.deptAssistants.filter((e) => e.email === 'new@x.com' && e.deleted !== true);
+  assert.equal(alive.length, 1);
+  assert.deepEqual(alive[0].deptIds, ['農園系', '森林系']);   // 不是墓碑的植醫系
+});
+
+test('找不到舊 email、或舊那筆已軟刪除 → 拒絕', () => {
+  const S = makeRenameSandbox();
+  assert.equal(S.planDeptAssistantRename_(baseList(), 'nobody@x.com', 'new@x.com', ACTOR, NOW).ok, false);
+  const deleted = [{ email: 'old@x.com', deptIds: ['農園系'], deleted: true }];
+  assert.equal(S.planDeptAssistantRename_(deleted, 'old@x.com', 'new@x.com', ACTOR, NOW).ok, false);
+});
+
+test('新舊相同（含大小寫與前後空白差異）、空值、格式錯、過長 → 拒絕', () => {
+  const S = makeRenameSandbox();
+  const bad = ['old@x.com', ' OLD@x.com ', '', '   ', 'not-an-email', 'a@b', 'x'.repeat(95) + '@y.com'];
+  bad.forEach(function (to) {
+    assert.equal(S.planDeptAssistantRename_(baseList(), 'old@x.com', to, ACTOR, NOW).ok, false, to + ' 應被拒絕');
+  });
+  assert.equal(S.planDeptAssistantRename_(baseList(), '', 'new@x.com', ACTOR, NOW).ok, false);
+});
+
+test('🔒 校內同步服務帳號（importer）不能被改名，也不能被改成它', () => {
+  const S = makeRenameSandbox();
+  const list = baseList().concat([{ email: 'importer@heartnpust.tw', deptIds: ['農園系'] }]);
+  assert.equal(S.planDeptAssistantRename_(list, 'importer@heartnpust.tw', 'new@x.com', ACTOR, NOW).ok, false);
+  assert.equal(S.planDeptAssistantRename_(list, 'old@x.com', 'importer@heartnpust.tw', ACTOR, NOW).ok, false);
+});
+
+test('planner 不就地改動傳進來的陣列（呼叫端失敗時 config 不能已經被動過）', () => {
+  const S = makeRenameSandbox();
+  const list = baseList();
+  const snapshot = JSON.stringify(list);
+  S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(JSON.stringify(list), snapshot);
+});
+
+test('🔒 舊 email 有大小寫不同的重複列 → 每一列都變墓碑（漏一列＝舊帳號還有權限）', () => {
+  const S = makeRenameSandbox();
+  const list = [
+    { email: 'Old@x.com', name: '甲', deptIds: ['農園系'] },
+    { email: 'old@x.com', name: '甲', deptIds: ['森林系'] },
+  ];
+  const r = S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(r.ok, true);
+  const stillAlive = r.deptAssistants.filter((e) => e.email.toLowerCase() === 'old@x.com' && e.deleted !== true);
+  assert.deepEqual(stillAlive, []);
+  assert.deepEqual(S.resolveRoles_('old@x.com', cfg(r.deptAssistants), DEPTS, []).deptAssistantOf, []);
+  assert.deepEqual(S.resolveRoles_('Old@x.com', cfg(r.deptAssistants), DEPTS, []).deptAssistantOf, []);
+});
+
+test('新 email 的墓碑整列丟掉，不留在搬過來那筆的前面（後續 upsert 會改到墓碑）', () => {
+  const S = makeRenameSandbox();
+  const list = [
+    { email: 'new@x.com', deptIds: ['植醫系'], deleted: true },
+    { email: 'old@x.com', name: '甲', ext: '1234', deptIds: ['農園系'] },
+  ];
+  const r = S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(r.ok, true);
+  const hits = r.deptAssistants.filter((e) => e.email === 'new@x.com');
+  assert.equal(hits.length, 1, '同一個 email 不該同時存在墓碑與新列');
+  assert.equal(hits[0].deleted, false);
+  // adminUpsertDeptAssistant 是 findIndex(email 相等) 且不看 deleted，所以「第一個命中的」必須是活的那筆
+  assert.equal(r.deptAssistants.findIndex((e) => e.email === 'new@x.com'),
+    r.deptAssistants.findIndex((e) => e.email === 'new@x.com' && e.deleted !== true));
+});
+
+test('🔒 新 email 同時有墓碑與一筆活的 → 仍然拒絕（不能只看第一個命中的）', () => {
+  const S = makeRenameSandbox();
+  const list = [
+    { email: 'new@x.com', deptIds: ['植醫系'], deleted: true },
+    { email: 'New@x.com', deptIds: ['植醫系'] },
+    { email: 'old@x.com', deptIds: ['農園系'] },
+  ];
+  const r = S.planDeptAssistantRename_(list, 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /已經有/);
+});
+
+test('其他人的列原封不動（含 null 這種髒資料不會讓它炸）', () => {
+  const S = makeRenameSandbox();
+  const other = { email: 'other@x.com', deptIds: ['植醫系'] };
+  const r = S.planDeptAssistantRename_([other, null, baseList()[0]], 'old@x.com', 'new@x.com', ACTOR, NOW);
+  assert.equal(r.ok, true);
+  assert.equal(r.deptAssistants.find((e) => e && e.email === 'other@x.com'), other);
+});

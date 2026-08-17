@@ -1384,6 +1384,55 @@ await flow('H', async () => {
     const r = await apiCall('adminBulkApplyDeptSheet', { rows: SHEET_ROWS, apply: true }, deptAsstToken.token);
     expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
   });
+
+  // ── 換 email（系辦助理換人）：自成一組帳號，不動前面那些 check 用的 h-asst ──────
+  await check('H', '換 email 前置：建立 rn-old 白名單＋帳號，確認登得進去', async () => {
+    const r1 = await apiCall('adminUpsertDeptAssistant', {
+      deptAssistant: { email: 'rn-old@example.com', name: '換人測試', ext: '5511', deptIds: ['森林系'] },
+    }, adminToken.token);
+    expect(r1.success === true, JSON.stringify(r1).slice(0, 200));
+    await apiCall('adminLocalAccounts', { op: 'createOrReset', email: 'rn-old@example.com' }, adminToken.token);
+    const login = await apiCall('localLogin', { email: 'rn-old', password: '5511' });
+    expect(login.data && login.data.sessionToken, '前置沒登進去：' + JSON.stringify(login).slice(0, 200));
+  });
+  await check('H', '換 email：白名單整筆搬到新信箱（系所/姓名/分機都跟著走），舊的變墓碑', async () => {
+    const r = await apiCall('adminRenameDeptAssistant',
+      { fromEmail: 'rn-old@example.com', toEmail: 'rn-new@example.com' }, adminToken.token);
+    evid['H-rename'] = JSON.stringify(r).slice(0, 200);
+    expect(r.success === true, JSON.stringify(r).slice(0, 200));
+    const list = await apiCall('adminLocalAccounts', { op: 'list' }, adminToken.token);
+    const rows = (list.data || {}).accounts || [];
+    const oldRow = rows.find((x) => x.email === 'rn-old@example.com');
+    const newRow = rows.find((x) => x.email === 'rn-new@example.com');
+    expect(!oldRow, '舊 email 還留在名單上（軟刪除的不該出現）');
+    expect(!!newRow, '新 email 沒出現在名單上');
+    expect(newRow.ext === '5511' && (newRow.deptIds || []).join() === '森林系',
+      '欄位沒跟著搬：' + JSON.stringify(newRow));
+  });
+  await check('H', '🔒 換完 email：舊帳號的密碼立刻登不進去（前端會補刪帳號，這裡直接驗那一趟）', async () => {
+    const del = await apiCall('adminLocalAccounts', { op: 'delete', email: 'rn-old@example.com' }, adminToken.token);
+    expect(del.success === true && del.data.deleted === true, '刪舊帳號失敗：' + JSON.stringify(del));
+    const dead = await apiCall('localLogin', { email: 'rn-old', password: '5511' });
+    expect(dead.data.error === '帳號或密碼錯誤', '舊帳號還登得進去：' + JSON.stringify(dead).slice(0, 200));
+    const again = await apiCall('adminLocalAccounts', { op: 'delete', email: 'rn-old@example.com' }, adminToken.token);
+    expect(again.success === true && again.data.deleted === false, '重複刪除應冪等：' + JSON.stringify(again));
+  });
+  await check('H', '🔒 換 email 的三種拒絕：撞名、找不到舊的、動到 importer 服務帳號', async () => {
+    const dup = await apiCall('adminRenameDeptAssistant',
+      { fromEmail: 'rn-new@example.com', toEmail: 'h-asst@example.com' }, adminToken.token);
+    expect(dup.success === false && /已經有/.test(dup.error || ''), '撞名沒擋：' + JSON.stringify(dup));
+    const ghost = await apiCall('adminRenameDeptAssistant',
+      { fromEmail: 'rn-old@example.com', toEmail: 'rn-x@example.com' }, adminToken.token);
+    expect(ghost.success === false, '墓碑不該還能被改名：' + JSON.stringify(ghost));
+    const imp = await apiCall('adminRenameDeptAssistant',
+      { fromEmail: 'rn-new@example.com', toEmail: 'importer@heartnpust.tw' }, adminToken.token);
+    expect(imp.success === false && /同步服務/.test(imp.error || ''), '服務帳號沒擋：' + JSON.stringify(imp));
+  });
+  await check('H', '🔒 系辦助理自己打換 email → admin only 拒絕（換人＝交權限，只有中心能做）', async () => {
+    const r = await apiCall('adminRenameDeptAssistant',
+      { fromEmail: 'rn-new@example.com', toEmail: 'evil@example.com' }, deptAsstToken.token);
+    expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
+  });
 });
 
 // ══ M：全域登入閘門關閉時，被擋的人看到的是說明而不是錯誤 ═══════════════════════

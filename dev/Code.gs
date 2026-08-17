@@ -155,6 +155,7 @@ function doPost(e) {
       case 'adminUpsertStaffLead':      result = adminUpsertStaffLeadAction_(params, ctx, userEmail); break;
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
+      case 'adminRenameDeptAssistant':  result = adminRenameDeptAssistantAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       // 這三個是名冊異動：回傳後要做收尾（排入主責通知佇列＋同步 Google Sheet），
@@ -558,6 +559,22 @@ function adminLocalAccountsAction_(params, ctx, userEmail) {
       writeJsonPath_('localAccounts.json', fresh, ctx);
       appendAuditLog_(ctx, { action: 'adminSetLocalAccountDisabled', by: userEmail, targetId: targetEmail, at: new Date().toISOString() });
       return { email: targetEmail, disabled: params.disabled === true };
+    });
+  }
+
+  // delete：整筆移除本機帳號（含密碼雜湊）。換 email 時用來收掉舊信箱的帳號，也用來清掉
+  // 新信箱可能殘留的孤兒帳號——白名單軟刪除不會動到這份資料，留著等於「這個信箱哪天再被
+  // 加回白名單，舊密碼就又能登入」。**找不到不算失敗**（呼叫端是清理，不是查詢）。
+  if (op === 'delete') {
+    return withLock_(function () {
+      const fresh = readJsonSafe_('localAccounts.json', ctx, {});
+      const existed = !!fresh[targetEmail];
+      if (existed) {
+        delete fresh[targetEmail];
+        writeJsonPath_('localAccounts.json', fresh, ctx);
+        appendAuditLog_(ctx, { action: 'adminDeleteLocalAccount', by: userEmail, targetId: targetEmail, at: new Date().toISOString() });
+      }
+      return { email: targetEmail, deleted: existed };
     });
   }
 
@@ -3919,6 +3936,87 @@ function adminUpsertDeptAssistantAction_(params, ctx, userEmail) {
     writeJsonPath_('config.json', config, ctx);
     appendAuditLog_(ctx, { action: isDelete ? 'adminDeleteDeptAssistant' : 'adminUpsertDeptAssistant', by: userEmail, targetId: entry.email, at: now });
     return { deptAssistants: config.deptAssistants };
+  });
+}
+
+// ── 換 email（系辦助理換人／換信箱）───────────────────────────────────────────
+// upsert 是 by-email 的，所以「改 email」不是編輯一個欄位，而是把整筆搬到新的鍵上。
+// 做成獨立 action 而不是讓 upsert 多吃一個 previousEmail，理由是它的授權後果不一樣：
+// 這一步等於**把一個系的名冊權限從甲交給乙**，稽核記錄要看得出 from → to，不能混在一般編輯裡。
+//
+// 舊那筆是**軟刪除留墓碑**（帶 renamedTo），不是原地改鍵：
+//   - resolveRoles_ 對 deleted 的視同不存在 → 舊 email 立刻失去所有系所（fail-closed）。
+//   - 舊 email 的 session token 是無狀態的、撤不掉，但沒有角色就會被 checkSystemAccess_ 擋下。
+//   - 留墓碑才查得到「這個信箱以前是誰」。
+//
+// 撞名一律拒絕、不合併：新 email 已經有一筆在名單上時，合併會安靜地把兩個人的系所併成一份
+// 權限。只有**已軟刪除的墓碑**會被覆蓋（同一個信箱先刪後回來，是正常情況）。
+//
+// 純函式版本（planner）：不讀檔、不取現在時間，時間與操作者由呼叫端帶進來，才測得動。
+function planDeptAssistantRename_(deptAssistants, fromEmail, toEmail, actor, now) {
+  const list = Array.isArray(deptAssistants) ? deptAssistants : [];
+  const from = String(fromEmail == null ? '' : fromEmail).trim().toLowerCase();
+  const to = String(toEmail == null ? '' : toEmail).trim().toLowerCase();
+  if (!from) return { ok: false, error: '需要原本的 email' };
+  if (!to) return { ok: false, error: '需要新的 email' };
+  if (from === to) return { ok: false, error: '新舊 email 相同' };
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to)) return { ok: false, error: 'email 格式不正確：' + to };
+  if (to.length > 100) return { ok: false, error: 'email 過長' };
+  // importer 是每小時同步用的服務帳號（掛滿所有系所），改掉它的 email 會安靜地停掉同步。
+  if (from === IMPORTER_ACCOUNT_EMAIL_ || to === IMPORTER_ACCOUNT_EMAIL_) {
+    return { ok: false, error: '這是校內同步服務帳號，不能改 email' };
+  }
+
+  // 比對一律小寫化：白名單是 upsert-by-email（**大小寫敏感**）而登入比對是小寫，
+  // 所以歷史資料可能同時存在 'A@x.com' 與 'a@x.com' 兩列指向同一個人。
+  // 只處理找到的第一列，會留下一列還活著的舊 email——那正是這個功能最該避免的 fail-open。
+  const lower = function (e) { return String((e && e.email) || '').trim().toLowerCase(); };
+  const fromRows = list.filter(function (e) { return e && lower(e) === from && e.deleted !== true; });
+  if (!fromRows.length) return { ok: false, error: '找不到這位系辦助理：' + from };
+  if (list.some(function (e) { return e && lower(e) === to && e.deleted !== true; })) {
+    return { ok: false, error: '名單上已經有 ' + to + ' 了，請先處理那一筆' };
+  }
+
+  const moved = Object.assign({}, fromRows[0], {
+    email: to, deleted: false, renamedFrom: from, renamedAt: now, renamedBy: actor,
+  });
+  delete moved.deletedAt;
+  delete moved.deletedBy;
+  delete moved.renamedTo;
+
+  const out = [];
+  list.forEach(function (e) {
+    const em = lower(e);
+    if (e && em === from) {
+      // 指向舊 email 的每一列都要變墓碑，一列都不能漏（漏掉的那列就是還能登入的權限）。
+      out.push(e.deleted === true ? e
+        : Object.assign({}, e, { deleted: true, deletedAt: now, deletedBy: actor, renamedTo: to }));
+      return;
+    }
+    // 新 email 這時只可能剩墓碑（上面已擋掉活的）。**整列丟掉而不是留著**：
+    // adminUpsertDeptAssistant 的 findIndex 不看 deleted，留一個同 email 的墓碑在前面，
+    // 緊接著那趟存檔就會改到墓碑而不是剛搬過來的這筆。歷史查得到（稽核記錄有 from → to）。
+    if (e && em === to) return;
+    out.push(e);
+  });
+  out.push(moved);
+  return { ok: true, deptAssistants: out, from: from, to: to };
+}
+
+// adminRenameDeptAssistant：admin only。**只動白名單（授權）**，本機登入帳號（認證）由前端
+// 另外一趟 adminLocalAccounts/'/admin/accounts' 的 delete 收拾——那份資料在自架軌活在 server 的
+// users.json、在 GAS 軌活在 Drive 的 localAccounts.json，doPost 這一側碰不到自架那份。
+function adminRenameDeptAssistantAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const plan = planDeptAssistantRename_(config.deptAssistants || [], params.fromEmail, params.toEmail, userEmail, now);
+    if (!plan.ok) throw new Error(plan.error);
+    config.deptAssistants = plan.deptAssistants;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, { action: 'adminRenameDeptAssistant', by: userEmail, targetId: plan.from + ' → ' + plan.to, at: now });
+    return { deptAssistants: config.deptAssistants, from: plan.from, to: plan.to };
   });
 }
 
