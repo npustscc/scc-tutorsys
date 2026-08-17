@@ -1539,7 +1539,9 @@ await flow('M', async () => {
 // 切換之後 API 真的打到另一個位址。字串替換沒命中就直接失敗，不會安靜地驗了個空氣。
 await flow('N', async () => {
   const FAKE_FAST = 'https://fast.test.invalid';
-  const DEV_ROOT_KEY = "'" + ROOT_FOLDER_ID + "': ''";
+  // 這一格的值會隨對外通道的狀態改變（2026-08-17 之前是空字串，之後是真的 tunnel 網址），
+  // 所以比對「這個 root 那一格」而不是比對某個特定值——寫死值會在通道上線那天無聲失配。
+  const DEV_ROOT_RE = new RegExp("'" + ROOT_FOLDER_ID + "':\\s*'[^']*'");
 
   // 起一個 context：patchHtml 把快速版位址塞進去，fastUp 決定假後端要不要回應 /healthz。
   async function openWith(fastUp, sessionBackend) {
@@ -1549,8 +1551,8 @@ await flow('N', async () => {
     await c.route((u) => u.href.startsWith(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`), async (route) => {
       const upstream = await fetch(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
       const html = await upstream.text();
-      expect(html.includes(DEV_ROOT_KEY), 'FAST_BACKEND_BY_ROOT_ 的形狀變了，找不到 ' + DEV_ROOT_KEY);
-      const patched = html.replace(DEV_ROOT_KEY, "'" + ROOT_FOLDER_ID + "': '" + FAKE_FAST + "'");
+      expect(DEV_ROOT_RE.test(html), 'FAST_BACKEND_BY_ROOT_ 的形狀變了，找不到 ' + ROOT_FOLDER_ID + ' 那一格');
+      const patched = html.replace(DEV_ROOT_RE, "'" + ROOT_FOLDER_ID + "': '" + FAKE_FAST + "'");
       await route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: patched });
     });
     await c.route(FAKE_FAST + '/healthz', async (route) => {

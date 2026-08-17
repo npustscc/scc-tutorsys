@@ -330,9 +330,13 @@ const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, ema
 // 值不可能跟環境錯配，也不必把推行規則表從 13 條擴到 15 條——那張表每多一條就多一個漏改的
 // 機會，而 2026-07-18 的事故就是漏改造成的。這張表在 dev 與 prod 兩份檔案裡是一模一樣的。
 // 值為空字串＝這個環境還沒有快速版，按鈕整個不出現（對外通道建好才填）。
+// 2026-08-17 起兩個環境都指向 coma（Cloudflare Tunnel）。網域 kiauho.com 是為此新註冊的，
+// 與 heartnpust.tw 無關（後者掛著單位信箱的 MX，刻意不去動它）。
+// tunnel 那端**只放行 /healthz 與 /exec** 兩條路徑——前端只需要這兩條（探測＋所有 API），
+// 而自架站的 /login 是本機帳密，46 個帳號的初始密碼就是四位數分機，不能暴露在公網上。
 const FAST_BACKEND_BY_ROOT_ = {
-  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': '',   // 正式版
-  '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT': '',   // 測試版
+  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': 'https://tutor.kiauho.com',       // 正式版
+  '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT': 'https://tutor-dev.kiauho.com',   // 測試版
 };
 const FAST_BACKEND_URL = FAST_BACKEND_BY_ROOT_[ROOT_FOLDER_ID] || '';   // origin，不含路徑
 // 手動切回一般版的覆寫。用 sessionStorage 不用 localStorage：使用者決策是「自動優先快速版」，
