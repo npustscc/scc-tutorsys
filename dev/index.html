@@ -3403,8 +3403,14 @@ document.body.addEventListener('click', async function (e) {
 });
 
 function openDeptAssistantForm(email) {
-  const list = bootstrapData.deptAssistants || [];
-  const s = list.find(function (x) { return x.email === email; }) || {};
+  // 表格的列來源優先是 serverAdminCall('list')（**當下**從後端讀的），而 bootstrapData 只是
+  // 登入那一刻的快照。只查快照的話，別的管理員剛加的人（或這個 session 之後才建的）會查不到，
+  // 表單開起來整片空白，按下儲存就把他的系所與分機清掉——畫面上看不出來，因為存完就是空的。
+  const fresh = (deptAccountRows || []).find(function (x) { return x.email === email; });
+  const s = fresh
+    ? { email: fresh.email, name: fresh.name || '', ext: fresh.ext || '',
+        deptIds: fresh.deptIds || [], disabled: fresh.assistantDisabled === true }
+    : ((bootstrapData.deptAssistants || []).find(function (x) { return x.email === email; }) || {});
   const selected = Array.isArray(s.deptIds) ? s.deptIds : [];
   const depts = (bootstrapData.departments || []).filter(function (d) {
     return d && d.active !== false && d.deleted !== true;

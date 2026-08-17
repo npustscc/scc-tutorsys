@@ -1433,6 +1433,44 @@ await flow('H', async () => {
       { fromEmail: 'rn-new@example.com', toEmail: 'evil@example.com' }, deptAsstToken.token);
     expect(r.success === false && /admin only/.test(r.error || ''), '回應=' + JSON.stringify(r));
   });
+  await check('H', '畫面上真的改得動：編輯視窗的 Email 欄可輸入，存檔後列表換成新 email', async () => {
+    await apiCall('adminUpsertDeptAssistant', {
+      deptAssistant: { email: 'ui-rn-old@example.com', name: 'UI 換人測試', ext: '5599', deptIds: ['森林系'] },
+    }, adminToken.token);
+    await apiCall('adminLocalAccounts', { op: 'createOrReset', email: 'ui-rn-old@example.com' }, adminToken.token);
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    await page.locator('[data-admin-tab="deptAssistants"]').click();
+    await page.locator('#admin-tab-content tr', { hasText: 'ui-rn-old@example.com' })
+      .locator('[data-action="deptasst-edit"]').click();
+    const emailInput = page.locator('#deptasst-email');
+    await emailInput.waitFor({ timeout: 5000 });
+    expect(await emailInput.getAttribute('readonly') === null, 'Email 欄還是唯讀的，改不動');
+    await emailInput.fill('ui-rn-new@example.com');
+    await page.locator('#deptasst-form button[type=submit]').click();   // confirm 由 page.on('dialog') 自動接受
+    // 帳號那三欄是存檔後另一趟 serverAdminCall('list') 補上的，等它落地再看，不然只會看到「載入中…」
+    const newRowLoc = page.locator('#admin-tab-content tr', { hasText: 'ui-rn-new@example.com' })
+      .filter({ hasNotText: '載入中' });
+    await newRowLoc.waitFor({ timeout: 15000 });
+    const body = (await page.locator('#admin-tab-content').textContent() || '').replace(/\s+/g, ' ');
+    evid['H-rename-ui'] = body.slice(body.indexOf('UI 換人測試') - 20, body.indexOf('UI 換人測試') + 120);
+    expect(!/ui-rn-old@example\.com/.test(body), '舊 email 還留在畫面上（列表沒重抓）');
+    const newRow = (await newRowLoc.textContent() || '');
+    expect(/5599/.test(newRow), '分機沒跟著搬：' + newRow);
+    expect(/尚未建立/.test(newRow), '新 email 不該繼承舊帳號，應顯示「尚未建立」：' + newRow);
+  });
+  await check('H', '🔒 畫面上改成別人已經在用的 email → 擋下，且兩邊的資料都沒被動到', async () => {
+    await page.locator('#admin-tab-content tr', { hasText: 'ui-rn-new@example.com' })
+      .locator('[data-action="deptasst-edit"]').click();
+    await page.locator('#deptasst-email').fill('h-asst@example.com');
+    await page.locator('#deptasst-form button[type=submit]').click();
+    await page.locator('.toast', { hasText: '儲存失敗' }).waitFor({ timeout: 8000 });
+    const list = await apiCall('adminLocalAccounts', { op: 'list' }, adminToken.token);
+    const rows = (list.data || {}).accounts || [];
+    expect(rows.some((x) => x.email === 'ui-rn-new@example.com'), '被擋下時原本那筆不該消失');
+    const hits = rows.filter((x) => x.email === 'h-asst@example.com');
+    expect(hits.length === 1 && hits[0].name === 'H 測試助理' && (hits[0].deptIds || []).join() === '森林系',
+      '撞名那筆被蓋掉了：' + JSON.stringify(hits));
+  });
 });
 
 // ══ M：全域登入閘門關閉時，被擋的人看到的是說明而不是錯誤 ═══════════════════════

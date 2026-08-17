@@ -208,6 +208,39 @@ async function main() {
     r = await acct({ op: 'createOrReset', email: 'notinwhitelist@test.local', sessionToken: adminToken2 });
     check('5l 不在白名單的 email 不給建帳號', r.success === false && /白名單/.test(r.error || ''), JSON.stringify(r));
 
+    // 5m–5r. 系辦助理換 email：白名單（走 /exec）與登入帳號（走 /admin/accounts）是兩份資料，
+    // 自架軌的帳號活在 users.json，doPost 那一側碰不到——所以這條路只有在這裡驗得到。
+    const asAdmin = function (extra) {
+      return Object.assign({ rootFolderId: rootFolderId, sessionToken: adminToken2 }, extra);
+    };
+    r = await call(base, asAdmin({
+      action: 'adminUpsertDeptAssistant',
+      deptAssistant: { email: 'rn-old@test.local', name: '換人測試', ext: '5511', deptIds: ['農園系'] },
+    }));
+    check('5m 建立系辦助理白名單', r.success === true, JSON.stringify(r).slice(0, 200));
+    r = await acct({ op: 'createOrReset', email: 'rn-old@test.local', sessionToken: adminToken2 });
+    check('5n 建立本機帳號（初始密碼＝分機）', r.success === true, JSON.stringify(r).slice(0, 200));
+    r = await login(base, 'rn-old@test.local', '5511');
+    check('5o 舊 email 登得進去（換 email 前的基準）', r.success === true, JSON.stringify(r).slice(0, 200));
+    r = await call(base, asAdmin({
+      action: 'adminRenameDeptAssistant', fromEmail: 'rn-old@test.local', toEmail: 'rn-new@test.local',
+    }));
+    check('5p 換 email：白名單整筆搬過去',
+      r.success === true && (r.data.deptAssistants || []).some(function (a) {
+        return a.email === 'rn-new@test.local' && a.deleted !== true && (a.deptIds || []).join() === '農園系';
+      }) && !(r.data.deptAssistants || []).some(function (a) {
+        return a.email === 'rn-old@test.local' && a.deleted !== true;
+      }), JSON.stringify(r).slice(0, 300));
+    r = await acct({ op: 'delete', email: 'rn-old@test.local', sessionToken: adminToken2 });
+    check('5q 刪掉舊 email 的本機帳號', r.success === true && r.data.deleted === true, JSON.stringify(r));
+    r = await acct({ op: 'delete', email: 'rn-old@test.local', sessionToken: adminToken2 });
+    check('5q2 重複刪除 → 冪等回 deleted:false，不是錯誤', r.success === true && r.data.deleted === false, JSON.stringify(r));
+    r = await acct({ op: 'delete', email: 'rn-old@test.local', sessionToken: 'garbage.token' });
+    check('5q3 🔒 壞 token 打 delete → 拒絕', r.success === false, JSON.stringify(r));
+    r = await login(base, 'rn-old@test.local', '5511');
+    check('5r 🔒 換完 email 後舊密碼登不進去', r.success === false, JSON.stringify(r).slice(0, 200));
+    await sleep(1600); // 上一步算一次登入失敗，避免節流影響後續
+
     // 6. ping（sessionToken）→ email 正確。
     r = await call(base, { action: 'ping', rootFolderId: rootFolderId, sessionToken: adminToken });
     check('6 ping 帶 sessionToken', r.success === true && r.data.email === 'admin@test.local', JSON.stringify(r));
