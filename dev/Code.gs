@@ -27,7 +27,13 @@ ALLOWED_ROOTS[ROOT_FOLDER_ID] = { label: 'dev' };
 // 緊急備援名單：即使 config.json 讀不到或帳號不在名單，這些帳號仍可視為 admin 登入以修復系統。
 // 註：列出 email 不構成後門——仍須持有該帳號的 Google 憑證（有效 ID token）才通過，
 // 攻擊者知道 email 也無法冒充。
-const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw'];
+// linkinlol528101@gmail.com＝系統維護者（2026-08-17 加）。放這裡而不是各環境的 config.users
+// 是刻意的：①一次涵蓋四個環境（含 GAS 正式版，那邊沒有可寫 config 的憑證）
+// ②全域登入閘門上線後，維護者不會因為「config 裡沒有自己的角色」被鎖在外面
+// ③設定檔壞掉時仍進得去，這正是這份名單的用途。
+// 代價：這是**硬編碼**的 admin，後台停用不了，要收回得改這一行並重新部署兩軌。
+// 想改成可從後台停用的形式，就從這裡移除、改在各環境 config.users 設 role:'admin'。
+const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw', 'linkinlol528101@gmail.com'];
 
 // ── 全域登入閘門（2026-08-17 使用者決策：關閉一般入口）─────────────────────────
 // 本系統原本刻意**沒有**全域允許清單（見檔頭：學生＝任何登入的 Google 帳號），授權全散在
