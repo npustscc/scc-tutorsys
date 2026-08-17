@@ -31,6 +31,11 @@
   }
   .login-card h1{font-size:1.4rem; margin:0 0 6px;}
   .login-sub{color:var(--color-text-light); font-size:.88rem; margin:0 0 28px;}
+  /* 登入前的用途說明。行高放寬、左邊一條槓，讓它看起來是「說明」而不是錯誤訊息。 */
+  .login-purpose{color:var(--color-text-light); font-size:.82rem; line-height:1.7; text-align:left;
+    margin:0 0 20px; padding:10px 12px; border-left:3px solid var(--color-primary);
+    background:var(--color-bg); border-radius:0 6px 6px 0;}
+  .login-purpose strong{color:var(--color-danger);}
   .login-fallback{font-size:.82rem; color:var(--color-text-light); margin-top:16px;}
   .login-error{font-size:.85rem; color:var(--color-danger); margin-top:14px; background:var(--color-danger-bg); padding:10px 12px; border-radius:8px;}
   #g-signin-btn{display:flex; justify-content:center;}
@@ -247,6 +252,9 @@
   <div class="login-card">
     <h1>導師資訊系統<span class="env-badge">測試版</span></h1>
     <p class="login-sub">國立屏東科技大學學生諮商中心</p>
+    <!-- 登入前就講清楚這個平台是做什麼的、以及手機那一欄的個資分級（使用者 2026-08-18 指定文案）。
+         放在登入卡片裡而不是登入後：助理拿到網址時第一次看到的就是它。 -->
+    <p class="login-purpose">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫校內分機與私人手機。<strong>導師的私人手機屬於高度個資</strong>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>
     <!-- 帳密登入（主要入口）。Google 登入預設隱藏在下方連結後面——這個平台目前的使用者
          是各系系辦助理，而他們的校內信箱不是 Google 帳號；Google 那條路只剩中心人員在用，
          擺在最前面只會讓多數人以為自己該按它。是「隱藏」不是移除，隨時可以恢復。 -->
@@ -285,6 +293,7 @@
       <div id="backend-switch-header" class="backend-switch" style="display:none;"></div>
       <img id="user-avatar" class="user-avatar" alt="" />
       <span id="user-name" class="user-name"></span>
+      <button class="btn btn-ghost btn-sm" data-action="purpose-notice" data-tip="這個平台的用途與個資保密責任">用途說明</button>
       <button id="login-history-btn" class="btn btn-ghost btn-sm">登入紀錄</button>
       <button id="logout-btn" class="btn btn-ghost btn-sm">登出</button>
     </div>
@@ -1200,6 +1209,7 @@ async function afterLogin() {
     $('app').style.display = '';
     renderNav();
     showPage(defaultPageId());
+    maybeShowPurposeNotice();
   } catch (e) {
     // 被全域登入閘門擋下不寫 console.error：那不是錯誤，是設計好的狀態。
     // （e2e 把 console error 當成品質指標，把預期中的狀態記成錯誤會讓那個指標失去意義。）
@@ -1212,6 +1222,49 @@ async function afterLogin() {
     hideLoading();
   }
 }
+
+// ── 個資用途告知（2026-08-18 使用者指定）──────────────────────────────────────
+// 登入後跳一次，可以勾「以後不再顯示」。**刻意存 localStorage 而不是後端**：使用者要的就是
+// 「換一台裝置還是會再提醒一次」——這是告知義務，不是使用者偏好，在新裝置上重新提醒是對的。
+// 導覽列旁邊另外放一顆「用途說明」，勾過不再顯示的人隨時看得回來。
+const PURPOSE_NOTICE_TEXT_ =
+  '導師名冊平台，用於教學單位登入新增、修改、刪除班級或家族導師，其中收集導師手機號碼，' +
+  '將提供校安人員於危機或緊急事件即時聯繫使用（同步轉知同仁個資保密責任）。';
+const PURPOSE_NOTICE_KEY_ = 'tutor_purpose_notice_hidden_' + ROOT_FOLDER_ID;
+
+function purposeNoticeHtml(withCheckbox) {
+  return '<p style="line-height:1.85; font-size:.92rem;">' + escapeHtml(PURPOSE_NOTICE_TEXT_) + '</p>' +
+    '<p class="field-hint" style="line-height:1.7;">導師的私人手機屬於高度個資：只有負責該系的系辦助理、學諮中心與校安人員看得到，' +
+    '不會出現在導師、系主任或學生的畫面，也不會出現在任何匯出給其他單位的檔案裡。</p>' +
+    (withCheckbox
+      ? '<label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:.88rem; cursor:pointer;">' +
+        '<input type="checkbox" id="purpose-notice-hide"> 我已閱讀，以後不再顯示（僅記在這台裝置）</label>'
+      : '') +
+    '<div class="modal-actions"><button type="button" class="btn btn-primary" data-action="purpose-notice-close">' +
+      (withCheckbox ? '我知道了' : '關閉') + '</button></div>';
+}
+
+function maybeShowPurposeNotice() {
+  let hidden = false;
+  try { hidden = localStorage.getItem(PURPOSE_NOTICE_KEY_) === '1'; } catch (_) { hidden = false; }
+  if (hidden) return;
+  openModal('個資蒐集用途告知', purposeNoticeHtml(true));
+}
+
+function openPurposeNotice() {
+  openModal('個資蒐集用途告知', purposeNoticeHtml(false));
+}
+
+document.body.addEventListener('click', function (e) {
+  if (e.target.closest('[data-action="purpose-notice"]')) { openPurposeNotice(); return; }
+  if (!e.target.closest('[data-action="purpose-notice-close"]')) return;
+  const cb = $('purpose-notice-hide');
+  if (cb && cb.checked) {
+    // 存不進去（無痕模式／關掉儲存）就是下次再提醒一次，不必報錯打擾使用者。
+    try { localStorage.setItem(PURPOSE_NOTICE_KEY_, '1'); } catch (_) {}
+  }
+  closeModal();
+});
 
 async function refreshBootstrap(semester) {
   showLoading('重新整理資料…');
@@ -1283,7 +1336,9 @@ const NAV_PAGES = [
   { id: 'overview', label: '全校總表', show: function (r) { return recordFlowVisible_(r) && (r.isAdmin || r.isDirector || r.isStaffLead || r.isStaffAssistant || r.deptHeadOf.length > 0); } },
   // 系辦助理的導師名冊頁（Phase 1 唯讀）。roles.deptAssistantOf 是後端算好的授權集合，
   // 前端只拿它決定「顯不顯示這個頁籤」；能不能真的讀到資料由後端 deptRosterGet 再驗一次。
-  { id: 'deptroster', label: '導師資料', show: function (r) { return (r.deptAssistantOf || []).length > 0 || r.isAdmin; } },
+  // 校安人員（isSafetyOfficer）也走這一頁，但拿到的是全校唯讀版本——後端 deptRosterGet 回
+  // readOnly:true，畫面據此把所有編輯入口收起來。真正的邊界在後端（寫入 action 不認這個角色）。
+  { id: 'deptroster', label: '導師資料', show: function (r) { return (r.deptAssistantOf || []).length > 0 || r.isAdmin || r.isSafetyOfficer; } },
   { id: 'admin',  label: '後台管理', show: function (r) { return r.isAdmin; } },
 ];
 const PAGE_RENDERERS = {}; // 各頁 render 函式於下方各區塊註冊
@@ -1307,7 +1362,7 @@ function recordFlowVisible_(roles) {
 function defaultPageId() {
   const roles = (bootstrapData && bootstrapData.roles) || {};
   if (!isSelfHosted()) {
-    if ((roles.deptAssistantOf || []).length > 0 || roles.isAdmin) return 'deptroster';
+    if ((roles.deptAssistantOf || []).length > 0 || roles.isAdmin || roles.isSafetyOfficer) return 'deptroster';
   }
   // 「上傳」現在對 admin／主責是收起來的，落在那裡等於一進來就看到導覽列上沒有的頁面；
   // 拿不到就退回這個角色導覽列上的第一頁。
@@ -1327,12 +1382,16 @@ function pendingSuggestionCount() {
 // 班會紀錄那套跑在校內自架站，在這裡給他們「上傳/我的上傳」只會造成誤會。
 // admin 與其他角色不受影響，仍看得到全部頁籤。
 function navPagesForRoles(roles) {
-  const onlyDeptAssistant = !isSelfHosted() && roles &&
-    (roles.deptAssistantOf || []).length > 0 &&
+  // 「只有名冊身分」的人（系辦助理或校安人員，且沒有其他角色）只需要「導師資料」一頁。
+  // 校安人員一起算進來的理由：他在班會紀錄那套流程裡沒有任何角色，給他「上傳／我的上傳」
+  // 只會讓他以為自己該交東西——而那些頁的後端根本不會受理他（2026-08-18 e2e 抓到）。
+  // 有導師/系主任身分的人不受影響（同一個人可以既是校安人員又是導師）。
+  const rosterOnly = !isSelfHosted() && roles &&
+    ((roles.deptAssistantOf || []).length > 0 || roles.isSafetyOfficer) &&
     !roles.isAdmin && !roles.isDirector && !roles.isStaffLead && !roles.isStaffAssistant &&
     (roles.deptHeadOf || []).length === 0 && (roles.tutorOf || []).length === 0;
   return NAV_PAGES.filter(function (p) {
-    if (onlyDeptAssistant && p.id !== 'deptroster') return false;
+    if (rosterOnly && p.id !== 'deptroster') return false;
     return p.show(roles);
   });
 }
@@ -1360,8 +1419,38 @@ $('main-nav').addEventListener('click', function (e) {
 function showPage(id) {
   currentPage = id;
   document.querySelectorAll('.nav-btn').forEach(function (b) { b.classList.toggle('active', b.dataset.page === id); });
+  auditView('viewPage', { page: id });
   const renderer = PAGE_RENDERERS[id];
   if (renderer) renderer(); else $('page-root').innerHTML = '<div class="empty-hint">找不到頁面</div>';
+}
+
+// ── 瀏覽軌跡回報（2026-08-18）──────────────────────────────────────────────────
+// 使用者要能看到「誰在看哪些畫面」。只有前端知道這件事，所以由前端回報，後端 auditAppend
+// 只收白名單事件、by 一律取自憑證（見 dev/Code.gs 的 normalizeAuditView_）。
+//
+// 兩件必須節制的事：
+//   ① **同一組事件在同一次登入中只記一次**。切分頁來回按十次不該產生十筆——那會把有價值的
+//      軌跡淹掉，而且每一筆都是一次帶鎖的整檔寫入（GAS 軌上尤其貴）。
+//   ② **絕不讓稽核失敗影響操作**：整段包在 catch 裡、不 await、不顯示錯誤。稽核是旁支，
+//      它壞掉的時候使用者該還是能做事。
+//   ③ **不得參與登入恢復**。proxyCall 在「沒有有效憑證」時會靜默重走 Google 登入，那條路會
+//      openModal('登入已到期')——遮罩一蓋上去，整個畫面就點不動了。稽核是旁支，絕不能因為它
+//      而把使用者推進重新登入流程，所以沒憑證就直接不記（2026-08-18 實測：漏了這道判斷會讓
+//      e2e 幾乎每一個 flow 的點擊都超時）。
+const auditedOnce_ = new Set();
+function auditView(auditAction, opts) {
+  opts = opts || {};
+  if (!currentUser) return;
+  if (!hasValidSession() && !gIdToken) return;
+  const key = [auditAction, opts.page || '', opts.deptId || '', opts.detail || ''].join('|');
+  if (auditedOnce_.has(key)) return;
+  auditedOnce_.add(key);
+  try {
+    proxyCall('auditAppend', {
+      auditAction: auditAction,
+      page: opts.page || '', deptId: opts.deptId || '', detail: opts.detail || '',
+    }).catch(function () { /* 稽核寫不進去不該影響使用者操作 */ });
+  } catch (_) { /* 同上 */ }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -2401,19 +2490,37 @@ async function deleteEntity(opts) {
 let deptRosterDeptId = null;
 let deptRosterDepts = [];        // deptRosterGet 回的系所（**已受後端權限限制**，前端只拿它做篩選）
 let deptRosterCollegeId = '';    // '' ＝ 全部學院
+let deptRosterReadOnly = false;  // deptRosterGet 回的 readOnly（校安人員＝全校唯讀）
+
+// 唯讀模式：把這一頁所有會寫入的入口收起來，並說明為什麼看得到全校。
+// 只收 UI——後端的寫入 action 走 resolveDeptRosterScope_，本來就不認校安人員。
+function applyDeptRosterReadOnly() {
+  const bar = $('deptroster-actions');
+  if (bar) bar.style.display = deptRosterReadOnly ? 'none' : '';
+  const note = $('deptroster-readonly-note');
+  if (note) note.style.display = deptRosterReadOnly ? '' : 'none';
+  const hint = $('deptroster-editor-hint');
+  if (hint) hint.style.display = deptRosterReadOnly ? 'none' : '';
+}
 
 PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
   $('page-root').innerHTML =
     '<div class="card">' +
       '<h2>導師資料</h2>' +
-      '<p class="field-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫<b>校內分機</b>與<b>私人手機</b>。' +
+      '<p class="field-hint" id="deptroster-editor-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫<b>校內分機</b>與<b>私人手機</b>。' +
       '<b>導師的私人手機屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
+      // 校安人員看到的版本：說明白「為什麼你看得到全校」與「為什麼你改不了」，
+      // 不然一個看得到全校卻沒有任何按鈕的畫面會被當成壞掉。
+      '<p class="field-hint" id="deptroster-readonly-note" style="display:none;">' +
+      '您以<b>校安人員</b>身分登入，可查看<b>全校</b>班級與導師的聯絡方式（含私人手機），' +
+      '供危機或緊急事件即時聯繫使用。此身分為<b>唯讀</b>，不提供新增、修改或刪除。' +
+      '<b>查閱紀錄會留存稽核</b>，請遵守個資保密責任。</p>' +
       '<div class="row" id="deptroster-filters">' +
         '<div class="field" style="max-width:260px;"><label>學院</label><select id="deptroster-college"></select></div>' +
         '<div class="field" style="max-width:260px;"><label>系所</label><select id="deptroster-dept"></select></div>' +
       '</div>' +
       '<div id="deptroster-head"></div>' +
-      '<div style="margin:10px 0;"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button> ' +
+      '<div style="margin:10px 0;" id="deptroster-actions"><button class="btn btn-primary btn-sm" data-action="deptroster-new">新增班級</button> ' +
       '<button class="btn btn-sm" data-action="deptroster-export">匯出 Excel</button></div>' +
       '<div id="deptroster-content"><div class="empty-hint">載入中…</div></div>' +
     '</div>';
@@ -2498,6 +2605,16 @@ async function loadDeptRoster(deptId) {
     valid: function () { return (deptRosterDeptId || null) === want || want === null; },
     render: function (res) {
       const depts = res.departments || [];
+      // 後端說了算：readOnly 由 deptRosterGet 回（校安人員＝全校唯讀）。前端只據此收按鈕，
+      // 不自己從 roles 推——推錯的話畫面會給出後端根本不會受理的操作。
+      deptRosterReadOnly = res.readOnly === true;
+      applyDeptRosterReadOnly();
+      // 記「看了哪個系的名冊」。這條通道回的是含私人手機的資料，所以它是最該留下軌跡的一個
+      // 動作——尤其是校安人員的查閱（唯讀身分看得到全校）。
+      if (deptId) {
+        auditView('viewDeptRoster', { page: 'deptroster', deptId: deptId, detail: (res.classes || []).length + ' 班' });
+        if (deptRosterReadOnly) auditView('viewMobile', { page: 'deptroster', deptId: deptId, detail: '校安查閱' });
+      }
       // 只有「不帶 deptId」那趟拿得到我管的全部系所，用它更新篩選清單（同一次登入中匯入了
       // 新系所也會跟上）；帶了 deptId 的回傳只有那一系，拿它覆寫會讓選單縮到剩一個。
       if (!deptId && depts.length) {
@@ -2735,7 +2852,7 @@ function renderDeptRosterHead(deptId) {
         (h.email ? '<span class="field-hint">' + escapeHtml(h.email) + '</span>' : '') +
         '<span>校內分機：' + (h.ext ? escapeHtml(h.ext) : miss) + '</span>' +
         '<span>私人手機：' + (h.mobile ? escapeHtml(h.mobile) : miss) + '</span>' +
-        '<button class="btn btn-sm" data-action="deptroster-head-edit">編輯</button>' +
+        (deptRosterReadOnly ? '' : '<button class="btn btn-sm" data-action="deptroster-head-edit">編輯</button>') +
       '</div>' +
     '</div>';
 }
@@ -2826,8 +2943,11 @@ function renderDeptRosterTable(classes, deptId, depts) {
         '<td data-label="校內分機">' + stack(tutors, function (t) { return t.ext; }, false) + '</td>' +
         '<td data-label="私人手機">' + stack(tutors, function (t) { return t.mobile; }, true) + '</td>' +
         '<td data-label="狀態">' + (state.length ? state.join('／') : '啟用') + '</td>' +
-        '<td data-label="操作"><button class="btn btn-sm" data-action="deptroster-edit" data-class-id="' + escapeHtml(c.id) + '">編輯</button> ' +
-        '<button class="btn btn-sm btn-danger" data-action="deptroster-delete" data-class-id="' + escapeHtml(c.id) + '">刪除</button></td></tr>';
+        // 唯讀（校安人員）整欄不出按鈕。後端照樣會擋，這裡只是不要給出做不到的操作。
+        '<td data-label="操作">' + (deptRosterReadOnly ? '<span class="field-hint">唯讀</span>' :
+          '<button class="btn btn-sm" data-action="deptroster-edit" data-class-id="' + escapeHtml(c.id) + '">編輯</button> ' +
+          '<button class="btn btn-sm btn-danger" data-action="deptroster-delete" data-class-id="' + escapeHtml(c.id) + '">刪除</button>') +
+        '</td></tr>';
     }).join('') + '</tbody></table></div>';
 }
 
@@ -2939,6 +3059,8 @@ const ADMIN_TABS = [
   { id: 'users', label: '職員帳號' },
   { id: 'staffTeam', label: '學諮主責／助理' },
   { id: 'deptAssistants', label: '系辦助理' },
+  { id: 'safetyOfficers', label: '校安人員（唯讀）' },
+  { id: 'audit', label: '稽核紀錄' },
   { id: 'keywords', label: '宣導關鍵字' },
   { id: 'roster', label: 'Excel 匯入導師名單' },
 ];
@@ -2962,10 +3084,208 @@ function renderAdminTab() {
     colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
     classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
     staffTeam: renderAdminStaffTeam, deptAssistants: enterAdminDeptAssistants,
+    safetyOfficers: renderAdminSafetyOfficers, audit: enterAdminAudit,
     keywords: renderAdminKeywords, roster: renderAdminRoster,
   };
+  auditView('viewAdminTab', { page: 'admin', detail: adminTab });
   (fns[adminTab] || function () {})();
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 校安人員（全校唯讀）──────────────────────────────────────────────────────
+// 這一頁管的是「誰在危機事件時可以看全校導師的私人手機」。名單極短、權限極大，所以畫面上
+// 把代價寫出來，不要讓人以為這只是又一個唯讀帳號。
+// ══════════════════════════════════════════════════════════════════════════════
+function renderAdminSafetyOfficers() {
+  const list = (bootstrapData.safetyOfficers || []).filter(notDeleted);
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>校安人員（全校唯讀）</h3>' +
+    '<p class="field-hint">供校安人員在<b>危機或緊急事件</b>時即時聯繫導師。這個身分<b>看得到全校</b>' +
+    '所有班級的導師姓名、校內分機與<b>私人手機</b>，但<b>不能新增、修改或刪除任何資料</b>。' +
+    '每一次查閱都會留在「稽核紀錄」裡。<br>登入方式：可用 Google 帳號登入，' +
+    '或由下方「建立帳號」發一組本機密碼（初始密碼＝分機，首次登入須修改）。</p>' +
+    '<div class="admin-toolbar"><button class="btn btn-primary" data-action="safety-new">新增校安人員</button></div>' +
+    '<div class="table-wrap"><table><thead><tr><th>姓名</th><th>單位</th><th>Email</th><th>分機</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    (list.length ? list.map(function (s) {
+      return '<tr>' +
+        '<td data-label="姓名">' + escapeHtml(s.name || '') + '</td>' +
+        '<td data-label="單位">' + escapeHtml(s.unit || '') + '</td>' +
+        '<td data-label="Email">' + escapeHtml(s.email) + '</td>' +
+        '<td data-label="分機">' + escapeHtml(s.ext || '') + '</td>' +
+        '<td data-label="狀態">' + (s.disabled ? '<span style="color:var(--color-danger);">停用</span>' : '啟用') + '</td>' +
+        '<td data-label="操作"><button class="btn btn-sm" data-action="safety-edit" data-email="' + escapeHtml(s.email) + '">編輯</button> ' +
+        '<button class="btn btn-sm btn-danger" data-action="safety-delete" data-email="' + escapeHtml(s.email) + '">刪除</button>' +
+        (s.ext ? ' <button class="btn btn-sm" data-action="safety-account" data-email="' + escapeHtml(s.email) + '">建立／重設帳號</button>'
+               : ' <span class="field-hint">未填分機，無法發帳號</span>') +
+        '</td></tr>';
+    }).join('') : '<tr><td colspan="6"><div class="empty-hint">尚未指定任何校安人員。</div></td></tr>') +
+    '</tbody></table></div></div>';
+}
+
+function openSafetyOfficerForm(email) {
+  const s = (bootstrapData.safetyOfficers || []).find(function (x) { return x.email === email; }) || {};
+  openModal(email ? '編輯校安人員' : '新增校安人員',
+    '<form id="safety-form">' +
+    '<div class="field"><label>Email</label><input type="email" id="safety-email" value="' + escapeHtml(email || '') + '" required>' +
+      '<span class="field-hint">這個帳號將能查看<b>全校</b>導師的私人手機。</span></div>' +
+    '<div class="field"><label>姓名</label><input type="text" id="safety-name" value="' + escapeHtml(s.name || '') + '"></div>' +
+    '<div class="field"><label>單位</label><input type="text" id="safety-unit" value="' + escapeHtml(s.unit || '') + '" placeholder="例：軍訓室／生活輔導組"></div>' +
+    '<div class="field"><label>校內分機</label><input type="text" id="safety-ext" maxlength="20" value="' + escapeHtml(s.ext || '') + '" placeholder="也是本機帳號的初始密碼"></div>' +
+    '<div class="field"><label><input type="checkbox" id="safety-disabled" ' + (s.disabled ? 'checked' : '') + '> 停用（立即失去查看權限）</label></div>' +
+    '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button>' +
+    '<button type="submit" class="btn btn-primary">儲存</button></div></form>');
+  $('safety-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    const entry = {
+      email: $('safety-email').value.trim().toLowerCase(),
+      name: $('safety-name').value.trim(),
+      unit: $('safety-unit').value.trim(),
+      ext: $('safety-ext').value.trim(),
+      disabled: $('safety-disabled').checked,
+    };
+    if (!entry.email) { showToast('請輸入 Email', 'error'); return; }
+    const btn = e.target.querySelector('button[type=submit]');
+    try {
+      await withBtnPending(btn, async function () {
+        const res = await proxyCall('adminUpsertSafetyOfficer', { safetyOfficer: entry });
+        bootstrapData.safetyOfficers = res.safetyOfficers;
+        showToast('已儲存', 'success');
+        closeModal();
+        renderAdminSafetyOfficers();
+      });
+    } catch (err) { showToast('儲存失敗：' + err.message, 'error'); }
+  });
+}
+
+document.body.addEventListener('click', async function (e) {
+  if (e.target.closest('[data-action="safety-new"]')) { openSafetyOfficerForm(null); return; }
+  const ed = e.target.closest('[data-action="safety-edit"]');
+  if (ed) { openSafetyOfficerForm(ed.dataset.email); return; }
+  const acct = e.target.closest('[data-action="safety-account"]');
+  if (acct) {
+    const email = acct.dataset.email;
+    if (!confirm('將「' + email + '」的本機密碼設為該筆的校內分機，並要求首次登入時修改。確定？')) return;
+    try {
+      await withBtnPending(acct, async function () {
+        await serverAdminCall('createOrReset', { email: email });
+        showToast('已建立／重設，初始密碼＝分機', 'success');
+      });
+    } catch (err) { showToast('失敗：' + err.message, 'error'); }
+    return;
+  }
+  const del = e.target.closest('[data-action="safety-delete"]');
+  if (del) {
+    const s = (bootstrapData.safetyOfficers || []).find(function (x) { return x.email === del.dataset.email; });
+    if (!s) return;
+    deleteEntity({
+      btn: del, name: s.name || s.email, action: 'adminUpsertSafetyOfficer',
+      payload: { safetyOfficer: { email: s.email, deleted: true } },
+      onDone: function (res) { bootstrapData.safetyOfficers = res.safetyOfficers; renderAdminSafetyOfficers(); },
+    });
+    return;
+  }
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ── 稽核紀錄 ────────────────────────────────────────────────────────────────
+// 三個來源合成一張時間軸：登入（sessions.json）、瀏覽（audit_views.json，前端回報）、
+// 異動（audit_log.json，後端自己寫的）。後端 adminAuditList 只回最近 N 筆——這是給人看的
+// 畫面不是資料匯出，一次撈全部只會讓瀏覽器卡住而且沒人讀得完。
+// ══════════════════════════════════════════════════════════════════════════════
+let auditState = { kind: '', email: '', limit: 300, rows: null, total: 0, error: '' };
+
+function enterAdminAudit() {
+  auditState.rows = null;
+  auditState.error = '';
+  renderAdminAudit();
+  loadAudit();
+}
+
+async function loadAudit() {
+  try {
+    const res = await proxyCall('adminAuditList', {
+      kind: auditState.kind, email: auditState.email, limit: auditState.limit,
+    });
+    auditState.rows = res.entries || [];
+    auditState.total = res.total || 0;
+    auditState.error = '';
+  } catch (e) {
+    auditState.rows = [];
+    auditState.error = e.message;
+  }
+  if (adminTab === 'audit') renderAdminAudit();
+}
+
+const AUDIT_KIND_LABEL_ = { login: '登入', view: '瀏覽', change: '異動' };
+const AUDIT_ACTION_LABEL_ = {
+  login: '登入系統', viewPage: '開啟頁面', viewDeptRoster: '查看系所名冊',
+  viewMobile: '查看導師私人手機', exportRoster: '匯出名冊', viewAdminTab: '開啟後台分頁',
+};
+
+function renderAdminAudit() {
+  const rows = auditState.rows;
+  $('admin-tab-content').innerHTML =
+    '<div class="card"><h3>稽核紀錄</h3>' +
+    '<p class="field-hint">誰在什麼時候登入、看了哪些畫面、改了什麼。<b>瀏覽</b>來自前端回報' +
+    '（同一組事件在同一次登入中只記一次，避免同一頁來回切就灌爆紀錄）；<b>異動</b>是後端在' +
+    '寫入資料時自己寫的，前端動不了它。只顯示最近的紀錄，不是完整匯出。</p>' +
+    '<div class="admin-toolbar">' +
+      '<label class="field-hint">類型 <select id="audit-kind">' +
+        ['', 'login', 'view', 'change'].map(function (k) {
+          return '<option value="' + k + '"' + (auditState.kind === k ? ' selected' : '') + '>' +
+            (k ? AUDIT_KIND_LABEL_[k] : '全部') + '</option>';
+        }).join('') + '</select></label> ' +
+      '<label class="field-hint">Email 含 <input type="text" id="audit-email" value="' + escapeHtml(auditState.email) + '" style="width:180px;"></label> ' +
+      '<label class="field-hint">筆數 <select id="audit-limit">' +
+        [100, 300, 1000, 2000].map(function (n) {
+          return '<option value="' + n + '"' + (auditState.limit === n ? ' selected' : '') + '>' + n + '</option>';
+        }).join('') + '</select></label> ' +
+      '<button class="btn btn-sm" data-action="audit-reload">重新查詢</button>' +
+    '</div>' +
+    (auditState.error ? '<div class="import-error-box"><div class="import-error-title">讀取失敗</div>' + escapeHtml(auditState.error) + '</div>' : '') +
+    (rows === null ? '<div class="empty-hint">載入中…</div>' :
+      '<p class="field-hint">符合條件 <b>' + auditState.total + '</b> 筆，顯示最近 <b>' + rows.length + '</b> 筆。</p>' +
+      '<div class="table-wrap"><table><thead><tr><th>時間</th><th>類型</th><th>帳號</th><th>動作</th><th>內容</th></tr></thead><tbody>' +
+      (rows.length ? rows.map(function (r) {
+        return '<tr>' +
+          '<td data-label="時間" style="white-space:nowrap;">' + escapeHtml(fmtAuditTime(r.at)) + '</td>' +
+          '<td data-label="類型">' + escapeHtml(AUDIT_KIND_LABEL_[r.kind] || r.kind) + '</td>' +
+          '<td data-label="帳號">' + escapeHtml(r.by) + '</td>' +
+          '<td data-label="動作">' + escapeHtml(AUDIT_ACTION_LABEL_[r.action] || r.action) + '</td>' +
+          '<td data-label="內容">' + escapeHtml(r.detail) + '</td></tr>';
+      }).join('') : '<tr><td colspan="5"><div class="empty-hint">這個條件下沒有紀錄。</div></td></tr>') +
+      '</tbody></table></div>') +
+    '</div>';
+  const reload = function () {
+    auditState.kind = $('audit-kind').value;
+    auditState.email = $('audit-email').value.trim();
+    auditState.limit = Number($('audit-limit').value) || 300;
+    auditState.rows = null;
+    renderAdminAudit();
+    loadAudit();
+  };
+  $('audit-kind').addEventListener('change', reload);
+  $('audit-limit').addEventListener('change', reload);
+  $('audit-email').addEventListener('keydown', function (e) { if (e.key === 'Enter') reload(); });
+}
+
+// 稽核表的時間一律顯示台北時間到秒。ISO 字串直接切字元不行——那是 UTC，會差 8 小時
+// 而且看的人不會知道（「他半夜三點在看手機」其實是上午十一點）。
+function fmtAuditTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso || '');
+  const p = function (n) { return String(n).padStart(2, '0'); };
+  const t = new Date(d.getTime() + (8 * 60 + d.getTimezoneOffset()) * 60000);
+  return t.getFullYear() + '-' + p(t.getMonth() + 1) + '-' + p(t.getDate()) + ' ' +
+    p(t.getHours()) + ':' + p(t.getMinutes()) + ':' + p(t.getSeconds());
+}
+
+document.body.addEventListener('click', function (e) {
+  if (!e.target.closest('[data-action="audit-reload"]')) return;
+  auditState.rows = null;
+  renderAdminAudit();
+  loadAudit();
+});
 
 // ── 學院 ──
 function renderAdminColleges() {

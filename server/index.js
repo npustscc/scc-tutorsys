@@ -353,10 +353,13 @@ function startServer(config) {
 
     // create/reset：以指定密碼（預設＝白名單裡的分機）建立或重設，並標記 mustChangePassword。
     if (op === 'createOrReset') {
-      const assistant = (auth.config.deptAssistants || []).filter(function (a) {
-        return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
-      })[0];
-      if (!assistant) return sendJson(res, 200, { success: false, error: '這個 email 不在系辦助理白名單內' });
+      // 與 GAS 軌的 adminLocalAccountsAction_ 同一條規則：系辦助理或校安人員才發得出帳號。
+      // 少了這道檢查，這支就變成「admin 可以為任意 email 憑空造一組可登入的密碼」。
+      const assistant = (auth.config.deptAssistants || []).concat(auth.config.safetyOfficers || [])
+        .filter(function (a) {
+          return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
+        })[0];
+      if (!assistant) return sendJson(res, 200, { success: false, error: '這個 email 不在系辦助理或校安人員名單內' });
       const pw = String((body && body.password) || initialPasswordFromExt_(assistant.ext) || '').trim();
       if (!pw) return sendJson(res, 200, { success: false, error: '沒有可用的初始密碼（白名單沒填分機），請手動指定' });
       const fresh = readUsersSync_(config.dataDir);

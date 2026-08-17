@@ -206,7 +206,10 @@ async function main() {
     r = await acct({ op: 'list', sessionToken: 'garbage.token' });
     check('5k 壞 token 打 /admin/accounts → 拒絕', r.success === false, JSON.stringify(r));
     r = await acct({ op: 'createOrReset', email: 'notinwhitelist@test.local', sessionToken: adminToken2 });
-    check('5l 不在白名單的 email 不給建帳號', r.success === false && /白名單/.test(r.error || ''), JSON.stringify(r));
+    // 名單外的 email 不給發帳號。斷言只看「被拒絕」與「錯誤提到名單」，不綁死措辭——
+    // 2026-08-18 加了校安人員之後訊息從「不在系辦助理白名單內」改成「不在系辦助理或校安人員
+    // 名單內」，綁死字串的斷言就會在行為完全正確的情況下紅燈。
+    check('5l 不在名單內的 email 不給建帳號', r.success === false && /名單/.test(r.error || ''), JSON.stringify(r));
 
     // 5m–5r. 系辦助理換 email：白名單（走 /exec）與登入帳號（走 /admin/accounts）是兩份資料，
     // 自架軌的帳號活在 users.json，doPost 那一側碰不到——所以這條路只有在這裡驗得到。

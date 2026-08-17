@@ -43,7 +43,25 @@ fs.mkdirSync(SHOTS, { recursive: true });
 
 // ── 結果記錄 ──
 const results = [];
-const consoleErrors = [];
+// console error 在這套 harness 裡是品質指標（0 才算好），所以要把**預期中的**那一種排除掉，
+// 否則指標會被長期噪音蓋掉而失去作用。目前唯一一種：前端載入時會去探測快速版後端
+// （FAST_BACKEND_BY_ROOT_ 現在指向真的 tunnel 網址），而那台的 CORS 白名單只放行
+// GitHub Pages 的 origin——從 harness 的 127.0.0.1 打過去必然被瀏覽器擋，
+// 而「探測失敗就退回一般版」正是設計好的行為（flow N 專門驗這件事）。
+const EXPECTED_CONSOLE_NOISE_ = [
+  /Access to fetch at 'https:\/\/tutor(-dev)?\.kiauho\.com\/healthz'/,
+  /Failed to fetch.*kiauho\.com/,
+];
+const consoleErrorsAll = [];
+const consoleErrors = {
+  push(text) {
+    consoleErrorsAll.push(text);
+    if (!EXPECTED_CONSOLE_NOISE_.some((re) => re.test(text))) this._real.push(text);
+  },
+  _real: [],
+  get length() { return this._real.length; },
+  forEach(fn) { this._real.forEach(fn); },
+};
 const dialogs = [];
 let shotNo = 0;
 function log(mark, flow, msg) {
@@ -121,11 +139,30 @@ page.on('dialog', async (d) => { dialogs.push(d.type() + ': ' + d.message().spli
 
 const evid = {}; // API 探針回應體存證
 
+// 個資用途告知（2026-08-18）：登入後會跳一次，遮罩蓋住整個畫面。
+// **每一個登入後的 page 都要先過這一關**，不然後面每一個 click 都會超時（實測就是這樣壞的）。
+// 順手驗它真的出現過——這是告知義務，靜靜不見比擋住畫面更糟。
+async function dismissPurposeNotice(p, flowName) {
+  const modal = p.locator('#modal-overlay.open', { hasText: '個資蒐集用途告知' });
+  try {
+    await modal.waitFor({ timeout: 8000 });
+  } catch (_) {
+    if (flowName) log('❌', flowName, '登入後沒有出現個資用途告知視窗');
+    return false;
+  }
+  await p.locator('[data-action="purpose-notice-close"]').click();
+  await p.locator('#modal-overlay.open').waitFor({ state: 'hidden', timeout: 5000 });
+  return true;
+}
+
 // ══ 開場：免登入直接進主畫面 ═══════════════════════════════════════════════════
 await page.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
 await check('boot', '載入後直接進主畫面（session 免登入）', async () => {
   await page.locator('#app').waitFor({ state: 'visible', timeout: 15000 });
   await page.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 10000 });
+});
+await check('boot', '登入後跳出個資蒐集用途告知，可關閉', async () => {
+  expect(await dismissPurposeNotice(page), '沒有出現用途告知視窗');
 });
 await shot(page, 'boot-主畫面');
 
@@ -723,6 +760,7 @@ await flow('G', async () => {
   page2.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[G/page2] ' + m.text()); });
   page2.on('pageerror', (e) => consoleErrors.push('[G/page2] pageerror: ' + e.message));
   await page2.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+  await dismissPurposeNotice(page2, 'G');   // 登入後的告知視窗會蓋住畫面
   await check('G', '系辦助理登入後看得到「導師資料」頁籤、看不到「後台管理」', async () => {
     await page2.locator('.nav-btn', { hasText: '導師資料' }).waitFor({ timeout: 15000 });
     expect(await page2.locator('.nav-btn', { hasText: '後台管理' }).count() === 0, '不該看到後台管理頁籤');
@@ -1083,6 +1121,7 @@ await flow('J', async () => {
   page3.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[J/page3] ' + m.text()); });
   page3.on('pageerror', (e) => consoleErrors.push('[J/page3] pageerror: ' + e.message));
   await page3.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+  await dismissPurposeNotice(page3, 'J');
   await check('J', '主責的導覽列＝admin 的導覽列，且兩者都只剩「導師資料／後台管理」', async () => {
     await page3.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 15000 });
     const navs = await page3.locator('.nav-btn').allTextContents();
@@ -1125,6 +1164,7 @@ await flow('K', async () => {
   page4.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[K/page4] ' + m.text()); });
   page4.on('pageerror', (e) => consoleErrors.push('[K/page4] pageerror: ' + e.message));
   await page4.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+  await dismissPurposeNotice(page4, 'K');
   await check('K', '導師登入後仍看得到「上傳」頁籤，且點得開表單', async () => {
     await page4.locator('.nav-btn', { hasText: '導師個人後台' }).waitFor({ timeout: 15000 });
     const navs = await page4.locator('.nav-btn').allTextContents();
@@ -1532,6 +1572,145 @@ await flow('M', async () => {
   sb.writeJsonPath_('config.json', cfg, {});
 });
 
+// ══ O：校安人員（全校唯讀）＋稽核紀錄 ═══════════════════════════════════════════
+// 這一段驗的是這個角色的**兩件事同時成立**：看得到全校（含私人手機，那是它存在的理由）、
+// 而且一個字都改不了。單元測試釘住了 scope 解析，但「畫面上有沒有給出他做不到的按鈕」與
+// 「後端真的會拒絕」只有在這裡才驗得到。
+await flow('O', async () => {
+  const SAFETY = 'safety@test.local';
+  // 上一個 flow 可能留著一個開著的視窗——H 的最後一步刻意讓儲存失敗（驗撞名被擋），
+  // 失敗時視窗照設計留在畫面上，它的遮罩會讓這裡每一個 click 都超時。
+  await page.evaluate(() => {
+    const o = document.getElementById('modal-overlay');
+    if (o) o.classList.remove('open');
+  });
+  await check('O', 'admin 新增校安人員（後台有這個分頁、存得起來）', async () => {
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    await page.locator('[data-admin-tab="safetyOfficers"]').click();
+    await page.locator('[data-action="safety-new"]').click();
+    await page.fill('#safety-email', SAFETY);
+    await page.fill('#safety-name', '校安測試');
+    await page.fill('#safety-unit', '軍訓室');
+    await page.fill('#safety-ext', '7000');
+    await page.locator('#safety-form button[type=submit]').click();
+    await page.locator('.toast', { hasText: '已儲存' }).waitFor({ timeout: 8000 });
+    await page.locator('#admin-tab-content tr', { hasText: SAFETY }).waitFor({ timeout: 5000 });
+  });
+  await shot(page, 'O-校安人員清單');
+
+  // 以校安人員身分開一個新 context
+  const t = servers.em.mint(SAFETY);
+  const c = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  await c.route((u) => u.href.startsWith(APPS_SCRIPT_URL), async (route) => {
+    const res = await fetch(`http://127.0.0.1:${API_PORT}/exec`, { method: 'POST', body: route.request().postData() || '' });
+    await route.fulfill({ status: 200, contentType: 'application/json', body: await res.text() });
+  });
+  await c.route('https://accounts.google.com/gsi/client*', (route) => route.fulfill({
+    status: 200, contentType: 'text/javascript',
+    body: 'window.google={accounts:{id:{initialize(){},renderButton(){},disableAutoSelect(){},prompt(){}}}};',
+  }));
+  await c.route('https://cdn.sheetjs.com/**', (route) => route.fulfill({ status: 200, contentType: 'text/javascript', body: '' }));
+  await c.route('https://ipapi.co/**', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }));
+  await c.addInitScript(({ rootId, token, exp, email }) => {
+    localStorage.setItem('tutor_user_' + rootId, JSON.stringify({ email, name: '校安測試', picture: '' }));
+    localStorage.setItem('tutor_session_' + rootId, JSON.stringify({ token, exp, email }));
+  }, { rootId: ROOT_FOLDER_ID, token: t.token, exp: t.exp, email: SAFETY });
+  const sp = await c.newPage();
+  sp.on('console', (m) => { if (m.type() === 'error') consoleErrors.push('[O] ' + m.text()); });
+  sp.on('pageerror', (e) => consoleErrors.push('[O] pageerror: ' + e.message));
+  await sp.goto(`http://127.0.0.1:${STATIC_PORT}${APP_REL}`);
+  await dismissPurposeNotice(sp, 'O');
+
+  await check('O', '校安人員只看到「導師資料」一頁（沒有後台、沒有上傳）', async () => {
+    await sp.locator('.nav-btn', { hasText: '導師資料' }).waitFor({ timeout: 20000 });
+    const navs = await sp.locator('.nav-btn').allTextContents();
+    evid['O-safety-navs'] = navs.join(',');
+    expect(navs.length === 1 && /導師資料/.test(navs[0]), '導覽列＝' + navs.join(','));
+  });
+  await check('O', '看得到**全校**系所（不是某一系），且有唯讀說明', async () => {
+    await sp.locator('#deptroster-readonly-note').waitFor({ state: 'visible', timeout: 15000 });
+    const opts = await sp.locator('#deptroster-dept option').allTextContents();
+    evid['O-safety-depts'] = opts.join(',');
+    expect(opts.length >= 3, '系所選單只有 ' + opts.length + ' 個，應該是全校：' + opts.join(','));
+    const note = await sp.locator('#deptroster-readonly-note').textContent();
+    expect(/唯讀/.test(note || '') && /稽核/.test(note || ''), '唯讀說明沒提到唯讀與稽核：' + note);
+  });
+  await check('O', '看得到導師的私人手機（這個角色存在的理由）', async () => {
+    const html = await sp.locator('#deptroster-content').innerHTML();
+    expect(/私人手機/.test(html), '表格少了私人手機欄');
+  });
+  await check('O', '🔒 畫面上沒有任何看得見的寫入入口（新增班級／編輯／刪除都收起來）', async () => {
+    // 逐列的按鈕是**根本不產生**（表格 render 時就換成「唯讀」字樣）；
+    // 上方那排按鈕是產生了但整列 display:none（骨架先畫、readOnly 要等 API 回來才知道），
+    // 所以這兩種要分別驗：前者比對 count，後者比對可見性。
+    for (const act of ['deptroster-edit', 'deptroster-delete', 'deptroster-head-edit']) {
+      const n = await sp.locator(`[data-action="${act}"]`).count();
+      expect(n === 0, act + ' 仍然出現在畫面上（' + n + ' 個）');
+    }
+    expect(!(await sp.locator('#deptroster-actions').isVisible()), '按鈕列沒有收起來');
+    expect(!(await sp.locator('[data-action="deptroster-new"]').isVisible()), '「新增班級」還看得見');
+    expect((await sp.locator('#deptroster-content', { hasText: '唯讀' }).count()) > 0, '操作欄沒有顯示「唯讀」');
+  });
+  await shot(sp, 'O-校安人員的唯讀畫面');
+  await check('O', '🔒 直接打寫入 API → 一律 forbidden（邊界在後端，不是在畫面）', async () => {
+    for (const [action, params] of [
+      ['deptRosterUpsertClass', { class: { deptId: '森林系', name: '四技一A', tutors: [] } }],
+      ['deptRosterDeleteClass', { classId: '森林系_家族陳美惠' }],
+      ['deptRosterUpsertHead', { deptId: '森林系', head: { name: '壞人' } }],
+    ]) {
+      const r = await apiCall(action, params, t.token);
+      expect(r.success === false && /forbidden/.test(r.error || ''), action + ' 回應=' + JSON.stringify(r).slice(0, 160));
+    }
+  });
+  await check('O', '🔒 校安人員打不開管理 action（名單、稽核都不給）', async () => {
+    for (const action of ['adminUpsertSafetyOfficer', 'adminAuditList', 'adminLocalAccounts']) {
+      const r = await apiCall(action, { safetyOfficer: { email: 'x@y.z' } }, t.token);
+      expect(r.success === false && /admin only/.test(r.error || ''), action + ' 回應=' + JSON.stringify(r).slice(0, 120));
+    }
+  });
+  await c.close();
+
+  await check('O', '稽核紀錄看得到剛才那些動作（登入／瀏覽／異動三種都有）', async () => {
+    await page.locator('[data-admin-tab="audit"]').click();
+    await page.locator('#admin-tab-content table').waitFor({ timeout: 20000 });
+    const body = (await page.locator('#admin-tab-content').textContent() || '').replace(/\s+/g, ' ');
+    evid['O-audit'] = body.slice(0, 260);
+    expect(/查看系所名冊|開啟頁面/.test(body), '沒看到瀏覽紀錄：' + body.slice(0, 200));
+    expect(/adminUpsertSafetyOfficer/.test(body), '沒看到剛才新增校安人員的異動紀錄');
+    expect(new RegExp(SAFETY).test(body), '沒看到校安人員的軌跡（他剛剛查閱過名冊）');
+  });
+  await check('O', '稽核紀錄可以只看某一種類型', async () => {
+    await page.selectOption('#audit-kind', 'view');
+    await page.waitForTimeout(1200);
+    const body = (await page.locator('#admin-tab-content').textContent() || '');
+    expect(!/adminUpsertSafetyOfficer/.test(body), '篩「瀏覽」還看得到異動紀錄');
+    await page.selectOption('#audit-kind', '');
+  });
+  await shot(page, 'O-稽核紀錄');
+
+  await check('O', '用途說明按鈕隨時打得開（勾過不再顯示的人也看得回來）', async () => {
+    await page.locator('[data-action="purpose-notice"]').click();
+    await page.locator('#modal-overlay.open', { hasText: '個資蒐集用途告知' }).waitFor({ timeout: 5000 });
+    const txt = await page.locator('#modal-box').textContent();
+    expect(/校安人員於危機或緊急事件即時聯繫/.test(txt || ''), '視窗內容不是指定的那段文案：' + (txt || '').slice(0, 120));
+    expect((await page.locator('#purpose-notice-hide').count()) === 0, '手動打開時不該再出現「不再顯示」的勾選');
+    await page.locator('[data-action="purpose-notice-close"]').click();
+  });
+  await check('O', '勾了「不再顯示」→ 寫進 localStorage，重載後不再跳出', async () => {
+    await page.evaluate(({ rootId }) => localStorage.removeItem('tutor_purpose_notice_hidden_' + rootId), { rootId: ROOT_FOLDER_ID });
+    await page.reload();
+    await page.locator('#modal-overlay.open', { hasText: '個資蒐集用途告知' }).waitFor({ timeout: 20000 });
+    await page.check('#purpose-notice-hide');
+    await page.locator('[data-action="purpose-notice-close"]').click();
+    const saved = await page.evaluate(({ rootId }) => localStorage.getItem('tutor_purpose_notice_hidden_' + rootId), { rootId: ROOT_FOLDER_ID });
+    expect(saved === '1', 'localStorage 沒記住：' + saved);
+    await page.reload();
+    await page.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 20000 });
+    await page.waitForTimeout(1500);
+    expect((await page.locator('#modal-overlay.open').count()) === 0, '勾了不再顯示卻還是跳出來了');
+  });
+});
+
 // ══ N：快速版切換（Pages 當入口、後端在執行期決定）═══════════════════════════════
 // FAST_BACKEND_BY_ROOT_ 是編譯期常數，兩個環境現在都還是空字串（對外通道還沒建），
 // 所以這裡把 HTML 就地改一個字串，塞進一個**假的快速版**（用 route 攔截、轉給同一個模擬器）。
@@ -1598,6 +1777,7 @@ await flow('N', async () => {
   const up = await openWith(true, 'fast');
   await check('N', '快速版上線 → 自動走快速版，API 打到新位址而不是 GAS', async () => {
     await up.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 20000 });
+    await dismissPurposeNotice(up.p);   // 告知視窗的遮罩會擋住下一步要按的切換鈕
     evid['N-hits-up'] = JSON.stringify(up.hits);
     expect(up.hits.healthz > 0, '沒有探測 /healthz');
     expect(up.hits.exec > 0, 'API 沒有打到快速版：' + JSON.stringify(up.hits));
