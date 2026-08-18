@@ -69,8 +69,17 @@ export function pairClasses(localById, remoteById) {
   const nameKey = (c) => (c ? String(c.deptId || '') + '\u0000' + String(c.name || '') : '');
   const pairs = [];
   const usedRemote = new Set();
+  const leftover = [];
+
+  // **第一趟只做 id 配對**，第二趟才用班名補。分兩趟不是為了好看：單趟掃描時，
+  // 排在前面的本機班可能用「班名」先把某個遠端班配走，而稍後那個**同 id** 的本機班
+  // 又會再配到它一次——同一個遠端班被配兩次，統計就會出現「本機 380、遠端 377、相同 380」
+  // 這種不可能的數字，而那 3 個沒被真正配到的本機班會被當成已同步（2026-08-18 實際發生）。
   for (const lid of Object.keys(localById).sort()) {
-    if (remoteById[lid]) { pairs.push({ lid: lid, rid: lid }); usedRemote.add(lid); continue; }
+    if (remoteById[lid]) { pairs.push({ lid: lid, rid: lid }); usedRemote.add(lid); }
+    else leftover.push(lid);
+  }
+  for (const lid of leftover) {
     const want = nameKey(localById[lid]);
     const rid = Object.keys(remoteById).find((k) => !usedRemote.has(k) && nameKey(remoteById[k]) === want);
     if (rid) { pairs.push({ lid: lid, rid: rid, viaName: true }); usedRemote.add(rid); }

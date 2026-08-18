@@ -110,3 +110,16 @@ test('一邊有、另一邊完全沒有（連同名的都沒有）→ 才算新�
   const p2 = planSync({}, { 'D_b': C('b') }, {});
   assert.deepEqual(p2.createLocal, ['D_b']);
 });
+
+test('🔒 配對要分兩趟：早一點的班用班名配走某個遠端班，不可以讓同 id 的班又配到它一次', () => {
+  // 2026-08-18 實際發生：單趟掃描時同一個遠端班被配兩次，統計變成「本機 380、遠端 377、
+  // 相同 380」這種不可能的數字，而真正沒配到的本機班被當成已同步、永遠不會被推上去。
+  const local = { 'A_一': C('一'), 'D_二B': C('二B') };
+  const remote = { 'D_二B': C('一'), 'Z_其他': C('九') };   // 遠端的 D_二B 名字其實是「一」
+  const pairs = pairClasses(local, remote);
+  const used = pairs.filter((p) => p.rid).map((p) => p.rid);
+  assert.equal(new Set(used).size, used.length, '同一個遠端班被配了兩次：' + used.join('、'));
+  // D_二B 應該以 id 配到 D_二B（id 優先），A_一 則沒有對象
+  assert.equal(pairs.find((p) => p.lid === 'D_二B').rid, 'D_二B');
+  assert.equal(pairs.find((p) => p.lid === 'A_一').rid, null);
+});
