@@ -124,7 +124,7 @@ async function main() {
   catch (e) { firstRun = true; }
 
   const plan = planSync(localById, remoteById, baseline);
-  console.log('[sync] 本機 ' + Object.keys(localById).length + ' 班、一般版 ' + Object.keys(remoteById).length + ' 班、相同 ' + plan.同);
+  console.log('[sync] 本機 ' + Object.keys(localById).length + ' 班、一般版 ' + Object.keys(remoteById).length + ' 班、相同 ' + plan.same);
   const show = (label, ids) => { if (ids.length) console.log('  ' + label + ' ' + ids.length + '：' + ids.slice(0, 8).join('、') + (ids.length > 8 ? ' …' : '')); };
   show('一般版→快速版（只有那邊改）', plan.pull);
   show('快速版→一般版（只有這邊改）', plan.push);
