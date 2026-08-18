@@ -52,25 +52,60 @@ export function projectClass(c) {
 }
 const key = (o) => JSON.stringify(o);
 
+// 配對兩邊的班級（純函式）。**先用 id 配，配不到的再用「系所＋班名」配**。
+//
+// 為什麼需要第二把鑰匙：同一個班可能在兩邊各自被建立過，而 id 是由系所＋班名衍生的、
+// 撞名時會自動加 `_2`——於是同一個「四技二B」在一邊是 `農企系_四技二B`、另一邊是
+// `農企系_四技二B_2`。只用 id 配的話它們會被當成「兩邊各有一個對方沒有的班」，
+// 於是每一輪都嘗試新增、每一輪都被對方以「class name already exists」拒絕，永遠不會收斂
+// （2026-08-18 實際發生兩次）。
+//
+// 順序很重要：**id 優先**。反過來（名字優先）會把「改名」誤判成「刪一個、加一個」，
+// 而改名是很常見的操作。
+export function pairClasses(localById, remoteById) {
+  const nameKey = (c) => (c ? String(c.deptId || '') + '\u0000' + String(c.name || '') : '');
+  const pairs = [];
+  const usedRemote = new Set();
+  for (const lid of Object.keys(localById).sort()) {
+    if (remoteById[lid]) { pairs.push({ lid: lid, rid: lid }); usedRemote.add(lid); continue; }
+    const want = nameKey(localById[lid]);
+    const rid = Object.keys(remoteById).find((k) => !usedRemote.has(k) && nameKey(remoteById[k]) === want);
+    if (rid) { pairs.push({ lid: lid, rid: rid, viaName: true }); usedRemote.add(rid); }
+    else pairs.push({ lid: lid, rid: null });
+  }
+  for (const rid of Object.keys(remoteById).sort()) {
+    if (!usedRemote.has(rid)) pairs.push({ lid: null, rid: rid });
+  }
+  return pairs;
+}
+
 // 三方比對（純函式，可單元測試）。回傳要做的動作，不碰任何 I/O。
+// 基準以**本機 id** 為鍵（本機 id 是這一端的穩定識別）。
 export function planSync(localById, remoteById, baselineById) {
-  const ids = Array.from(new Set(Object.keys(localById).concat(Object.keys(remoteById))));
-  const plan = { pull: [], push: [], conflict: [], createLocal: [], createRemote: [], same: 0, missingBaseline: [] };
-  for (const id of ids.sort()) {
-    const l = localById[id] || null;
-    const r = remoteById[id] || null;
-    const b = baselineById[id] === undefined ? null : baselineById[id];
+  const plan = {
+    pull: [], push: [], conflict: [], createLocal: [], createRemote: [],
+    same: 0, missingBaseline: [], idMismatch: [],
+    // 本機 id → 一般版 id 的對照。名字配對出來的那些兩邊 id 不同，**推送必須用對方的 id**，
+    // 拿本機 id 去打會得到 class not found。
+    ridOf: {},
+  };
+  for (const { lid, rid, viaName } of pairClasses(localById, remoteById)) {
+    const l = lid ? localById[lid] : null;
+    const r = rid ? remoteById[rid] : null;
+    const b = (lid && baselineById[lid] !== undefined) ? baselineById[lid] : null;
+    if (lid && rid) plan.ridOf[lid] = rid;
+    if (viaName) plan.idMismatch.push(lid + ' ↔ ' + rid);
 
     if (l && r && key(l) === key(r)) { plan.same++; continue; }
-    if (l && !r) { plan.createRemote.push(id); continue; }
-    if (r && !l) { plan.createLocal.push(id); continue; }
+    if (l && !r) { plan.createRemote.push(lid); continue; }
+    if (r && !l) { plan.createLocal.push(rid); continue; }
 
-    if (b === null) { plan.missingBaseline.push(id); continue; }   // 沒有基準，不猜
+    if (b === null) { plan.missingBaseline.push(lid); continue; }   // 沒有基準，不猜
     const lChanged = key(l) !== key(b);
     const rChanged = key(r) !== key(b);
-    if (lChanged && rChanged) plan.conflict.push(id);
-    else if (lChanged) plan.push.push(id);
-    else if (rChanged) plan.pull.push(id);
+    if (lChanged && rChanged) plan.conflict.push(lid + (viaName ? '（一般版 id：' + rid + '）' : ''));
+    else if (lChanged) plan.push.push(lid);
+    else if (rChanged) plan.pull.push(lid);
   }
   return plan;
 }
@@ -133,6 +168,7 @@ async function main() {
   show('一般版有、這邊沒有 → 新增到這邊', plan.createLocal);
   show('這邊有、一般版沒有 → 新增到那邊', plan.createRemote);
   show('⚠️ 沒有同步基準、無法判斷（先人工對齊）', plan.missingBaseline);
+  show('兩邊 id 不同、靠班名配對起來的', plan.idMismatch);
 
   if (firstRun && (plan.pull.length || plan.push.length || plan.conflict.length || plan.missingBaseline.length)) {
     console.log('\n[sync] 這是第一次跑（還沒有同步基準），但兩邊已經有差異——**不動作**。');
@@ -147,7 +183,9 @@ async function main() {
   if (pulled.length) {
     const next = localRaw.slice();
     for (const id of pulled) {
-      const r = remote.classes.find((c) => c.id === id);
+      // id 可能是本機 id（pull）或一般版 id（createLocal）；前者要換成配對到的一般版 id。
+      const rid = plan.ridOf[id] || id;
+      const r = remote.classes.find((c) => c.id === rid);
       const idx = next.findIndex((c) => c && c.id === id);
       if (idx === -1) next.push(Object.assign({ id: id }, r));
       else {
@@ -175,7 +213,7 @@ async function main() {
       await call({
         action: 'deptRosterUpsertClass', rootFolderId: env.GAS_ROOT_FOLDER_ID, sessionToken: token,
         class: {
-          id: plan.createRemote.includes(id) ? undefined : id,
+          id: plan.createRemote.includes(id) ? undefined : (plan.ridOf[id] || id),
           deptId: c.deptId, name: c.name, displayName: c.displayName || c.name,
           tutors: (c.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '', ext: t.ext || '', mobile: t.mobile || t.phone || '' })),
         },
@@ -193,7 +231,7 @@ async function main() {
     if (plan.conflict.includes(id)) return;
     if (failed.some((f) => f.startsWith(id + '：'))) return;
     if (plan.missingBaseline.includes(id)) return;
-    nextBaseline[id] = pulled.includes(id) ? remoteById[id] : localById[id];
+    nextBaseline[id] = pulled.includes(id) ? remoteById[plan.ridOf[id] || id] : localById[id];
   });
   plan.createLocal.forEach((id) => { nextBaseline[id] = remoteById[id]; });
   fs.writeFileSync(baselinePath, JSON.stringify({ at: new Date().toISOString(), classes: nextBaseline }, null, 2), { mode: 0o600 });
