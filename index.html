@@ -1106,9 +1106,9 @@ async function probeFastBackend() {
 async function resolveBackend() {
   if (isSelfHosted() || !FAST_BACKEND_URL) return;   // 已經在自架站上／這個環境還沒有快速版
   fastBackendOnline = await probeFastBackend();
-  let pref = null;
-  try { pref = sessionStorage.getItem(SS_BACKEND_PREF_KEY); } catch (e) {}
-  const useFast = fastBackendOnline && pref !== 'normal';
+  // 手動覆寫已停用（切換鈕收起來了，見 renderBackendSwitch）。殘留的 sessionStorage 一律不看：
+  // 沒有按鈕可以改回來的話，被它釘在一般版的人會一直看到較舊的資料而不知道原因。
+  const useFast = fastBackendOnline;
   activeBackend = useFast ? 'fast' : 'normal';
   activeBackendUrl = useFast ? (FAST_BACKEND_URL + '/exec') : APPS_SCRIPT_URL;
 }
@@ -1125,7 +1125,10 @@ function switchBackend(to) {
 function renderBackendSwitch() {
   const boxes = [$('backend-switch-login'), $('backend-switch-header')].filter(Boolean);
   if (!boxes.length) return;
-  const show = !isSelfHosted() && !!FAST_BACKEND_URL;
+  // 2026-08-18 使用者：「快速版與一般版的選擇變成自動選擇，不需要給使用者選項」——
+  // 兩個名字對使用者沒有意義，而且選錯只會讓人看到舊資料。整組收起來（**是隱藏不是移除**：
+  // 探測與自動選擇的邏輯原封不動，要恢復把這一行改回 !isSelfHosted() && !!FAST_BACKEND_URL）。
+  const show = false;
   boxes.forEach((box) => {
     box.style.display = show ? '' : 'none';
     if (!show) return;
@@ -3422,7 +3425,7 @@ function renderAdminAudit() {
   const rows = auditState.rows;
   $('admin-tab-content').innerHTML =
     '<div class="card"><h3>稽核紀錄</h3>' +
-    '<p class="field-hint">誰在什麼時候登入、看了哪些畫面、改了什麼。<b>瀏覽</b>來自前端回報' +
+    '<p class="field-hint">誰在什麼時候登入、看了哪些畫面、改了什麼。<b>一般版與快速版的軌跡都在這裡</b>（「來源」欄），一般版那邊每 5 分鐘同步過來一次。<b>瀏覽</b>來自前端回報' +
     '（同一組事件在同一次登入中只記一次，避免同一頁來回切就灌爆紀錄）；<b>異動</b>是後端在' +
     '寫入資料時自己寫的，前端動不了它。只顯示最近的紀錄，不是完整匯出。</p>' +
     '<div class="admin-toolbar">' +
@@ -3441,7 +3444,7 @@ function renderAdminAudit() {
     (auditState.error ? '<div class="import-error-box"><div class="import-error-title">讀取失敗</div>' + escapeHtml(auditState.error) + '</div>' : '') +
     (rows === null ? '<div class="empty-hint">載入中…</div>' :
       '<p class="field-hint">符合條件 <b>' + auditState.total + '</b> 筆，顯示最近 <b>' + rows.length + '</b> 筆。</p>' +
-      '<div class="table-wrap"><table><thead><tr><th>時間</th><th>類型</th><th>誰</th><th>動作</th><th>對象／內容</th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>時間</th><th>來源</th><th>類型</th><th>誰</th><th>動作</th><th>對象／內容</th></tr></thead><tbody>' +
       (rows.length ? rows.map(function (r) {
         // 「誰」顯示姓名（含身分與系所），email 縮小放第二行——看的人先認人，需要時才對 email。
         const whoHtml = r.byName && r.byName !== r.by
@@ -3454,11 +3457,14 @@ function renderAdminAudit() {
         ].filter(Boolean).join(' ');
         return '<tr>' +
           '<td data-label="時間" style="white-space:nowrap;">' + escapeHtml(fmtAuditTime(r.at)) + '</td>' +
+          // 來源＝這筆軌跡發生在哪一邊。兩邊各自記錄，合起來看才完整（使用者 2026-08-18：
+          // 助理在一般版填手機，快速版的稽核頁看不到那個人，像是「改了卻沒有軌跡」）。
+          '<td data-label="來源">' + escapeHtml(r.sourceLabel || '') + '</td>' +
           '<td data-label="類型">' + escapeHtml(AUDIT_KIND_LABEL_[r.kind] || r.kind) + '</td>' +
           '<td data-label="誰">' + whoHtml + '</td>' +
           '<td data-label="動作">' + escapeHtml(AUDIT_ACTION_LABEL_[r.action] || r.action) + '</td>' +
           '<td data-label="對象／內容">' + escapeHtml(what) + '</td></tr>';
-      }).join('') : '<tr><td colspan="5"><div class="empty-hint">這個條件下沒有紀錄。</div></td></tr>') +
+      }).join('') : '<tr><td colspan="6"><div class="empty-hint">這個條件下沒有紀錄。</div></td></tr>') +
       '</tbody></table></div>') +
     '</div>';
   const reload = function () {
@@ -4038,10 +4044,19 @@ document.body.addEventListener('click', function (e) {
 async function serverAdminCall(op, params) {
   // 兩軌同一套 UI、兩種傳輸：自架軌的本機帳號活在 server/ 的 users.json（走 /admin/accounts），
   // GAS 軌活在 Drive 的 localAccounts.json（走 adminLocalAccounts action）。op 名稱刻意一致。
-  if (!isSelfHosted()) return proxyCall('adminLocalAccounts', Object.assign({ op: op }, params || {}));
+  // **判斷依據是「現在打哪個後端」，不是「頁面在哪裡」**（2026-08-18 修）：
+  // 入口搬到 Pages 之後，頁面在 npustscc.github.io 而後端可能是自架的快速版。原本用
+  // isSelfHosted()（看頁面）判斷，於是快速版上會走 adminLocalAccounts action，
+  // 而那支讀的是 Drive 語意的 store/localAccounts.json——自架端根本沒有那個檔，
+  // 本機帳號其實在 server/data/users.json。結果：所有助理都顯示「帳號尚未建立」，
+  // 而「建立帳號」按下去會寫進一個 /login 根本不看的檔案（等於沒作用）。
+  const selfHostedBackend = isSelfHosted() || activeBackend === 'fast';
+  if (!selfHostedBackend) return proxyCall('adminLocalAccounts', Object.assign({ op: op }, params || {}));
   // 用模組層級的 sessionToken（load() 已從 localStorage 還原並驗過效期），不另外讀一次。
   const body = Object.assign({ op: op, sessionToken: sessionToken }, params || {});
-  const res = await fetch('./admin/accounts', {
+  // 頁面在 Pages 時要打絕對位址（快速版那台），在自架站上才是相對路徑。
+  const endpoint = isSelfHosted() ? './admin/accounts' : (FAST_BACKEND_URL + '/admin/accounts');
+  const res = await fetch(endpoint, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error('伺服器回應 ' + res.status);

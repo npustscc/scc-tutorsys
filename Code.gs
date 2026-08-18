@@ -160,6 +160,7 @@ function doPost(e) {
       case 'auditAppend':               result = auditAppendAction_(params, ctx, userEmail); break;
       case 'syncGetConfigLists':        result = syncGetConfigListsAction_(params, ctx, userEmail); break;
       case 'syncPutConfigLists':        result = syncPutConfigListsAction_(params, ctx, userEmail); break;
+      case 'syncGetAudit':              result = syncGetAuditAction_(params, ctx, userEmail); break;
       case 'adminAuditList':            result = adminAuditListAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
@@ -4169,6 +4170,57 @@ function auditAppendAction_(params, ctx, userEmail) {
 // adminAuditList：admin only。把三個來源合成一張時間軸——
 //   audit_log.json（後端寫的異動）／audit_views.json（前端回報的瀏覽）／sessions.json（登入）。
 // 只回最近 limit 筆（預設 300、上限 2000）：這是給人看的畫面，不是資料匯出。
+// 把三個來源攤成同一種列（純函式）。adminAuditList 與「另一邊送來的稽核」共用同一支，
+// 否則兩邊的欄位與標籤遲早不一致，而稽核表最不能有的就是「同一件事兩種說法」。
+function buildAuditRows_(changes, views, sessions, source, label) {
+  const rows = [];
+  const push = function (kind, at, by, action, detail, target) {
+    if (!at) return;
+    rows.push({ kind: kind, at: at, by: by || '', action: action || '',
+      detail: detail || '', target: target || '', source: source, sourceLabel: label });
+  };
+  (Array.isArray(changes) ? changes : []).forEach(function (e) {
+    if (!e) return;
+    push('change', e.at, e.by, e.action, '', String(e.targetId || ''));
+  });
+  (Array.isArray(views) ? views : []).forEach(function (e) {
+    if (!e) return;
+    push('view', e.at, e.by, e.action, [e.deptId, e.detail].filter(Boolean).join(' / '), e.page || '');
+  });
+  (Array.isArray(sessions) ? sessions : []).forEach(function (s2) {
+    if (!s2) return;
+    push('login', s2.at || (s2.issuedAtMs ? new Date(s2.issuedAtMs).toISOString() : ''), s2.email, 'login',
+      [s2.ip || '', s2.geo || ''].filter(Boolean).join(' / ').slice(0, 160), '');
+  });
+  return rows;
+}
+
+// syncGetAudit：把這一邊的稽核交給同步服務，讓兩邊的稽核可以合成一張表。
+// 使用者 2026-08-18：「稽核是 GAS 與 COMA 版分開稽核，所以才會這樣，也把稽核整合吧。」
+// 只給同步服務帳號（與名單同步同一道守門），而且**有筆數上限**——這是給人看的時間軸，
+// 不是資料匯出，一次搬全部只會讓每五分鐘的同步變成搬檔案。
+const SYNC_AUDIT_MAX_ = 1500;
+// 稽核表上的「來源」標籤。文案刻意不出現主機名稱（使用者 2026-08-17 的要求），
+// 只講使用者看得懂的「快速版／一般版」。兩個環境跑同一份程式，所以「這一邊」永遠是
+// 使用者當下打的那一邊——他在快速版看到的 remote 就是一般版，反之亦然。
+const THIS_SIDE_LABEL_ = '快速版';
+const OTHER_SIDE_LABEL_ = '一般版';
+function syncGetAuditAction_(params, ctx, userEmail) {
+  requireSyncService_(loadRolesForCtx_(ctx, userEmail));
+  const tail = function (arr) {
+    const a = Array.isArray(arr) ? arr : [];
+    return a.length > SYNC_AUDIT_MAX_ ? a.slice(a.length - SYNC_AUDIT_MAX_) : a;
+  };
+  const changes = readJsonSafe_('audit_log.json', ctx, { entries: [] });
+  const views = readJsonSafe_('audit_views.json', ctx, { entries: [] });
+  const sess = readJsonSafe_('sessions.json', ctx, { sessions: [] });
+  return {
+    changes: tail(changes.entries),
+    views: tail(views.entries),
+    sessions: tail(sess.sessions),
+  };
+}
+
 function adminAuditListAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
   const limit = Math.min(Math.max(Number(params.limit) || 300, 1), 2000);
@@ -4217,48 +4269,40 @@ function adminAuditListAction_(params, ctx, userEmail) {
     return w.name + (w.role ? '（' + w.role + (w.extra ? '・' + w.extra : '') + '）' : '');
   };
 
-  const rows = [];
-  const push = function (kind, at, by, action, detail, target, page) {
-    if (!at) return;
-    rows.push({
-      kind: kind, at: at, by: by || '', byName: label(by), action: action || '',
-      detail: detail || '',
-      // page／分頁代號原樣送出去，由前端翻成畫面上的名稱——只有前端有那張標籤表
-      // （NAV_PAGES / ADMIN_TABS），後端硬抄一份就會兩邊漂移。
-      page: page || '',
-      // targetLabel：被動到的那個對象也翻成人話（「農園生產系的系辦助理 王小美」），
-      // 不然稽核表上只有一串 email，看的人得自己去別的分頁查那是誰。
-      target: target || '', targetLabel: target ? label(target) : '',
+  // 這一邊的稽核 ＋ 另一邊送過來的（audit_remote.json，同步腳本每 5 分鐘拉一次）。
+  // 使用者實際踩到的問題：助理在一般版填手機，快速版的稽核頁完全看不到那個人，
+  // 看起來像「有人改了資料卻沒有留下軌跡」。兩邊合起來看才是完整的。
+  const remote = readJsonSafe_('audit_remote.json', ctx, {});
+  const deptLabel = {};
+  (departments || []).forEach(function (d) { if (d) deptLabel[d.id] = d.fullName || d.name; });
+
+  const rows = buildAuditRows_(
+    (readJsonSafe_('audit_log.json', ctx, { entries: [] }) || {}).entries,
+    (readJsonSafe_('audit_views.json', ctx, { entries: [] }) || {}).entries,
+    (readJsonSafe_('sessions.json', ctx, { sessions: [] }) || {}).sessions,
+    'local', THIS_SIDE_LABEL_
+  ).concat(buildAuditRows_(remote.changes, remote.views, remote.sessions, 'remote', OTHER_SIDE_LABEL_))
+    .map(function (r) {
+      const out = Object.assign({}, r, { byName: label(r.by), page: '', targetLabel: '' });
+      if (r.kind === 'view') {
+        out.page = r.target;                 // builder 把 page 放在 target
+        out.target = '';
+        // 系所一律顯示全名（使用者看的是「農園生產系」不是「農園系」）
+        const parts = String(out.detail || '').split(' / ');
+        if (deptLabel[parts[0]]) { parts[0] = deptLabel[parts[0]]; out.detail = parts.join(' / '); }
+        return out;
+      }
+      const t = String(r.target || '');
+      const arrow = t.indexOf(' → ');
+      if (arrow !== -1) {
+        // 改 email 的 targetId 是「舊 → 新」，兩邊都翻成人話（舊的多半已成墓碑而查不到）
+        out.detail = (label(t.slice(0, arrow)) || t.slice(0, arrow)) + ' → ' + (label(t.slice(arrow + 3)) || t.slice(arrow + 3));
+        out.target = '';
+        return out;
+      }
+      out.targetLabel = t ? label(t) : '';
+      return out;
     });
-  };
-
-  const changes = readJsonSafe_('audit_log.json', ctx, { entries: [] });
-  (Array.isArray(changes.entries) ? changes.entries : []).forEach(function (e) {
-    if (!e) return;
-    // 「a@x → b@x」這種改 email 的 targetId 兩邊都翻成人話（改完之後才查得到新的那個，
-    // 舊的通常已經是墓碑而查不到，所以查不到就原樣顯示 email）。
-    const t = String(e.targetId || '');
-    const arrow = t.indexOf(' → ');
-    const detail = arrow === -1 ? '' :
-      (label(t.slice(0, arrow)) || t.slice(0, arrow)) + ' → ' + (label(t.slice(arrow + 3)) || t.slice(arrow + 3));
-    push('change', e.at, e.by, e.action, detail, arrow === -1 ? t : '');
-  });
-
-  const views = readJsonSafe_('audit_views.json', ctx, { entries: [] });
-  (Array.isArray(views.entries) ? views.entries : []).forEach(function (e) {
-    if (!e) return;
-    // 系所一律顯示全名（使用者看的是「農園生產系」不是「農園系」）。
-    const d = (departments || []).filter(function (x) { return x && x.id === e.deptId; })[0];
-    const deptName = d ? (d.fullName || d.name) : (e.deptId || '');
-    push('view', e.at, e.by, e.action, deptName, '', e.page || e.detail || '');
-  });
-
-  const sess = readJsonSafe_('sessions.json', ctx, { sessions: [] });
-  (Array.isArray(sess.sessions) ? sess.sessions : []).forEach(function (s) {
-    if (!s) return;
-    push('login', s.at || (s.issuedAtMs ? new Date(s.issuedAtMs).toISOString() : ''), s.email, 'login',
-      [s.ip || '', s.geo || ''].filter(Boolean).join(' / ').slice(0, 160), '');
-  });
 
   const filtered = rows.filter(function (r) {
     if (wantKind && r.kind !== wantKind) return false;
