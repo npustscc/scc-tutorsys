@@ -344,11 +344,12 @@ const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, ema
 // tunnel 那端**只放行 /healthz 與 /exec** 兩條路徑——前端只需要這兩條（探測＋所有 API），
 // 而自架站的 /login 是本機帳密，46 個帳號的初始密碼就是四位數分機，不能暴露在公網上。
 const FAST_BACKEND_BY_ROOT_ = {
-  // 正式版**刻意先留空**：填下去的那一刻，公開站的後端就從 GAS 正式版換成 coma，
-  // 而兩邊的名冊是不同的資料（coma 上是使用者裁定為正本的那份）。那是資料 cutover，
-  // 需要使用者明確決定，不是把功能推上線而已。
-  // 要切的時候把下面那一格的空字串換成 https://tutor.kiauho.com 即可。
-  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': '',                              // 正式版（尚未 cutover）
+  // 2026-08-18 cutover 完成：使用者裁定**以一般版（GAS 正式版）的資料為主**，已用
+  // import-from-gas 把班級同步過去（376 班 0 差異；系所用 --skip-departments 跳過，
+  // 因為那 37 筆「更新」全部只是把正式全名清空、沒有任何新資訊）。
+  // 注意這條路的失效行為：coma 連不上時前端會**自動退回一般版**（GAS），而那邊的資料
+  // 從今天起就不再更新了——退回去看到的是舊資料，在那邊改的東西也不會回到 coma。
+  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': 'https://tutor.kiauho.com',       // 正式版
   '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT': 'https://tutor-dev.kiauho.com',   // 測試版
 };
 const FAST_BACKEND_URL = FAST_BACKEND_BY_ROOT_[ROOT_FOLDER_ID] || '';   // origin，不含路徑
