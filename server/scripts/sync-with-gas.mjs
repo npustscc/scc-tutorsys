@@ -122,6 +122,17 @@ export function planSync(localById, remoteById, baselineById) {
   return plan;
 }
 
+// 找出「同一個系、同一個班名」的其他本機班（含自己）。同名重複是同步永遠不會收斂的根因，
+// 報告要指名道姓，不然看的人只會看到一句「class name already exists」而無從下手。
+export function duplicateNameIds(localFullById, id) {
+  const me = localFullById[id];
+  if (!me) return [];
+  return Object.keys(localFullById).filter(function (k) {
+    const c = localFullById[k];
+    return c && c.deptId === me.deptId && c.name === me.name;
+  }).sort();
+}
+
 // ── 以下是 I/O 與流程 ─────────────────────────────────────────────────────────
 function readEnv(file) {
   const out = {};
@@ -181,6 +192,19 @@ async function main() {
   show('這邊有、一般版沒有 → 新增到那邊', plan.createRemote);
   show('⚠️ 沒有同步基準、無法判斷（先人工對齊）', plan.missingBaseline);
   show('兩邊 id 不同、靠班名配對起來的', plan.idMismatch);
+  // 同名重複會讓其中一筆永遠配不到對象、每輪都嘗試新增又被拒。先列出來。
+  const dupGroups = {};
+  Object.keys(localFull).forEach(function (k) {
+    const c = localFull[k];
+    if (!c) return;
+    const key2 = String(c.deptId) + ' / ' + String(c.name);
+    (dupGroups[key2] = dupGroups[key2] || []).push(k);
+  });
+  const dups = Object.keys(dupGroups).filter(function (k) { return dupGroups[k].length > 1; });
+  if (dups.length) {
+    console.log('  ⚠️ 本機有同名重複的班（同步永遠不會收斂，請留一筆）：');
+    dups.forEach(function (k) { console.log('     ' + k + ' → ' + dupGroups[k].join('、')); });
+  }
 
   if (firstRun && (plan.pull.length || plan.push.length || plan.conflict.length || plan.missingBaseline.length)) {
     console.log('\n[sync] 這是第一次跑（還沒有同步基準），但兩邊已經有差異——**不動作**。');
@@ -324,10 +348,14 @@ async function main() {
       });
       pushed.push(id);
     } catch (e) {
-      // 「class name already exists」多半是一般版有同名的班但已被刪除（墓碑）——
-      // deptRosterGet 看不到它，所以配對不到，但建立時的同名檢查擋得住。只能由人決定。
-      const hint = /already exists/.test(e.message)
-        ? '（一般版有同名的班但看不到，多半是已刪除的墓碑：請在一般版復原它或把其中一邊改名）' : '';
+      // 「class name already exists」的真正原因（2026-08-18 查證，先前的猜測是錯的）：
+      // **本機同一個系有兩筆同名的班**，其中一筆已經用 id 跟遠端配上了，另一筆就配不到對象，
+      // 於是被當成「要新增」，而遠端當然說那個名字已經有人用了。
+      // 來源是舊式的「改名升級」（把班名往上移一屆、id 沒動），後來有人又補建了 id 正確的班。
+      // 這種要由人決定留哪一筆——所以只報告、不自動處理。
+      const dupIds = duplicateNameIds(localFull, id);
+      const hint = /already exists/.test(e.message) && dupIds.length
+        ? '（本機這個系有兩筆同名的班：' + dupIds.join('、') + '，請留一筆）' : '';
       failed.push(id + '：' + e.message + hint);
     }
   }
