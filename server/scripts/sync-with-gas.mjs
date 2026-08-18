@@ -376,6 +376,26 @@ async function main() {
   console.log('[sync] 完成（同步基準 ' + Object.keys(nextBaseline).length + ' 班）' +
     (plan.conflict.length ? '；**有 ' + plan.conflict.length + ' 筆衝突未處理**' : ''));
 
+  // ── 稽核：把另一邊的軌跡拉過來，兩邊合成一張表 ─────────────────────────────
+  // 使用者實際踩到的問題：助理在一般版填手機，快速版的稽核頁完全看不到那個人。
+  // 只拉不推——各自的稽核就是各自的事實，推上去等於在對方的紀錄裡插入我這邊的內容。
+  try {
+    const a = await call({ action: 'syncGetAudit', rootFolderId: env.GAS_ROOT_FOLDER_ID, sessionToken: token });
+    const n = (a.changes || []).length + (a.views || []).length + (a.sessions || []).length;
+    if (apply) {
+      const p2 = path.join(storeDir, 'audit_remote.json');
+      const tmp3 = p2 + '.tmp-' + process.pid;
+      fs.writeFileSync(tmp3, JSON.stringify({
+        at: new Date().toISOString(), source: '一般版',
+        changes: a.changes || [], views: a.views || [], sessions: a.sessions || [],
+      }, null, 2), { mode: 0o600 });
+      fs.renameSync(tmp3, p2);
+    }
+    console.log('  稽核（一般版→快速版）：' + n + ' 筆' + (apply ? '' : '（預演，未寫入）'));
+  } catch (e) {
+    console.log('  ⚠️ 稽核同步略過：' + e.message);
+  }
+
   await notifyIfChanged({
     dataDir, env, cwd,
     conflicts: plan.conflict,

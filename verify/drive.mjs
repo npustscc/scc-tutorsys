@@ -1688,6 +1688,13 @@ await flow('O', async () => {
     expect(!/adminUpsertSafetyOfficer/.test(body), '動作欄還在顯示 action 代號，應該翻成人看得懂的名稱');
     expect(new RegExp(SAFETY).test(body), '沒看到校安人員的軌跡（他剛剛查閱過名冊）');
   });
+  await check('O', '稽核紀錄有「來源」欄，標明這筆軌跡發生在哪一邊', async () => {
+    const heads = await page.locator('#admin-tab-content thead th').allTextContents();
+    evid['O-audit-cols'] = heads.join('｜');
+    expect(heads.includes('來源'), '稽核表少了來源欄：' + heads.join('｜'));
+    const body = (await page.locator('#admin-tab-content').textContent() || '');
+    expect(/快速版|一般版/.test(body), '來源欄沒有內容');
+  });
   await check('O', '稽核紀錄的「誰」顯示姓名而不是只有 email', async () => {
     const body = (await page.locator('#admin-tab-content').textContent() || '');
     expect(/測試管理員|校安測試/.test(body), '沒有顯示姓名，只有 email：' + body.slice(0, 200));
@@ -1868,42 +1875,54 @@ await flow('N', async () => {
     expect(up.hits.healthz > 0, '沒有探測 /healthz');
     expect(up.hits.exec > 0, 'API 沒有打到快速版：' + JSON.stringify(up.hits));
     expect(up.hits.gas === 0, '仍然打了一般版：' + JSON.stringify(up.hits));
-    const tag = await up.p.locator('#backend-switch-header').textContent();
-    evid['N-tag-fast'] = (tag || '').trim();
-    expect(/快速版/.test(tag || ''), '按鈕沒顯示快速版狀態：' + tag);
-    expect(!/coma|comanage|192\.168|伺服器/i.test(tag || ''), '文案洩漏了主機名稱：' + tag);
+    // 狀態列已收起（2026-08-18 使用者：自動選擇、不給選項），所以不再驗它的文字。
+    // 「自動走到快速版」由上面三個 hits 斷言證明，那才是真正要保證的行為。
+    evid['N-active-backend'] = await up.p.evaluate(() => activeBackend);
+    expect((await up.p.evaluate(() => activeBackend)) === 'fast', '沒有自動選到快速版');
   });
-  await shot(up.p, 'N-快速版上線時的狀態列');
+  await shot(up.p, 'N-快速版上線（狀態列已收起）');
 
-  await check('N', '按「切回一般版」→ 記下選擇、作廢 session、退回登入頁（切換必須重新登入）', async () => {
-    await up.p.locator('#backend-switch-header button[data-backend="normal"]').click();
-    // 重載後：快速版仍然上線，但因為手動覆寫，這一輪要停在一般版。
-    await up.p.locator('#backend-switch-login', { hasText: '已上線' }).waitFor({ timeout: 20000 });
+  await check('N', '2026-08-18：切換鈕不再出現（自動選擇，不給使用者選項）', async () => {
+    const n = await up.p.locator('#backend-switch-header button[data-backend], #backend-switch-login button[data-backend]').count();
+    expect(n === 0, '仍然看得到切換鈕（' + n + ' 顆）');
+    const visible = await up.p.locator('#backend-switch-header').isVisible().catch(() => false);
+    expect(!visible, '狀態列容器沒有收起來');
+  });
+  await check('N', '🔒 殘留的手動覆寫不會把人釘在一般版（沒有按鈕可以改回來）', async () => {
+    // 切換鈕收起來之後，舊分頁留下的 sessionStorage 若還被採用，那個人會一直看到較舊的
+    // 資料而且沒有任何辦法切回來。所以現在一律忽略它——這一條就是釘住那件事。
+    await up.p.evaluate(({ rootId }) => sessionStorage.setItem('tutor_backend_pref_' + rootId, 'normal'), { rootId: ROOT_FOLDER_ID });
+    await up.p.reload();
+    await up.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 25000 });
+    const backend = await up.p.evaluate(() => activeBackend);
+    evid['N-stale-pref-ignored'] = backend;
+    expect(backend === 'fast', '殘留的 pref 把人釘在了 ' + backend);
     const state = await up.p.evaluate(({ rootId }) => ({
       pref: sessionStorage.getItem('tutor_backend_pref_' + rootId),
       session: localStorage.getItem('tutor_session_' + rootId),
       loginVisible: getComputedStyle(document.getElementById('login-page')).display !== 'none',
     }), { rootId: ROOT_FOLDER_ID });
     evid['N-after-switch'] = JSON.stringify({ pref: state.pref, hasSession: !!state.session, loginVisible: state.loginVisible });
-    expect(state.pref === 'normal', '沒有記下手動切換的選擇：' + state.pref);
-    expect(!state.session, '另一個後端簽的 session 應該被清掉');
-    expect(state.loginVisible, '切換後端之後應該要求重新登入');
+    expect(state.pref === 'normal', 'pref 應該還在（我們只是不採用它，不是刪掉）：' + state.pref);
+    expect(!state.loginVisible, 'pref 被忽略之後應該照常進系統，不該被踢回登入頁');
   });
   await shot(up.p, 'N-切回一般版之後的登入頁');
   await up.c.close();
 
   const down = await openWith(false, 'normal');
-  await check('N', '快速版離線 → 退回一般版，系統照常能用，按鈕標「目前離線」', async () => {
+  await check('N', '快速版離線 → 自動退回一般版，系統照常能用', async () => {
     await down.p.locator('.nav-btn', { hasText: '後台管理' }).waitFor({ timeout: 25000 });
     evid['N-hits-down'] = JSON.stringify(down.hits);
     expect(down.hits.gas > 0, '沒有退回一般版：' + JSON.stringify(down.hits));
     expect(down.hits.exec === 0, '快速版離線卻還是打了它：' + JSON.stringify(down.hits));
-    const tag = (await down.p.locator('#backend-switch-header').textContent()) || '';
-    evid['N-tag-down'] = tag.trim();
-    expect(/離線/.test(tag), '按鈕沒標離線：' + tag);
-    expect(!/切換/.test(tag), '離線時不該還給得出切換入口：' + tag);
+    evid['N-active-backend-down'] = await down.p.evaluate(() => activeBackend);
+    expect((await down.p.evaluate(() => activeBackend)) === 'normal', '沒有自動退回一般版');
+    // 狀態列收起來了，所以「離線」不再顯示給使用者看——這是刻意的：他不需要知道
+    // 現在打哪個後端，只需要系統能用。離線退回的行為由上面的 hits 斷言保證。
+    const visible = await down.p.locator('#backend-switch-header').isVisible().catch(() => false);
+    expect(!visible, '狀態列沒有收起來');
   });
-  await shot(down.p, 'N-快速版離線時的狀態列');
+  await shot(down.p, 'N-快速版離線（自動退回一般版）');
   await down.c.close();
 });
 

@@ -513,9 +513,24 @@ function startServer(config) {
     }
     const pathname = urlObj.pathname;
 
-    if (pathname === '/exec' || pathname === '/healthz') {
+    // /admin/accounts 也要開（2026-08-18）：入口在 Pages、後端可能是這台，後台的
+    // 「系辦助理帳號」那一頁要打得到它。它是 POST + application/json，**不是簡單請求**，
+    // 所以還得回預檢（OPTIONS）——只回 CORS 標頭、不執行任何動作。
+    const CORS_PATHS_ = ['/exec', '/healthz', '/admin/accounts'];
+    if (CORS_PATHS_.indexOf(pathname) !== -1) {
       const h = corsHeaders_(req);
       Object.keys(h).forEach(function (k) { res.setHeader(k, h[k]); });
+    }
+    if (req.method === 'OPTIONS' && CORS_PATHS_.indexOf(pathname) !== -1) {
+      // 只有白名單內的 origin 才拿得到 Allow-Origin（上面那段已經決定），這裡補上方法與標頭。
+      if (res.getHeader('Access-Control-Allow-Origin')) {
+        res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Max-Age', '600');
+      }
+      logLine('OPTIONS', pathname, 204);
+      res.writeHead(204); res.end();
+      return;
     }
 
     if (req.method === 'GET' && pathname === '/healthz') {
