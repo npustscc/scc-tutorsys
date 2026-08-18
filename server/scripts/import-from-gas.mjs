@@ -61,14 +61,18 @@ function sameRoster(local, remote) {
   return JSON.stringify(normTutors(local.tutors)) === JSON.stringify(normTutors(remote.tutors));
 }
 
-// 把本機既有的 advisees（依導師姓名對）貼回正規化後的名單上。遠端有值就以遠端為準
-// （日後收集端支援之後自然生效），遠端空的就保留本機的。
-function withAdvisees(tutors, localTutors) {
-  const byName = {};
-  (localTutors || []).forEach((t) => { if (t && t.name) byName[t.name] = t; });
+// 把 advisees 貼回正規化後的名單上（normTutors 刻意不含它——它不參與「有沒有變動」的比較）。
+// 遠端有值就以遠端為準（日後收集端支援之後自然生效），遠端空的就保留本機的。
+// **remoteTutors 要傳原始的那份**：normTutors 已經把 advisees 濾掉了，從它身上讀不到遠端的值。
+function withAdvisees(tutors, localTutors, remoteTutors) {
+  const localByName = {};
+  (localTutors || []).forEach((t) => { if (t && t.name) localByName[t.name] = t; });
+  const remoteByName = {};
+  (remoteTutors || []).forEach((t) => { if (t && t.name) remoteByName[t.name] = t; });
   return (tutors || []).map((t) => {
-    const remoteAdv = t.advisees != null ? String(t.advisees) : '';
-    const keep = byName[t.name || ''];
+    const r = remoteByName[t.name || ''];
+    const remoteAdv = (r && r.advisees != null) ? String(r.advisees) : '';
+    const keep = localByName[t.name || ''];
     return Object.assign({}, t, {
       advisees: remoteAdv !== '' ? remoteAdv : ((keep && keep.advisees != null) ? String(keep.advisees) : ''),
     });
@@ -88,7 +92,7 @@ export function mergeClasses(localClasses, remoteClasses) {
         displayName: r.displayName || r.name,
         requiredMeetingOverride: r.requiredMeetingOverride === undefined ? null : r.requiredMeetingOverride,
         graduatedSemester: r.graduatedSemester || null,
-        tutors: withAdvisees(normTutors(r.tutors), []),
+        tutors: withAdvisees(normTutors(r.tutors), [], r.tutors),
         suggestedTutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: r.active !== false,
       });
       report.created.push(r.id);
@@ -101,7 +105,7 @@ export function mergeClasses(localClasses, remoteClasses) {
     // 輔導人數是**本機獨有**的欄位（收集端的後端還不認識它）。整筆覆寫會把它清掉，
     // 所以依姓名把本機既有的值帶回來——與 suggestedTutors 那類「投影裡沒有的欄位一律保留」
     // 同一個原則，只是它藏在 tutors 陣列裡面，容易被漏掉。
-    local.tutors = withAdvisees(normTutors(r.tutors), local.tutors);
+    local.tutors = withAdvisees(normTutors(r.tutors), local.tutors, r.tutors);
     (changed ? report.updated : report.unchanged).push(r.id);
   }
 
