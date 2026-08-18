@@ -2627,8 +2627,9 @@ PAGE_RENDERERS.deptroster = async function renderDeptRosterPage() {
   $('page-root').innerHTML =
     '<div class="card">' +
       '<h2>導師資料</h2>' +
-      '<p class="field-hint" id="deptroster-editor-hint">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫<b>校內分機</b>與<b>私人手機</b>。' +
-      '<b>導師的私人手機屬於高度個資</b>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>' +
+      // 使用者 2026-08-18 指定改成與登入後告知視窗同一段文案。**共用 PURPOSE_NOTICE_TEXT_
+      // 這個常數**而不是再抄一份：這是對外的個資告知，兩處若哪天漂移就會變成「同一件事有兩種說法」。
+      '<p class="field-hint" id="deptroster-editor-hint">' + escapeHtml(PURPOSE_NOTICE_TEXT_) + '</p>' +
       // 校安人員看到的版本：說明白「為什麼你看得到全校」與「為什麼你改不了」，
       // 不然一個看得到全校卻沒有任何按鈕的畫面會被當成壞掉。
       '<p class="field-hint" id="deptroster-readonly-note" style="display:none;">' +
