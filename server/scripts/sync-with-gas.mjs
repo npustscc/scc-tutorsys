@@ -254,8 +254,12 @@ async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed }) {
   try {
     await mailer.send({
       to: to,
+      // 標題只列**真的有**的那幾類。寫成「衝突 0、推送失敗 6」看起來像系統在自言自語，
+      // 而收件者只從標題判斷要不要點開。
       subject: clean ? '【導師名冊系統】同步問題已排除' :
-        '【導師名冊系統】名冊同步需要處理（衝突 ' + conflicts.length + '、推送失敗 ' + pushFailed.length + '）',
+        '【導師名冊系統】名冊同步需要處理（' +
+        [conflicts.length ? '衝突 ' + conflicts.length : '', pushFailed.length ? '推送失敗 ' + pushFailed.length : '']
+          .filter(Boolean).join('、') + '）',
       body: lines.filter(function (x) { return x !== ''; }).join('\n'),
     });
     console.log('[sync] 已寄出通知給 ' + to);
