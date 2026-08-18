@@ -47,7 +47,7 @@ const BOOTSTRAP_ADMINS = ['npust.scc@heartnpust.tw', 'linkinlol528101@gmail.com'
 // 允許集合是**資料驅動**的（config.settings.accessAllowRoles），要開系主任入口只要在設定
 // 加上 'deptHead'，不必改這份程式碼、不必重新部署（使用者 2026-08-17：「另外保留系主任的
 // 登入入口，之後再做」）。可用的角色鍵見 checkSystemAccess_ 的 has 表。
-const DEFAULT_ACCESS_ALLOW_ROLES_ = ['admin', 'staffAssistant', 'deptAssistant'];
+const DEFAULT_ACCESS_ALLOW_ROLES_ = ['admin', 'staffAssistant', 'deptAssistant', 'safetyOfficer'];
 const DEFAULT_ACCESS_DENIED_MESSAGE_ =
   '系統目前僅開放學諮中心人員與各系系辦助理使用。若您是導師或系主任，請洽學生諮商中心。';
 
@@ -156,6 +156,9 @@ function doPost(e) {
       case 'adminUpsertStaffAssistant': result = adminUpsertStaffAssistantAction_(params, ctx, userEmail); break;
       case 'adminUpsertDeptAssistant':  result = adminUpsertDeptAssistantAction_(params, ctx, userEmail); break;
       case 'adminRenameDeptAssistant':  result = adminRenameDeptAssistantAction_(params, ctx, userEmail); break;
+      case 'adminUpsertSafetyOfficer':  result = adminUpsertSafetyOfficerAction_(params, ctx, userEmail); break;
+      case 'auditAppend':               result = auditAppendAction_(params, ctx, userEmail); break;
+      case 'adminAuditList':            result = adminAuditListAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       // 這三個是名冊異動：回傳後要做收尾（排入主責通知佇列＋同步 Google Sheet），
@@ -528,10 +531,13 @@ function adminLocalAccountsAction_(params, ctx, userEmail) {
   if (!targetEmail) throw new Error('email required');
 
   if (op === 'createOrReset') {
-    const assistant = (config.deptAssistants || []).filter(function (a) {
-      return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
-    })[0];
-    if (!assistant) throw new Error('這個 email 不在系辦助理白名單內');
+    // 可以發本機帳號的兩種身分：系辦助理與校安人員。**一定要在某個白名單內**——
+    // 不然這支就變成「admin 可以為任意 email 憑空造一組可登入的密碼」。
+    const assistant = (config.deptAssistants || []).concat(config.safetyOfficers || [])
+      .filter(function (a) {
+        return a && a.deleted !== true && String(a.email || '').toLowerCase() === targetEmail;
+      })[0];
+    if (!assistant) throw new Error('這個 email 不在系辦助理或校安人員名單內');
     const pw = String(params.password || initialPasswordFromExtGas_(assistant.ext) || '').trim();
     if (!pw) throw new Error('沒有可用的初始密碼（白名單沒填分機），請手動指定');
     // 雜湊在鎖**外面**算：它是這裡最慢的一步，放進臨界區會讓別的請求等到 waitLock 逾時
@@ -639,7 +645,7 @@ function maintenanceSetAccessPolicy(mode, allowRolesJson, message) {
   if (allowRolesJson !== null && allowRolesJson !== undefined && allowRolesJson !== '') {
     roles = JSON.parse(allowRolesJson);
     if (!Array.isArray(roles) || !roles.length) throw new Error('allowRolesJson 必須是非空的 JSON 陣列');
-    const known = ['admin', 'director', 'staffLead', 'staffAssistant', 'deptAssistant', 'deptHead', 'tutor', 'anyone'];
+    const known = ['admin', 'director', 'staffLead', 'staffAssistant', 'deptAssistant', 'safetyOfficer', 'deptHead', 'tutor', 'anyone'];
     // 打錯字的角色鍵在 checkSystemAccess_ 裡只會安靜地永遠不命中（＝把人擋在外面而設定看起來
     // 是對的），所以在寫入的這一端就擋下來，不要讓它進到設定檔裡。
     roles.forEach(function (r) { if (known.indexOf(r) === -1) throw new Error('未知的角色鍵：' + r); });
@@ -1451,10 +1457,18 @@ function withLock_(fn) {
   }
 }
 
+// 稽核上限：2026-08-18 起前端也會寫這個檔（瀏覽軌跡），不設上限的話它會單向長大，
+// 而每次 append 都是「整檔讀→push→整檔寫」，檔案變大＝每一個寫入動作都跟著變慢。
+// 超過就丟掉最舊的。**只在這裡截斷**，呼叫端不必知道。
+const AUDIT_LOG_MAX_ENTRIES_ = 20000;
+
 function appendAuditLog_(ctx, entry) {
   let log = readJsonSafe_('audit_log.json', ctx, { entries: [] });
   if (!log || !Array.isArray(log.entries)) log = { entries: [] };
   log.entries.push(entry);
+  if (log.entries.length > AUDIT_LOG_MAX_ENTRIES_) {
+    log.entries = log.entries.slice(log.entries.length - AUDIT_LOG_MAX_ENTRIES_);
+  }
   writeJsonPath_('audit_log.json', log, ctx);
 }
 
@@ -1497,10 +1511,17 @@ function isClassTutor_(classInfo, email) {
 //   若被停用或軟刪除，就地從授權集合消失（fail-closed，比照 deptHeadOf 的既有判斷）。
 //   一人可掛多系（技職所/師培中心有跨單位的情況）。這個集合是「系辦助理看得到哪些系」的
 //   **唯一事實來源**：所有 deptRoster* action 一律拿它重新驗證前端送來的 deptId，不信任前端。
+// - isSafetyOfficer：config.safetyOfficers（**校安人員**，2026-08-18 新增）。這是一個
+//   **全校唯讀**的角色：危機或緊急事件時要立刻聯絡得到導師，所以看得到全部系所的名冊
+//   **含私人手機**；相對的，任何寫入一律不給（見 resolveDeptRosterScope_ 與
+//   resolveDeptRosterReadScope_ 的分工——寫入路徑那支不認這個角色）。
+//   刻意**不**把它併進 deptAssistantOf：那個集合是「可以維護哪些系」的意思，混進來就會
+//   讓校安人員沿著助理的寫入路徑一路通行。
 function resolveRoles_(email, config, departments, classes) {
   const roles = {
     email: email, isAdmin: false, isDirector: false,
     isStaffLead: false, isStaffAssistant: false, assistantLead: null,
+    isSafetyOfficer: false,
     deptHeadOf: [], tutorOf: [], deptAssistantOf: [],
   };
   if (!email) return roles;
@@ -1552,6 +1573,11 @@ function resolveRoles_(email, config, departments, classes) {
     });
   }
 
+  // 校安人員：單一布林，沒有系所範圍（緊急聯繫本來就不分系）。停用/軟刪除即失效。
+  const so = ((config && config.safetyOfficers) || [])
+    .filter(function (s) { return s && s.email === email && s.disabled !== true && s.deleted !== true; })[0];
+  if (so) roles.isSafetyOfficer = true;
+
   (departments || []).forEach(function (d) {
     if (d && d.headEmail === email && d.active !== false && d.deleted !== true) roles.deptHeadOf.push(d.id);
   });
@@ -1596,6 +1622,7 @@ function checkSystemAccess_(email, ctx) {
     staffLead:      !!roles.isStaffLead,
     staffAssistant: !!roles.isStaffAssistant,
     deptAssistant:  (roles.deptAssistantOf || []).length > 0,
+    safetyOfficer:  !!roles.isSafetyOfficer,
     deptHead:       (roles.deptHeadOf || []).length > 0,
     tutor:          (roles.tutorOf || []).length > 0,
   };
@@ -3236,6 +3263,8 @@ function bootstrapAction_(params, ctx, userEmail) {
     // 系辦助理白名單同理：整份名單（含各系助理 email）只給 admin；助理自己只需要知道
     // 「我管哪幾系」，roles.deptAssistantOf 已經算好了。
     deptAssistants: roles.isAdmin ? (config.deptAssistants || []) : undefined,
+    // 校安人員名單同理：只給 admin。這個角色自己只需要知道「我是」，roles.isSafetyOfficer 有了。
+    safetyOfficers: roles.isAdmin ? (config.safetyOfficers || []) : undefined,
   };
 }
 
@@ -3261,7 +3290,7 @@ function sessionStartAction_(params, ctx, userEmail) {
     const roles = resolveRoles_(userEmail, config, departments, classes);
     const hasRole = roles.isAdmin || roles.isDirector || roles.isStaffLead ||
       roles.isStaffAssistant || roles.deptHeadOf.length > 0 || roles.tutorOf.length > 0 ||
-      roles.deptAssistantOf.length > 0;
+      roles.deptAssistantOf.length > 0 || roles.isSafetyOfficer;
     if (hasRole) {
       const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'yyyy-MM-dd HH:mm:ss');
       const lines = [
@@ -4020,8 +4049,207 @@ function adminRenameDeptAssistantAction_(params, ctx, userEmail) {
   });
 }
 
-// 系辦助理可存取的系所集合（純函式）。admin 看全部；系辦助理只看白名單解出來的那幾系。
-// **前端送來的 deptId 一律丟進這裡重驗**，回 ok:false 就是拒絕，不做部分放行。
+// ── 稽核：瀏覽軌跡（2026-08-18）─────────────────────────────────────────────────
+// 既有的 audit_log.json 記的是**後端自己寫的**動作（新增/修改/刪除/核章/權限異動）。
+// 使用者要的「誰在看哪些畫面」只有前端知道，所以多一個由前端回報的通道。
+//
+// **刻意寫在不同的檔案（audit_views.json）**，不要併進 audit_log.json：
+// 那個檔有筆數上限、超過就丟最舊的，而這條通道是任何登入者都能觸發的。混在一起的話，
+// 有人狂切分頁就能把「誰改了什麼」的紀錄擠出去——等於提供一個清除證據的方法。
+// 分開之後，前端灌爆的只會是自己那一份。
+const AUDIT_VIEW_MAX_ENTRIES_ = 20000;
+// 只收白名單內的事件名。開放任意字串會讓稽核表變成使用者可控的內容（看的人會信它）。
+const AUDIT_VIEW_ACTIONS_ = ['viewPage', 'viewDeptRoster', 'viewMobile', 'exportRoster', 'viewAdminTab'];
+
+function appendAuditView_(ctx, entry) {
+  let log = readJsonSafe_('audit_views.json', ctx, { entries: [] });
+  if (!log || !Array.isArray(log.entries)) log = { entries: [] };
+  log.entries.push(entry);
+  if (log.entries.length > AUDIT_VIEW_MAX_ENTRIES_) {
+    log.entries = log.entries.slice(log.entries.length - AUDIT_VIEW_MAX_ENTRIES_);
+  }
+  writeJsonPath_('audit_views.json', log, ctx);
+}
+
+// 正規化（純函式，可測）：白名單事件名、長度上限、**by 永遠由呼叫端用已驗證的 email 覆蓋**。
+// 回 null＝不收（不是錯誤，前端不該因為稽核失敗而中斷操作）。
+function normalizeAuditView_(params, userEmail, now) {
+  const action = String((params && params.auditAction) || '').trim();
+  if (AUDIT_VIEW_ACTIONS_.indexOf(action) === -1) return null;
+  const clip = function (v, n) { return String(v == null ? '' : v).trim().slice(0, n); };
+  return {
+    at: now,
+    by: userEmail,                        // ← 不看 params，永遠是已驗證的身分
+    action: action,
+    page: clip(params && params.page, 40),
+    deptId: clip(params && params.deptId, 40),
+    detail: clip(params && params.detail, 120),
+  };
+}
+
+// auditAppend：任何通過閘門的登入者都可以回報**自己**的瀏覽事件。
+// 不做授權判斷是刻意的——它記的就是「這個已驗證的人做了什麼」，而 by 取自憑證不是參數。
+function auditAppendAction_(params, ctx, userEmail) {
+  const rec = normalizeAuditView_(params, userEmail, new Date().toISOString());
+  if (!rec) return { ok: false, ignored: true };
+  withLock_(function () { appendAuditView_(ctx, rec); });
+  return { ok: true };
+}
+
+// adminAuditList：admin only。把三個來源合成一張時間軸——
+//   audit_log.json（後端寫的異動）／audit_views.json（前端回報的瀏覽）／sessions.json（登入）。
+// 只回最近 limit 筆（預設 300、上限 2000）：這是給人看的畫面，不是資料匯出。
+function adminAuditListAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const limit = Math.min(Math.max(Number(params.limit) || 300, 1), 2000);
+  const wantEmail = String(params.email || '').trim().toLowerCase();
+  const wantKind = String(params.kind || '').trim();     // '' | 'change' | 'view' | 'login'
+
+  // 姓名對照表：稽核表要給人看，一整欄 email 沒有人讀得出「這是誰」。
+  // 從所有名單湊出 email → {name, role}；同一個人有多重身分時，以權限大的那個為準。
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const who = {};
+  const note = function (email, name, role, extra) {
+    const k = String(email || '').trim().toLowerCase();
+    if (!k) return;
+    if (!who[k]) who[k] = { name: '', role: '', extra: '' };
+    if (name && !who[k].name) who[k].name = name;
+    if (role && !who[k].role) who[k].role = role;
+    if (extra && !who[k].extra) who[k].extra = extra;
+  };
+  Object.keys(config.users || {}).forEach(function (e) {
+    const u = config.users[e] || {};
+    note(e, u.name || '', u.role === 'admin' ? '管理員' : (u.role === 'director' ? '中心主任' : '職員'));
+  });
+  (config.staffLeads || []).forEach(function (x) { if (x) note(x.email, x.name, '學諮中心主責'); });
+  (config.staffAssistants || []).forEach(function (x) { if (x) note(x.email, x.name, '學諮中心助理'); });
+  (config.safetyOfficers || []).forEach(function (x) { if (x) note(x.email, x.name, '校安人員', x.unit || ''); });
+  (config.deptAssistants || []).forEach(function (x) {
+    if (!x) return;
+    // 系所顯示用全名（教務處對齊過的那個），沒有才退回內部簡稱——使用者要看的是
+    //「農園生產系系辦助理」而不是「農園系」。
+    const names = (x.deptIds || []).map(function (id) {
+      const d = (departments || []).filter(function (dd) { return dd && dd.id === id; })[0];
+      return (d && (d.fullName || d.name)) || id;
+    });
+    note(x.email, x.name, '系辦助理', names.join('、'));
+  });
+  (departments || []).forEach(function (d) {
+    if (d && d.headEmail) note(d.headEmail, d.headName || (d.head && d.head.name) || '', '系主任', d.fullName || d.name);
+  });
+
+  // 顯示用的稱呼：優先姓名，附上身分與系所，查不到就退回 email（絕不留空）。
+  const label = function (email) {
+    const k = String(email || '').trim().toLowerCase();
+    const w = who[k];
+    if (!w || !w.name) return email || '';
+    return w.name + (w.role ? '（' + w.role + (w.extra ? '・' + w.extra : '') + '）' : '');
+  };
+
+  const rows = [];
+  const push = function (kind, at, by, action, detail, target, page) {
+    if (!at) return;
+    rows.push({
+      kind: kind, at: at, by: by || '', byName: label(by), action: action || '',
+      detail: detail || '',
+      // page／分頁代號原樣送出去，由前端翻成畫面上的名稱——只有前端有那張標籤表
+      // （NAV_PAGES / ADMIN_TABS），後端硬抄一份就會兩邊漂移。
+      page: page || '',
+      // targetLabel：被動到的那個對象也翻成人話（「農園生產系的系辦助理 王小美」），
+      // 不然稽核表上只有一串 email，看的人得自己去別的分頁查那是誰。
+      target: target || '', targetLabel: target ? label(target) : '',
+    });
+  };
+
+  const changes = readJsonSafe_('audit_log.json', ctx, { entries: [] });
+  (Array.isArray(changes.entries) ? changes.entries : []).forEach(function (e) {
+    if (!e) return;
+    // 「a@x → b@x」這種改 email 的 targetId 兩邊都翻成人話（改完之後才查得到新的那個，
+    // 舊的通常已經是墓碑而查不到，所以查不到就原樣顯示 email）。
+    const t = String(e.targetId || '');
+    const arrow = t.indexOf(' → ');
+    const detail = arrow === -1 ? '' :
+      (label(t.slice(0, arrow)) || t.slice(0, arrow)) + ' → ' + (label(t.slice(arrow + 3)) || t.slice(arrow + 3));
+    push('change', e.at, e.by, e.action, detail, arrow === -1 ? t : '');
+  });
+
+  const views = readJsonSafe_('audit_views.json', ctx, { entries: [] });
+  (Array.isArray(views.entries) ? views.entries : []).forEach(function (e) {
+    if (!e) return;
+    // 系所一律顯示全名（使用者看的是「農園生產系」不是「農園系」）。
+    const d = (departments || []).filter(function (x) { return x && x.id === e.deptId; })[0];
+    const deptName = d ? (d.fullName || d.name) : (e.deptId || '');
+    push('view', e.at, e.by, e.action, deptName, '', e.page || e.detail || '');
+  });
+
+  const sess = readJsonSafe_('sessions.json', ctx, { sessions: [] });
+  (Array.isArray(sess.sessions) ? sess.sessions : []).forEach(function (s) {
+    if (!s) return;
+    push('login', s.at || (s.issuedAtMs ? new Date(s.issuedAtMs).toISOString() : ''), s.email, 'login',
+      [s.ip || '', s.geo || ''].filter(Boolean).join(' / ').slice(0, 160), '');
+  });
+
+  const filtered = rows.filter(function (r) {
+    if (wantKind && r.kind !== wantKind) return false;
+    // 搜尋同時比對 email 與姓名——畫面上顯示的是姓名，只能用 email 搜等於搜不到。
+    if (wantEmail && (String(r.by) + ' ' + String(r.byName)).toLowerCase().indexOf(wantEmail) === -1) return false;
+    return true;
+  }).sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
+
+  return { total: filtered.length, entries: filtered.slice(0, limit) };
+}
+
+// ── 校安人員（全校唯讀，2026-08-18）─────────────────────────────────────────────
+// 用途：危機或緊急事件時要立刻聯絡得到導師本人，所以這個角色看得到**全校**名冊含私人手機。
+// 相對的它一個字都不能改——邊界不是靠 UI，是靠「寫入路徑不認這個角色」（見下方兩支 scope）。
+//
+// 形狀（config.safetyOfficers，比照 deptAssistants 的既有模式）：
+//   { email, name, unit?, ext?, disabled?, deleted?, ... }
+// unit＝單位（例：軍訓室／生輔組），純備註；ext＝分機，同時是本機帳號的初始密碼（沿用既有機制）。
+// 沒有 deptIds：緊急聯繫本來就不分系，給範圍反而會在最需要的時候擋住人。
+function adminUpsertSafetyOfficerAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const entry = params.safetyOfficer;
+  if (!entry || !entry.email) throw new Error('safetyOfficer.email required');
+  const email = String(entry.email).trim().toLowerCase();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new Error('email 格式不正確：' + email);
+  const isDelete = entry.deleted === true;
+
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const next = isDelete ? { email: email, deleted: true } : {
+      email: email,
+      name: String(entry.name == null ? '' : entry.name).trim().slice(0, 40),
+      unit: String(entry.unit == null ? '' : entry.unit).trim().slice(0, 40),
+      ext: String(entry.ext == null ? '' : entry.ext).trim().slice(0, 20),
+      disabled: entry.disabled === true,
+    };
+    config.safetyOfficers = config.safetyOfficers || [];
+    const idx = config.safetyOfficers.findIndex(function (s) {
+      return s && String(s.email || '').trim().toLowerCase() === email;
+    });
+    const merged = applyUpsertDeleteFields_(idx === -1 ? {} : config.safetyOfficers[idx], next, userEmail, now);
+    if (idx === -1) config.safetyOfficers.push(merged); else config.safetyOfficers[idx] = merged;
+    writeJsonPath_('config.json', config, ctx);
+    appendAuditLog_(ctx, {
+      action: isDelete ? 'adminDeleteSafetyOfficer' : 'adminUpsertSafetyOfficer',
+      by: userEmail, targetId: email, at: now,
+    });
+    return { safetyOfficers: config.safetyOfficers };
+  });
+}
+
+// ── 名冊的授權範圍：**寫入**與**讀取**是兩支函式，這個分工本身就是安全邊界 ─────────
+//
+// resolveDeptRosterScope_   ＝ 可以「改」哪些系（admin／系辦助理）
+// resolveDeptRosterReadScope_ ＝ 可以「看」哪些系（再加上全校唯讀的校安人員）
+//
+// 為什麼不做成一支帶 readOnly 旗標的函式：那樣**忘記傳旗標的新 action 會自動變成可寫**，
+// 失效方向是錯的。拆成兩支之後，日後新增的寫入 action 照著既有寫法呼叫
+// resolveDeptRosterScope_，校安人員就自動被擋在外面——不必記得做任何事。
+// （反過來，新的讀取 action 若誤用了寫入那支，後果只是校安人員少看到東西，安全。）
 function resolveDeptRosterScope_(roles, deptId, departments) {
   if (!roles) return { ok: false, error: 'forbidden' };
   const allowed = roles.isAdmin
@@ -4033,6 +4261,23 @@ function resolveDeptRosterScope_(roles, deptId, departments) {
   const want = String(deptId).trim();
   if (allowed.indexOf(want) === -1) return { ok: false, error: 'forbidden' };
   return { ok: true, deptIds: [want] };
+}
+
+// 讀取範圍：先問寫入那支（admin／系辦助理都有讀的權利），沒過再看是不是校安人員。
+// 校安人員 → 全部啟用中的系所，**唯讀**。這條路回的資料含私人手機，那正是這個角色存在的
+// 理由（危機事件要立刻聯絡得到導師），也是為什麼它只加在這一支。
+function resolveDeptRosterReadScope_(roles, deptId, departments) {
+  const asEditor = resolveDeptRosterScope_(roles, deptId, departments);
+  if (asEditor.ok) return asEditor;
+  if (!roles || !roles.isSafetyOfficer) return { ok: false, error: 'forbidden' };
+  const all = (departments || [])
+    .filter(function (d) { return d && d.active !== false && d.deleted !== true; })
+    .map(function (d) { return d.id; });
+  if (!all.length) return { ok: false, error: 'forbidden' };
+  if (deptId === undefined || deptId === null || deptId === '') return { ok: true, deptIds: all, readOnly: true };
+  const want = String(deptId).trim();
+  if (all.indexOf(want) === -1) return { ok: false, error: 'forbidden' };
+  return { ok: true, deptIds: [want], readOnly: true };
 }
 
 // 系辦助理看到的班級投影（純函式）。Phase 1 是唯讀，欄位刻意只給名冊需要的那幾個：
@@ -4761,7 +5006,8 @@ function deptRosterGetAction_(params, ctx, userEmail) {
   const departments = readJsonSafe_('departments.json', ctx, []);
   const classes = readJsonSafe_('classes.json', ctx, []);
   const roles = resolveRoles_(userEmail, config, departments, classes);
-  const scope = resolveDeptRosterScope_(roles, params.deptId, departments);
+  // 讀取用 ReadScope（多認一個全校唯讀的校安人員）；寫入路徑一律走 resolveDeptRosterScope_。
+  const scope = resolveDeptRosterReadScope_(roles, params.deptId, departments);
   if (!scope.ok) throw new Error(scope.error);
 
   const rows = classes.filter(function (c) {
@@ -4778,7 +5024,9 @@ function deptRosterGetAction_(params, ctx, userEmail) {
     };
   });
 
-  return { deptIds: scope.deptIds, departments: depts, classes: rows };
+  // readOnly：前端據此把新增/編輯/刪除的按鈕整組收起來（校安人員）。這只是 UI 提示，
+  // **真正的邊界在後端**——寫入 action 走的是 resolveDeptRosterScope_，那支不認校安人員。
+  return { deptIds: scope.deptIds, departments: depts, classes: rows, readOnly: scope.readOnly === true };
 }
 
 // adminChangeTutorMidterm：期中更換導師（admin only；Ticket C）。與 adminUpsertClass 改名單
