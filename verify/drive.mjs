@@ -1338,6 +1338,14 @@ await flow('H', async () => {
     await page.mouse.up();
     const after = await page.locator('#deptasst-table thead th[data-col="3"]').boundingBox();
     expect(after.width > before.width + 40, `Email 欄沒被拉寬：${before.width} → ${after.width}`);
+    // 使用者 2026-08-18：欄寬不可以超過頁面左右邊界。拉到底之後表格寬度必須仍 ≤ 容器寬度。
+    const fits = await page.evaluate(() => {
+      const t = document.getElementById('deptasst-table');
+      const w = t.parentElement;
+      return { table: Math.round(t.getBoundingClientRect().width), wrap: Math.round(w.clientWidth) };
+    });
+    evid['H-colwidth-bounds'] = JSON.stringify(fits);
+    expect(fits.table <= fits.wrap + 1, '表格被拉到超出容器：' + JSON.stringify(fits));
     const saved = await page.evaluate((k) => JSON.parse(localStorage.getItem(k) || '{}'), 'tutor_colw_' + ROOT_FOLDER_ID);
     evid['H-colwidths-saved'] = JSON.stringify(saved);
     expect(saved.deptAsstColWidths && Number(saved.deptAsstColWidths['3']) > 0, '欄寬沒寫進 localStorage：' + JSON.stringify(saved));
@@ -1676,14 +1684,24 @@ await flow('O', async () => {
     const body = (await page.locator('#admin-tab-content').textContent() || '').replace(/\s+/g, ' ');
     evid['O-audit'] = body.slice(0, 260);
     expect(/查看系所名冊|開啟頁面/.test(body), '沒看到瀏覽紀錄：' + body.slice(0, 200));
-    expect(/adminUpsertSafetyOfficer/.test(body), '沒看到剛才新增校安人員的異動紀錄');
+    expect(/後台「校安人員」/.test(body), '沒看到剛才新增校安人員的異動紀錄（動作應顯示成畫面上的位置）');
+    expect(!/adminUpsertSafetyOfficer/.test(body), '動作欄還在顯示 action 代號，應該翻成人看得懂的名稱');
     expect(new RegExp(SAFETY).test(body), '沒看到校安人員的軌跡（他剛剛查閱過名冊）');
+  });
+  await check('O', '稽核紀錄的「誰」顯示姓名而不是只有 email', async () => {
+    const body = (await page.locator('#admin-tab-content').textContent() || '');
+    expect(/測試管理員|校安測試/.test(body), '沒有顯示姓名，只有 email：' + body.slice(0, 200));
+  });
+  await check('O', '對象欄顯示畫面上的名稱，不是 deptroster／safetyOfficers 這種代號', async () => {
+    const body = (await page.locator('#admin-tab-content').textContent() || '');
+    expect(/後台「校安人員（唯讀）」|後台「稽核紀錄」|導師資料/.test(body), '沒有翻成畫面名稱：' + body.slice(0, 240));
+    expect(!/\bviewAdminTab\b|\bsafetyOfficers\b|\bdeptroster\b/.test(body), '還看得到原始代號：' + body.slice(0, 240));
   });
   await check('O', '稽核紀錄可以只看某一種類型', async () => {
     await page.selectOption('#audit-kind', 'view');
     await page.waitForTimeout(1200);
     const body = (await page.locator('#admin-tab-content').textContent() || '');
-    expect(!/adminUpsertSafetyOfficer/.test(body), '篩「瀏覽」還看得到異動紀錄');
+    expect(!/後台「校安人員」/.test(body), '篩「瀏覽」還看得到異動紀錄');
     await page.selectOption('#audit-kind', '');
   });
   await shot(page, 'O-稽核紀錄');

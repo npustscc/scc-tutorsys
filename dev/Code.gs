@@ -4105,34 +4105,95 @@ function adminAuditListAction_(params, ctx, userEmail) {
   const wantEmail = String(params.email || '').trim().toLowerCase();
   const wantKind = String(params.kind || '').trim();     // '' | 'change' | 'view' | 'login'
 
+  // 姓名對照表：稽核表要給人看，一整欄 email 沒有人讀得出「這是誰」。
+  // 從所有名單湊出 email → {name, role}；同一個人有多重身分時，以權限大的那個為準。
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const departments = readJsonSafe_('departments.json', ctx, []);
+  const who = {};
+  const note = function (email, name, role, extra) {
+    const k = String(email || '').trim().toLowerCase();
+    if (!k) return;
+    if (!who[k]) who[k] = { name: '', role: '', extra: '' };
+    if (name && !who[k].name) who[k].name = name;
+    if (role && !who[k].role) who[k].role = role;
+    if (extra && !who[k].extra) who[k].extra = extra;
+  };
+  Object.keys(config.users || {}).forEach(function (e) {
+    const u = config.users[e] || {};
+    note(e, u.name || '', u.role === 'admin' ? '管理員' : (u.role === 'director' ? '中心主任' : '職員'));
+  });
+  (config.staffLeads || []).forEach(function (x) { if (x) note(x.email, x.name, '學諮中心主責'); });
+  (config.staffAssistants || []).forEach(function (x) { if (x) note(x.email, x.name, '學諮中心助理'); });
+  (config.safetyOfficers || []).forEach(function (x) { if (x) note(x.email, x.name, '校安人員', x.unit || ''); });
+  (config.deptAssistants || []).forEach(function (x) {
+    if (!x) return;
+    // 系所顯示用全名（教務處對齊過的那個），沒有才退回內部簡稱——使用者要看的是
+    //「農園生產系系辦助理」而不是「農園系」。
+    const names = (x.deptIds || []).map(function (id) {
+      const d = (departments || []).filter(function (dd) { return dd && dd.id === id; })[0];
+      return (d && (d.fullName || d.name)) || id;
+    });
+    note(x.email, x.name, '系辦助理', names.join('、'));
+  });
+  (departments || []).forEach(function (d) {
+    if (d && d.headEmail) note(d.headEmail, d.headName || (d.head && d.head.name) || '', '系主任', d.fullName || d.name);
+  });
+
+  // 顯示用的稱呼：優先姓名，附上身分與系所，查不到就退回 email（絕不留空）。
+  const label = function (email) {
+    const k = String(email || '').trim().toLowerCase();
+    const w = who[k];
+    if (!w || !w.name) return email || '';
+    return w.name + (w.role ? '（' + w.role + (w.extra ? '・' + w.extra : '') + '）' : '');
+  };
+
   const rows = [];
-  const push = function (kind, at, by, action, detail) {
+  const push = function (kind, at, by, action, detail, target, page) {
     if (!at) return;
-    rows.push({ kind: kind, at: at, by: by || '', action: action || '', detail: detail || '' });
+    rows.push({
+      kind: kind, at: at, by: by || '', byName: label(by), action: action || '',
+      detail: detail || '',
+      // page／分頁代號原樣送出去，由前端翻成畫面上的名稱——只有前端有那張標籤表
+      // （NAV_PAGES / ADMIN_TABS），後端硬抄一份就會兩邊漂移。
+      page: page || '',
+      // targetLabel：被動到的那個對象也翻成人話（「農園生產系的系辦助理 王小美」），
+      // 不然稽核表上只有一串 email，看的人得自己去別的分頁查那是誰。
+      target: target || '', targetLabel: target ? label(target) : '',
+    });
   };
 
   const changes = readJsonSafe_('audit_log.json', ctx, { entries: [] });
   (Array.isArray(changes.entries) ? changes.entries : []).forEach(function (e) {
     if (!e) return;
-    push('change', e.at, e.by, e.action, e.targetId || '');
+    // 「a@x → b@x」這種改 email 的 targetId 兩邊都翻成人話（改完之後才查得到新的那個，
+    // 舊的通常已經是墓碑而查不到，所以查不到就原樣顯示 email）。
+    const t = String(e.targetId || '');
+    const arrow = t.indexOf(' → ');
+    const detail = arrow === -1 ? '' :
+      (label(t.slice(0, arrow)) || t.slice(0, arrow)) + ' → ' + (label(t.slice(arrow + 3)) || t.slice(arrow + 3));
+    push('change', e.at, e.by, e.action, detail, arrow === -1 ? t : '');
   });
 
   const views = readJsonSafe_('audit_views.json', ctx, { entries: [] });
   (Array.isArray(views.entries) ? views.entries : []).forEach(function (e) {
     if (!e) return;
-    push('view', e.at, e.by, e.action, [e.page, e.deptId, e.detail].filter(Boolean).join(' / '));
+    // 系所一律顯示全名（使用者看的是「農園生產系」不是「農園系」）。
+    const d = (departments || []).filter(function (x) { return x && x.id === e.deptId; })[0];
+    const deptName = d ? (d.fullName || d.name) : (e.deptId || '');
+    push('view', e.at, e.by, e.action, deptName, '', e.page || e.detail || '');
   });
 
   const sess = readJsonSafe_('sessions.json', ctx, { sessions: [] });
   (Array.isArray(sess.sessions) ? sess.sessions : []).forEach(function (s) {
     if (!s) return;
     push('login', s.at || (s.issuedAtMs ? new Date(s.issuedAtMs).toISOString() : ''), s.email, 'login',
-      [s.ip || '', s.geo || '', s.ua || ''].filter(Boolean).join(' / ').slice(0, 160));
+      [s.ip || '', s.geo || ''].filter(Boolean).join(' / ').slice(0, 160), '');
   });
 
   const filtered = rows.filter(function (r) {
     if (wantKind && r.kind !== wantKind) return false;
-    if (wantEmail && String(r.by).toLowerCase().indexOf(wantEmail) === -1) return false;
+    // 搜尋同時比對 email 與姓名——畫面上顯示的是姓名，只能用 email 搜等於搜不到。
+    if (wantEmail && (String(r.by) + ' ' + String(r.byName)).toLowerCase().indexOf(wantEmail) === -1) return false;
     return true;
   }).sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
 

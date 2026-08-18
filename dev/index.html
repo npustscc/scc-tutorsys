@@ -344,7 +344,11 @@ const LS_SESSION_KEY = 'tutor_session_' + ROOT_FOLDER_ID;   // { token, exp, ema
 // tunnel 那端**只放行 /healthz 與 /exec** 兩條路徑——前端只需要這兩條（探測＋所有 API），
 // 而自架站的 /login 是本機帳密，46 個帳號的初始密碼就是四位數分機，不能暴露在公網上。
 const FAST_BACKEND_BY_ROOT_ = {
-  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': 'https://tutor.kiauho.com',       // 正式版
+  // 正式版**刻意先留空**：填下去的那一刻，公開站的後端就從 GAS 正式版換成 coma，
+  // 而兩邊的名冊是不同的資料（coma 上是使用者裁定為正本的那份）。那是資料 cutover，
+  // 需要使用者明確決定，不是把功能推上線而已。
+  // 要切的時候把下面那一格的空字串換成 https://tutor.kiauho.com 即可。
+  '1ZwVwWEQ6bUWgS_5WpKP3NF0DTlSca7Ik': '',                              // 正式版（尚未 cutover）
   '1y4vyMvVoVp-b4-ORLEJEOERDtmNasQVT': 'https://tutor-dev.kiauho.com',   // 測試版
 };
 const FAST_BACKEND_URL = FAST_BACKEND_BY_ROOT_[ROOT_FOLDER_ID] || '';   // origin，不含路徑
@@ -470,12 +474,21 @@ function saveColWidthPref_(prefKey, widths) {
 // 且 n 的順序要與 th／td 完全一致。skipCols 裡的欄不給拉把手（例如操作欄）。
 function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = new Set() }) {
   if (!table) return;
+  const wrap = table.parentElement;                       // .table-wrap
+  const availW = function () { return (wrap && wrap.clientWidth) || 0; };
+
   const saved = colWidthPrefs_()[prefKey] || {};
   if (Object.keys(saved).length) {
     table.style.tableLayout = 'fixed';
+    // 偏好可能是在別台寬螢幕上存的，直接套會撐破版面（使用者 2026-08-18 回報）。
+    // 總寬超過容器就等比例縮回去——縮小比橫向捲動好，因為捲動條在表格內、
+    // 使用者看到的是「欄位跑到畫面外」。每欄仍保底 30px。
+    const total = colNums.reduce(function (n, i) { return n + (saved[i] || 0); }, 0);
+    const cap = availW();
+    const ratio = (cap && total > cap) ? (cap / total) : 1;
     colNums.forEach(function (n) {
       const col = document.getElementById(colPrefix + n);
-      if (col && saved[n]) col.style.width = saved[n] + 'px';
+      if (col && saved[n]) col.style.width = Math.max(30, Math.floor(saved[n] * ratio)) + 'px';
     });
   }
   table.querySelectorAll('thead th[data-col]').forEach(function (th) {
@@ -502,11 +515,32 @@ function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = ne
       startTableW = table.offsetWidth;
       table.style.width = startTableW + 'px';
       startW = (col && parseInt(col.style.width, 10)) || th.offsetWidth;
+      // 表格頂到容器寬度之後，再拉寬就得跟右邊的欄位借。**依序跟右邊每一個可調欄位借**，
+      // 不是只跟隔壁那一欄——只跟一欄借的話，那欄縮到 30px 就再也拉不動了（實測只借得到 37px）。
+      const laterCols = colNums
+        .filter(function (i) { return i > n && !skipCols.has(i); })
+        .map(function (i) { return document.getElementById(colPrefix + i); })
+        .filter(Boolean)
+        .map(function (c) { return { col: c, startW: parseInt(c.style.width, 10) || 0 }; });
+
       const onMove = function (ev) {
         const delta = ev.pageX - startX;
         const minTableW = colNums.length * 30;          // 每欄至少 30px
-        const newTableW = Math.max(minTableW, startTableW + delta);
-        const w = Math.max(30, startW + (newTableW - startTableW));
+        // **表格不得超出容器**（使用者 2026-08-18：「不可以超過左右兩邊的頁面限制寬度」）。
+        // 之前是讓整個表格跟著變寬，於是欄位被拉到畫面外。
+        const cap = Math.max(minTableW, availW() || startTableW);
+        const newTableW = Math.min(cap, Math.max(minTableW, startTableW + delta));
+        let w = Math.max(30, startW + (newTableW - startTableW));
+        // 已經頂到容器寬度卻還想再拉寬 → 依序跟右邊的欄位借（每欄保底 30px），總寬不變。
+        // 每次 move 都從各欄的**起始寬度**重算（不是累加），這樣往回拉會自動把借走的還回去。
+        const want = Math.max(30, startW + delta);
+        let need = Math.max(0, want - w);
+        laterCols.forEach(function (lc) {
+          const give = Math.min(need, Math.max(0, lc.startW - 30));
+          lc.col.style.width = (lc.startW - give) + 'px';
+          need -= give;
+          w += give;
+        });
         if (col) col.style.width = w + 'px';
         table.style.width = newTableW + 'px';
       };
@@ -3056,12 +3090,15 @@ const ADMIN_TABS = [
   { id: 'tutorSystems', label: '導師制度' },
   { id: 'classes', label: '班級' },
   { id: 'semesters', label: '學期' },
-  { id: 'users', label: '職員帳號' },
+  { id: 'users', label: '主管與職員帳號' },
   { id: 'staffTeam', label: '學諮主責／助理' },
   { id: 'deptAssistants', label: '系辦助理' },
   { id: 'safetyOfficers', label: '校安人員（唯讀）' },
   { id: 'audit', label: '稽核紀錄' },
-  { id: 'keywords', label: '宣導關鍵字' },
+  // 「宣導關鍵字」是班會紀錄表的設定，而那整條流程目前不啟用（RECORD_FLOW_ENABLED_FOR_STAFF_），
+  // 留在後台只會讓人以為要維護它。**是隱藏不是移除**：renderAdminKeywords 與後端都原封不動，
+  // 要恢復只要把這一行放回 ADMIN_TABS。
+  // { id: 'keywords', label: '宣導關鍵字' },
   { id: 'roster', label: 'Excel 匯入導師名單' },
 ];
 
@@ -3217,10 +3254,64 @@ async function loadAudit() {
 }
 
 const AUDIT_KIND_LABEL_ = { login: '登入', view: '瀏覽', change: '異動' };
+// 動作一律翻成**畫面上的位置與行為**，不要讓看的人去猜 action 代號的意思
+// （使用者 2026-08-18：「請顯示 UI 的名稱，以避免使用的人看不懂那是哪個位置」）。
+// 查不到對照就原樣顯示代號——寧可醜，也不要把不認得的動作靜靜地說成別的東西。
 const AUDIT_ACTION_LABEL_ = {
-  login: '登入系統', viewPage: '開啟頁面', viewDeptRoster: '查看系所名冊',
-  viewMobile: '查看導師私人手機', exportRoster: '匯出名冊', viewAdminTab: '開啟後台分頁',
+  login: '登入系統', sessionLogout: '登出所有裝置',
+  viewPage: '開啟頁面', viewDeptRoster: '查看系所名冊', viewMobile: '查看導師私人手機',
+  exportRoster: '匯出名冊', viewAdminTab: '開啟後台分頁',
+  // 導師資料頁（系辦助理／校安人員看得到的那一頁）
+  deptRosterUpsertClass: '導師資料頁：新增或修改班級',
+  deptRosterDeleteClass: '導師資料頁：刪除班級',
+  deptRosterUpsertHead: '導師資料頁：修改主任導師聯絡方式',
+  // 後台管理 → 各分頁
+  adminUpsertDeptAssistant: '後台「系辦助理」：新增或修改',
+  adminDeleteDeptAssistant: '後台「系辦助理」：刪除',
+  adminRenameDeptAssistant: '後台「系辦助理」：修改 email（換人／換信箱）',
+  adminUpsertSafetyOfficer: '後台「校安人員」：新增或修改',
+  adminDeleteSafetyOfficer: '後台「校安人員」：刪除',
+  adminResetLocalAccount: '後台：建立／重設登入密碼',
+  adminSetLocalAccountDisabled: '後台：停用／啟用登入帳號',
+  adminDeleteLocalAccount: '後台：刪除登入帳號',
+  adminUpsertCollege: '後台「學院」：新增或修改',
+  adminDeleteCollege: '後台「學院」：刪除',
+  adminUpsertDepartment: '後台「系所」：新增或修改',
+  adminDeleteDepartment: '後台「系所」：刪除',
+  adminUpsertClass: '後台「班級」：新增或修改',
+  adminDeleteClass: '後台「班級」：刪除',
+  adminUpsertSemester: '後台「學期」：新增或修改',
+  adminUpsertUser: '後台「主管與職員帳號」：新增或修改',
+  adminDeleteUser: '後台「主管與職員帳號」：刪除',
+  adminUpsertStaffLead: '後台「學諮主責／助理」：新增或修改主責',
+  adminDeleteStaffLead: '後台「學諮主責／助理」：刪除主責',
+  adminUpsertStaffAssistant: '後台「學諮主責／助理」：新增或修改助理',
+  adminDeleteStaffAssistant: '後台「學諮主責／助理」：刪除助理',
+  adminUpsertTutorSystem: '後台「導師制度」：新增或修改',
+  adminBulkUpsertDeptHeads: '後台「系所」：批次匯入主任導師',
+  adminBulkApplyDeptSheet: '後台「系所」：批次套用系所清冊',
+  adminChangeTutorMidterm: '後台「班級」：期中更換導師',
+  adminRolloverApply: '後台「學期」：換學期升級（套用）',
+  adminImportRoster: '後台「Excel 匯入導師名單」：匯入',
+  maintenanceSetAccessPolicy: '維運：調整登入閘門政策',
+  maintenanceUndoRollover: '維運：復原換學期升級',
 };
+
+// 把 page／後台分頁的代號翻成畫面上看得到的名稱（'deptroster' → 「導師資料」、
+// 'safetyOfficers' → 「校安人員（唯讀）」）。找不到就原樣顯示代號，不要瞎猜。
+// **含已隱藏的分頁**（宣導關鍵字）——舊紀錄裡有它，翻不出來就變成看不懂的代號。
+const AUDIT_ADMIN_TAB_EXTRA_LABEL_ = { keywords: '宣導關鍵字（已隱藏）' };
+function auditPageLabel_(action, page) {
+  if (!page) return '';
+  if (action === 'viewAdminTab') {
+    const t = ADMIN_TABS.filter(function (x) { return x.id === page; })[0];
+    return '後台「' + ((t && t.label) || AUDIT_ADMIN_TAB_EXTRA_LABEL_[page] || page) + '」';
+  }
+  // 其餘一律試 NAV_PAGES——不要只在 action==='viewPage' 時翻譯：viewDeptRoster／viewMobile
+  // 帶的也是同一組頁面代號，只翻一種就會在畫面上留下裸的 'deptroster'（2026-08-18 e2e 抓到）。
+  const p = NAV_PAGES.filter(function (x) { return x.id === page; })[0];
+  return (p && p.label) || page;
+}
 
 function renderAdminAudit() {
   const rows = auditState.rows;
@@ -3235,7 +3326,7 @@ function renderAdminAudit() {
           return '<option value="' + k + '"' + (auditState.kind === k ? ' selected' : '') + '>' +
             (k ? AUDIT_KIND_LABEL_[k] : '全部') + '</option>';
         }).join('') + '</select></label> ' +
-      '<label class="field-hint">Email 含 <input type="text" id="audit-email" value="' + escapeHtml(auditState.email) + '" style="width:180px;"></label> ' +
+      '<label class="field-hint">姓名或 Email 含 <input type="text" id="audit-email" value="' + escapeHtml(auditState.email) + '" style="width:180px;"></label> ' +
       '<label class="field-hint">筆數 <select id="audit-limit">' +
         [100, 300, 1000, 2000].map(function (n) {
           return '<option value="' + n + '"' + (auditState.limit === n ? ' selected' : '') + '>' + n + '</option>';
@@ -3245,14 +3336,23 @@ function renderAdminAudit() {
     (auditState.error ? '<div class="import-error-box"><div class="import-error-title">讀取失敗</div>' + escapeHtml(auditState.error) + '</div>' : '') +
     (rows === null ? '<div class="empty-hint">載入中…</div>' :
       '<p class="field-hint">符合條件 <b>' + auditState.total + '</b> 筆，顯示最近 <b>' + rows.length + '</b> 筆。</p>' +
-      '<div class="table-wrap"><table><thead><tr><th>時間</th><th>類型</th><th>帳號</th><th>動作</th><th>內容</th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table><thead><tr><th>時間</th><th>類型</th><th>誰</th><th>動作</th><th>對象／內容</th></tr></thead><tbody>' +
       (rows.length ? rows.map(function (r) {
+        // 「誰」顯示姓名（含身分與系所），email 縮小放第二行——看的人先認人，需要時才對 email。
+        const whoHtml = r.byName && r.byName !== r.by
+          ? escapeHtml(r.byName) + '<br><span class="field-hint" style="font-size:.72rem;">' + escapeHtml(r.by) + '</span>'
+          : escapeHtml(r.by);
+        const what = [
+          auditPageLabel_(r.action, r.page),
+          r.targetLabel && r.targetLabel !== r.target ? r.targetLabel : '',
+          r.detail || r.target,
+        ].filter(Boolean).join(' ');
         return '<tr>' +
           '<td data-label="時間" style="white-space:nowrap;">' + escapeHtml(fmtAuditTime(r.at)) + '</td>' +
           '<td data-label="類型">' + escapeHtml(AUDIT_KIND_LABEL_[r.kind] || r.kind) + '</td>' +
-          '<td data-label="帳號">' + escapeHtml(r.by) + '</td>' +
+          '<td data-label="誰">' + whoHtml + '</td>' +
           '<td data-label="動作">' + escapeHtml(AUDIT_ACTION_LABEL_[r.action] || r.action) + '</td>' +
-          '<td data-label="內容">' + escapeHtml(r.detail) + '</td></tr>';
+          '<td data-label="對象／內容">' + escapeHtml(what) + '</td></tr>';
       }).join('') : '<tr><td colspan="5"><div class="empty-hint">這個條件下沒有紀錄。</div></td></tr>') +
       '</tbody></table></div>') +
     '</div>';
@@ -4820,12 +4920,12 @@ document.body.addEventListener('click', function (e) {
   if (editBtn) openSemesterForm(semesterById(editBtn.dataset.id));
 });
 
-// ── 職員帳號 ──
+// ── 主管與職員帳號 ──
 function renderAdminUsers() {
   const users = bootstrapData.users || {};
   const emails = Object.keys(users).filter(function (email) { return notDeleted(users[email]); });
   $('admin-tab-content').innerHTML =
-    '<div class="card"><h3>職員帳號（admin / director）</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>角色</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="card"><h3>主管與職員帳號（admin / director）</h3><div class="table-wrap"><table><thead><tr><th>Email</th><th>姓名</th><th>角色</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     emails.map(function (email) {
       const u = users[email] || {};
       return '<tr><td data-label="Email">' + escapeHtml(email) + '</td><td data-label="姓名">' + escapeHtml(u.name || '') + '</td>' +
@@ -4834,7 +4934,7 @@ function renderAdminUsers() {
         '<td data-label="操作"><button class="btn btn-sm" data-action="user-edit" data-email="' + escapeHtml(email) + '">編輯</button> ' +
         '<button class="btn btn-sm btn-danger" data-action="user-delete" data-email="' + escapeHtml(email) + '">刪除</button></td></tr>';
     }).join('') + '</tbody></table></div>' +
-    '<button class="btn btn-primary" data-action="user-new" style="margin-top:12px;">新增職員帳號</button></div>';
+    '<button class="btn btn-primary" data-action="user-new" style="margin-top:12px;">新增帳號</button></div>';
 }
 
 function openUserForm(email) {
@@ -4847,7 +4947,7 @@ function openUserForm(email) {
     '<div class="field"><label><input type="checkbox" id="uf-disabled" ' + (u.disabled ? 'checked' : '') + '> 停用此帳號</label></div>' +
     '<div class="modal-actions"><button type="button" class="btn" data-action="close-modal">取消</button><button type="submit" class="btn btn-primary">儲存</button></div>' +
   '</form>';
-  openModal(email ? '編輯職員帳號' : '新增職員帳號', bodyHtml);
+  openModal(email ? '編輯主管／職員帳號' : '新增主管／職員帳號', bodyHtml);
   $('user-form').addEventListener('submit', async function (e) {
     e.preventDefault();
     const targetEmail = $('uf-email').value.trim();
