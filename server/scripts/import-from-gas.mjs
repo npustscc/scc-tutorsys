@@ -4,6 +4,7 @@
 // 用法（在自架實例目錄下跑；預設 dry-run）：
 //   node server/scripts/import-from-gas.mjs
 //   node server/scripts/import-from-gas.mjs --apply
+//   node server/scripts/import-from-gas.mjs --apply --skip-departments   # 只同步班級
 //
 // 設定放 server/.env（0600，與 SMTP 密碼同一個模式）：
 //   GAS_EXEC_URL=https://script.google.com/macros/s/xxx/exec
@@ -149,6 +150,12 @@ async function gasCall(execUrl, payloadObj) {
 
 async function main() {
   const apply = process.argv.includes('--apply');
+  // --skip-departments：只同步班級，不動系所。
+  // 為什麼需要這個開關（2026-08-18 實際遇到）：mergeDepartments 會把 fullName 直接覆蓋成
+  // 遠端的值，而兩邊的「正式全名」進度可能不同——當時 coma 上 37 個系所有教務處對齊的全名、
+  // GAS 正式版 0 個，照跑就是把那 37 個清空、而且沒有任何一筆是真的有新資訊。
+  // 這種「一邊有、一邊沒有」在 cutover 期間是常態，所以做成開關而不是每次手動改檔。
+  const skipDepartments = process.argv.includes('--skip-departments');
   const repoRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
   const env = parseEnv(path.join(repoRoot, 'server', '.env'));
   const need = ['GAS_EXEC_URL', 'GAS_ROOT_FOLDER_ID', 'GAS_ADMIN_EMAIL', 'GAS_ADMIN_PASSWORD'];
@@ -195,14 +202,18 @@ async function main() {
   console.log('\n班級：更新 ' + cm.report.updated.length + '、新增 ' + cm.report.created.length +
     '、無變動 ' + cm.report.unchanged.length + '、僅存在於本地 ' + cm.report.localOnly.length);
   if (cm.report.localOnly.length) console.log('  僅存在於本地（不會刪除，請人工確認）：' + cm.report.localOnly.slice(0, 10).join('、') + (cm.report.localOnly.length > 10 ? ' …' : ''));
-  console.log('系所：更新 ' + dm.report.updated.length + '、新增 ' + dm.report.created.length);
+  console.log('系所：更新 ' + dm.report.updated.length + '、新增 ' + dm.report.created.length +
+    (skipDepartments ? '（--skip-departments：不會寫入）' : ''));
 
   if (!apply) {
     console.log('\n[import-from-gas] 預演結束，未寫入。加 --apply 才會真的寫。');
     return;
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  for (const [name, content] of [['classes.json', cm.classes], ['departments.json', dm.departments]]) {
+  const targets = skipDepartments
+    ? [['classes.json', cm.classes]]
+    : [['classes.json', cm.classes], ['departments.json', dm.departments]];
+  for (const [name, content] of targets) {
     const p = path.join(storeDir, name);
     try { fs.copyFileSync(p, p + '.bak-gasimport-' + stamp); } catch (e) { /* 原本沒有就不用備份 */ }
     const tmp = p + '.tmp-' + process.pid;
