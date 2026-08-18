@@ -1706,6 +1706,43 @@ await flow('O', async () => {
   });
   await shot(page, 'O-稽核紀錄');
 
+  await check('O', '全站的表格都有可拖曳欄寬（不只系辦助理那一張）', async () => {
+    const seen = [];
+    // 最常用的那一頁（導師資料）先驗——它不是後台分頁，走導覽列
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('#deptroster-content table').waitFor({ timeout: 20000 });
+    await page.waitForTimeout(400);
+    const nRoster = await page.locator('#deptroster-content thead .col-resize-handle').count();
+    seen.push('導師資料=' + nRoster);
+    expect(nRoster > 0, '導師資料頁的班級表沒有欄寬把手');
+    await page.locator('.nav-btn', { hasText: '後台管理' }).click();
+    for (const [tab, label] of [['departments', '系所'], ['classes', '班級'], ['users', '主管與職員帳號'], ['audit', '稽核紀錄']]) {
+      await page.locator(`[data-admin-tab="${tab}"]`).click();
+      await page.locator('#admin-tab-content table').first().waitFor({ timeout: 20000 });
+      await page.waitForTimeout(300);          // MutationObserver 有 60ms debounce
+      const n = await page.locator('#admin-tab-content thead .col-resize-handle').count();
+      seen.push(label + '=' + n);
+      expect(n > 0, label + ' 分頁的表格沒有欄寬把手');
+    }
+    evid['O-colresize-tabs'] = seen.join(', ');
+  });
+  await check('O', '自動套上的表格一樣不會被拉到超出容器', async () => {
+    await page.locator('[data-admin-tab="departments"]').click();
+    await page.locator('#admin-tab-content table').first().waitFor({ timeout: 20000 });
+    await page.waitForTimeout(300);
+    const h = page.locator('#admin-tab-content thead .col-resize-handle').first();
+    const hb = await h.boundingBox();
+    await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(hb.x + 600, hb.y + hb.height / 2, { steps: 10 });   // 用力往右拉
+    await page.mouse.up();
+    const fits = await page.evaluate(() => {
+      const t = document.querySelector('#admin-tab-content table');
+      return { table: Math.round(t.getBoundingClientRect().width), wrap: Math.round(t.parentElement.clientWidth) };
+    });
+    evid['O-colresize-bounds'] = JSON.stringify(fits);
+    expect(fits.table <= fits.wrap + 1, '被拉出容器外：' + JSON.stringify(fits));
+  });
   await check('O', '用途說明按鈕隨時打得開（勾過不再顯示的人也看得回來）', async () => {
     await page.locator('[data-action="purpose-notice"]').click();
     await page.locator('#modal-overlay.open', { hasText: '個資蒐集用途告知' }).waitFor({ timeout: 5000 });

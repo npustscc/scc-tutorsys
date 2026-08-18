@@ -471,6 +471,90 @@ function saveColWidthPref_(prefKey, widths) {
   try { localStorage.setItem(LS_COLW_KEY, JSON.stringify(all)); } catch (e) {}
 }
 
+// ── 全站自動套用可拖曳欄寬（2026-08-18 使用者：「把這個欄位寬度都套用到所有有欄位的地方」）──
+//
+// 原本只有系辦助理那一張表接了 _makeTableResizable，因為它需要表格自己準備 <colgroup>
+// 與 th[data-col]。要讓全站都有，逐張表手動補那兩樣東西**一定會漏**（後台就有十幾張，
+// 而且各頁還會長出新的），所以改成掃描頁面、缺什麼就補什麼，再套同一支 helper。
+//
+// 幾個刻意的決定：
+// - **偏好的鍵用「頁面＋分頁＋表頭文字」組出來**，不是表格在頁面上的序號。序號會隨著
+//   畫面上多一張表就整組錯位，使用者會看到自己調過的寬度跑到別張表上。表頭文字則穩定，
+//   而且看 localStorage 就知道那組寬度是哪張表的。
+// - **最後一欄若是「操作」就不給把手**：它是最右邊，往右拉沒有東西可以推（沿用原本的做法）。
+// - 已經有把手的表格直接跳過，不覆蓋既有的專屬設定（例如系辦助理那張）。
+const AUTO_COLRESIZE_MARK_ = 'data-colresize-ready';
+
+function autoColResizeKey_(table, ths) {
+  if (table.id) return 'auto:' + table.id;
+  const heads = Array.prototype.map.call(ths, function (th) {
+    return (th.textContent || '').replace(/\s+/g, '').slice(0, 8);
+  }).join(',');
+  return 'auto:' + (currentPage || '?') + ':' + (typeof adminTab === 'string' ? adminTab : '') + ':' + heads;
+}
+
+function autoEnableColResize(root) {
+  (root || document).querySelectorAll('table').forEach(function (table) {
+    if (table.hasAttribute(AUTO_COLRESIZE_MARK_)) return;
+    // 已經有專屬設定的（系辦助理那張）不要再套一次，否則兩組偏好會打架
+    if (table.querySelector('thead .col-resize-handle')) { table.setAttribute(AUTO_COLRESIZE_MARK_, '1'); return; }
+    const ths = table.querySelectorAll('thead tr:first-child th');
+    if (ths.length < 2) return;                       // 單欄或沒有表頭的（例如空狀態）不處理
+    if (table.querySelector('thead tr:first-child th[colspan]')) return;  // 跨欄表頭對不上 col，跳過
+
+    const prefix = 'autocol-' + Math.random().toString(36).slice(2, 8) + '-';
+    const colNums = [];
+    let group = table.querySelector('colgroup');
+    if (!group) {
+      group = document.createElement('colgroup');
+      table.insertBefore(group, table.firstChild);
+      Array.prototype.forEach.call(ths, function (th, i) {
+        const col = document.createElement('col');
+        col.id = prefix + (i + 1);
+        group.appendChild(col);
+      });
+    } else {
+      Array.prototype.forEach.call(group.children, function (col, i) { if (!col.id) col.id = prefix + (i + 1); });
+    }
+    Array.prototype.forEach.call(ths, function (th, i) {
+      if (!th.dataset.col) th.dataset.col = String(i + 1);
+      colNums.push(i + 1);
+    });
+
+    const last = ths[ths.length - 1];
+    const lastIsAction = /操作|動作/.test((last.textContent || '').trim());
+    _makeTableResizable({
+      table: table,
+      colPrefix: (group.children[0] && group.children[0].id || prefix + '1').replace(/\d+$/, ''),
+      colNums: colNums,
+      prefKey: autoColResizeKey_(table, ths),
+      skipCols: lastIsAction ? new Set([colNums[colNums.length - 1]]) : new Set(),
+    });
+    table.setAttribute(AUTO_COLRESIZE_MARK_, '1');
+  });
+}
+
+// 頁面內容是各 render 函式用 innerHTML 直接換掉的（而且很多是 await 之後才畫），
+// 沒有單一個「畫完了」的時機點可以掛。用 MutationObserver 盯著容器，新表格一出現就套上去。
+// 只在真的新增節點時跑，且處理過的表格會打上標記，不會反覆處理或跟自己的 DOM 變動打架。
+let autoColResizeTimer_ = null;
+function startAutoColResizeObserver() {
+  const roots = ['page-root', 'modal-box'].map(function (id) { return document.getElementById(id); }).filter(Boolean);
+  if (!roots.length) return;
+  const schedule = function () {
+    if (autoColResizeTimer_) return;
+    autoColResizeTimer_ = setTimeout(function () {
+      autoColResizeTimer_ = null;
+      roots.forEach(autoEnableColResize);
+    }, 60);
+  };
+  const obs = new MutationObserver(function (records) {
+    if (records.some(function (r) { return r.addedNodes && r.addedNodes.length; })) schedule();
+  });
+  roots.forEach(function (r) { obs.observe(r, { childList: true, subtree: true }); });
+  schedule();
+}
+
 // table 需要有 <colgroup>（每個 <col id="{colPrefix}{n}">）與 <th data-col="{n}">，
 // 且 n 的順序要與 th／td 完全一致。skipCols 裡的欄不給拉把手（例如操作欄）。
 function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = new Set() }) {
@@ -1243,6 +1327,7 @@ async function afterLogin() {
     $('user-name').textContent = currentUser.name || currentUser.email;
     $('app').style.display = '';
     renderNav();
+    startAutoColResizeObserver();   // 之後每一張新畫出來的表格都自動有可拖曳欄寬
     showPage(defaultPageId());
     maybeShowPurposeNotice();
   } catch (e) {
