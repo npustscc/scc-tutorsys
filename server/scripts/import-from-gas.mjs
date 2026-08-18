@@ -48,6 +48,9 @@ function normTutors(tutors) {
     return {
       name: (t && t.name) || '', email: (t && t.email) || '',
       ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+      // 輔導人數（2026-08-18 新增）**一定要納入比較**：漏掉的話助理填的值不會同步，
+      // 而且因為兩邊看起來「沒有差異」，它會被下一次同步用對方的空值覆蓋掉。
+      advisees: (t && t.advisees != null) ? String(t.advisees) : '',
     };
   });
 }

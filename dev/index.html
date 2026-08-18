@@ -2775,7 +2775,7 @@ function buildRosterExportTabs(classes, depts, opts) {
   };
   const TAB_ORDER = ['農學院', '工學院', '管理學院', '人文學院', '獸醫國際達人'];
   const HEADER_ROWS = 5;
-  const W = 9;   // 系別｜主任姓名｜主任分機｜班級｜班名(原始)｜導師｜分機｜私人手機｜狀態
+  const W = 10;  // 系別｜主任姓名｜主任分機｜班級｜班名(原始)｜導師｜分機｜私人手機｜輔導人數｜狀態
 
   const deptById = {};
   (depts || []).forEach(function (d) { if (d) deptById[d.id] = d; });
@@ -2803,7 +2803,7 @@ function buildRosterExportTabs(classes, depts, opts) {
     });
     const deptLabel = d.fullName || d.name || d.id;
     if (!list.length) {
-      t.rows.push([deptLabel, head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '', '']);
+      t.rows.push([deptLabel, head.name || '', head.ext || '', '（此系目前沒有班級）', '', '', '', '', '', '']);
     } else {
       list.forEach(function (c) {
         const tutors = (c.tutors || []).filter(Boolean);
@@ -2818,6 +2818,8 @@ function buildRosterExportTabs(classes, depts, opts) {
             i === 0 ? (c.displayName || c.name) : '',
             i === 0 ? c.name : '',
             (tu && tu.name) || '', (tu && tu.ext) || '', (tu && tu.mobile) || '',
+            // 輔導人數：0 要寫出來（那是「真的沒有輔導學生」），不能被 || '' 吃掉
+            (tu && (tu.advisees === 0 || tu.advisees === '0')) ? '0' : ((tu && tu.advisees) || ''),
             classStateLabelForExport(c),
           ]);
         });
@@ -2842,20 +2844,24 @@ function buildRosterExportTabs(classes, depts, opts) {
   return ordered.map(function (tab) {
     const t = tabs[tab];
     const values = [];
-    values.push([tab, '', '', '', '', '', '', '', '']);
-    values.push(['各系導師名冊　匯出時間：' + stamp + '　※本檔含導師私人手機，請比照個資保管。',
-      '', '', '', '', '', '', '', '']);
-    values.push(['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
-    values.push(['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '']);
-    values.push(['', '', '', '', '', '', '', '', '']);
+    // 每一列的長度都必須等於 W，否則 xlsx 產出的表格會缺格、合併範圍也會錯位。
+    const blank = function () { return new Array(W).fill(''); };
+    const row1 = blank(); row1[0] = tab; values.push(row1);
+    const row2 = blank();
+    row2[0] = '各系導師名冊　匯出時間：' + stamp + '　※本檔含導師私人手機，請比照個資保管。';
+    values.push(row2);
+    values.push(['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '', '狀態']);
+    values.push(['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '輔導人數', '']);
+    values.push(blank());
     t.rows.forEach(function (r) { values.push(r); });
     const merges = [
       { row: 1, col: 1, numRows: 1, numCols: W },
       { row: 2, col: 1, numRows: 1, numCols: W },
       { row: 3, col: 2, numRows: 1, numCols: 2 },
-      { row: 3, col: 7, numRows: 1, numCols: 2 },
+      { row: 3, col: 7, numRows: 1, numCols: 3 },   // 聯絡方式跨「分機｜私人手機｜輔導人數」
     ];
-    [1, 4, 5, 6, 9].forEach(function (col) { merges.push({ row: 3, col: col, numRows: 3, numCols: 1 }); });
+    // 這些欄的標題往下合併三列（第 3～5 列）。狀態欄從第 9 欄變成第 10 欄。
+    [1, 4, 5, 6, 10].forEach(function (col) { merges.push({ row: 3, col: col, numRows: 3, numCols: 1 }); });
     return { tab: tab, values: values, merges: merges.concat(t.merges), rows: t.rows.length, headerRows: HEADER_ROWS, width: W };
   });
 }
@@ -3051,7 +3057,7 @@ function renderDeptRosterTable(classes, deptId, depts) {
   $('deptroster-content').innerHTML =
     '<p class="field-hint">共 ' + sorted.length + ' 班、' + tutorCount + ' 位導師' +
       (noMobile ? '，其中 <b>' + noMobile + '</b> 位還沒有私人手機' : '（私人手機都填好了）') + '。</p>' +
-    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>校內分機</th><th>私人手機</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
+    '<div class="table-wrap"><table><thead><tr><th>班級</th><th>班級名稱(原始)</th><th>導師</th><th>校內分機</th><th>私人手機</th><th>輔導人數</th><th>狀態</th><th>操作</th></tr></thead><tbody>' +
     sorted.map(function (c) {
       const tutors = c.tutors || [];
       const names = tutors.length ? tutors.map(function (t) { return escapeHtml(t.name || '（未填姓名）'); }).join('<br>') : '<span class="field-hint">（尚無導師）</span>';
@@ -3063,6 +3069,11 @@ function renderDeptRosterTable(classes, deptId, depts) {
         '<td data-label="導師">' + names + '</td>' +
         '<td data-label="校內分機">' + stack(tutors, function (t) { return t.ext; }, false) + '</td>' +
         '<td data-label="私人手機">' + stack(tutors, function (t) { return t.mobile; }, true) + '</td>' +
+        // 輔導人數：空字串與 0 是不同的意思（空＝還沒填、0＝真的沒有輔導學生），
+        // 所以這裡不能用 `t.advisees ||` 判斷——那會把 0 顯示成「未填」。
+        '<td data-label="輔導人數">' + stack(tutors, function (t) {
+          return (t.advisees === 0 || t.advisees === '0') ? '0' : t.advisees;
+        }, false) + '</td>' +
         '<td data-label="狀態">' + (state.length ? state.join('／') : '啟用') + '</td>' +
         // 唯讀（校安人員）整欄不出按鈕。後端照樣會擋，這裡只是不要給出做不到的操作。
         '<td data-label="操作">' + (deptRosterReadOnly ? '<span class="field-hint">唯讀</span>' :
@@ -3084,12 +3095,17 @@ function deptRosterTutorRowHtml(t, i) {
     '<td><input type="text" data-tutor-field="name" value="' + escapeHtml(t.name || '') + '" maxlength="20" placeholder="必填"></td>' +
     '<td><input type="text" data-tutor-field="ext" value="' + escapeHtml(t.ext || '') + '" maxlength="20" placeholder="選填，例 7140"></td>' +
     '<td><input type="text" data-tutor-field="mobile" value="' + escapeHtml(t.mobile || '') + '" maxlength="20" placeholder="選填，例 0912345678"></td>' +
+    // inputmode=numeric 讓手機跳數字鍵盤；不用 type=number（它會出現上下箭頭、
+    // 而且瀏覽器對非數字輸入的處理不一致，值可能整個變成空字串而看不出來）
+    '<td><input type="text" data-tutor-field="advisees" value="' +
+      escapeHtml(t.advisees === 0 || t.advisees === '0' ? '0' : (t.advisees || '')) +
+      '" maxlength="4" inputmode="numeric" placeholder="選填，例 25" style="max-width:6em;"></td>' +
     '<td><button type="button" class="btn btn-sm btn-danger" data-action="deptroster-tutor-remove">移除</button></td></tr>';
 }
 
 function openDeptRosterForm(classId) {
   const cls = classId ? deptRosterCache.find(function (c) { return c.id === classId; }) : null;
-  const tutors = (cls && cls.tutors && cls.tutors.length) ? cls.tutors : [{ name: '', ext: '', mobile: '' }];
+  const tutors = (cls && cls.tutors && cls.tutors.length) ? cls.tutors : [{ name: '', ext: '', mobile: '', advisees: '' }];
   const bodyHtml = '<form id="deptroster-form">' +
     '<div class="field"><label>班級名稱（原始）</label>' +
       '<input type="text" id="deptroster-name" maxlength="20" value="' + escapeHtml(cls ? cls.name : '') + '" required>' +
@@ -3098,7 +3114,7 @@ function openDeptRosterForm(classId) {
       '<input type="text" id="deptroster-display" maxlength="40" value="' + escapeHtml(cls ? (cls.displayName || '') : '') + '" placeholder="留空自動產生">' +
       '<span class="field-hint">這一欄可以用符號，對外看到的就是它。</span></div>' +
     '<div class="field"><label>導師（最多 10 位）</label>' +
-      '<div class="table-wrap"><table id="deptroster-tutors"><thead><tr><th>姓名</th><th>校內分機</th><th>私人手機</th><th></th></tr></thead><tbody>' +
+      '<div class="table-wrap"><table id="deptroster-tutors"><thead><tr><th>姓名</th><th>校內分機</th><th>私人手機</th><th>輔導人數</th><th></th></tr></thead><tbody>' +
       tutors.map(deptRosterTutorRowHtml).join('') + '</tbody></table></div>' +
       '<button type="button" class="btn btn-sm" data-action="deptroster-tutor-add" style="margin-top:6px;">新增一位導師</button>' +
       '<span class="field-hint">私人手機屬於高度個資，只有您與學諮中心看得到。</span></div>' +
@@ -3111,8 +3127,10 @@ function openDeptRosterForm(classId) {
     const rows = Array.prototype.slice.call(document.querySelectorAll('#deptroster-tutors tbody tr'));
     const tutorList = rows.map(function (tr) {
       const get = function (f) { const el = tr.querySelector('[data-tutor-field="' + f + '"]'); return el ? el.value.trim() : ''; };
-      return { name: get('name'), ext: get('ext'), mobile: get('mobile') };
-    }).filter(function (t) { return t.name || t.ext || t.mobile; });   // 整列空白＝使用者沒填，不送
+      return { name: get('name'), ext: get('ext'), mobile: get('mobile'), advisees: get('advisees') };
+      // 整列空白＝使用者沒填，不送。**advisees 用 !== '' 判斷**不是 truthy——
+      // 只填 0（真的沒有輔導學生）的那一列不能被當成空白丟掉。
+    }).filter(function (t) { return t.name || t.ext || t.mobile || t.advisees !== ''; });
     const payload = {
       class: {
         id: cls ? cls.id : undefined,

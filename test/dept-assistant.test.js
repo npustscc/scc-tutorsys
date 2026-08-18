@@ -167,7 +167,7 @@ test('🔒 班級投影只給名冊欄位：uploadWhitelist / suggestedTutors �
   });
   assert.equal('uploadWhitelist' in out, false);
   assert.equal('suggestedTutors' in out, false);
-  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com', ext: '', mobile: '' }]);
+  assert.deepEqual(out.tutors, [{ name: '李鎮宇', email: 'lee@x.com', ext: '', mobile: '', advisees: '' }]);
   assert.equal(out.displayName, '四農園一A');
   assert.equal(out.active, true);
 });
@@ -240,22 +240,22 @@ test('主任導師欄位驗證：姓名字元、email 格式、分機/手機字�
   assert.deepEqual(S.normalizeDeptHead_({}).head, { name: '', email: '', ext: '', mobile: '' });
 });
 
-test('導師名單：姓名必填，分機/手機/email 選填，回傳四個欄位都在', () => {
+test('導師名單：姓名必填，其餘選填，回傳五個欄位都在（含輔導人數）', () => {
   const S = makeSandbox2();
   const r = S.normalizeDeptRosterTutors_([
     { name: '陳美惠', email: 'A@X.COM', ext: '7140', mobile: '0912-345-678' },
     { name: '王小明' },
   ]);
   assert.equal(r.ok, true);
-  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: 'a@x.com', ext: '7140', mobile: '0912-345-678' });
-  assert.deepEqual(r.tutors[1], { name: '王小明', email: '', ext: '', mobile: '' });
+  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: 'a@x.com', ext: '7140', mobile: '0912-345-678', advisees: '' });
+  assert.deepEqual(r.tutors[1], { name: '王小明', email: '', ext: '', mobile: '', advisees: '' });
 });
 
 test('導師名單：舊鍵 phone 仍收下並折進 mobile（換版時兩軌資料不會同時換）', () => {
   const S = makeSandbox2();
   const r = S.normalizeDeptRosterTutors_([{ name: '陳美惠', phone: '0912345678' }]);
   assert.equal(r.ok, true);
-  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: '', ext: '', mobile: '0912345678' });
+  assert.deepEqual(r.tutors[0], { name: '陳美惠', email: '', ext: '', mobile: '0912345678', advisees: '' });
   assert.equal('phone' in r.tutors[0], false, '寫回去的物件不該再有 phone 鍵');
   // 明確給了 mobile 就以 mobile 為準，不被舊鍵蓋掉
   assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', phone: '0911', mobile: '0922' }]).tutors[0].mobile, '0922');
@@ -645,4 +645,24 @@ test('其他人的列原封不動（含 null 這種髒資料不會讓它炸）',
   const r = S.planDeptAssistantRename_([other, null, baseList()[0]], 'old@x.com', 'new@x.com', ACTOR, NOW);
   assert.equal(r.ok, true);
   assert.equal(r.deptAssistants.find((e) => e && e.email === 'other@x.com'), other);
+});
+
+// ── 輔導人數（2026-08-18 使用者要求，助理可填）─────────────────────────────────
+test('輔導人數：空字串與 0 是**不同**的意思（空＝還沒填、0＝真的沒有輔導學生）', () => {
+  const S = makeSandbox2();
+  const r = S.normalizeDeptRosterTutors_([{ name: 'A' }, { name: 'B', advisees: '0' }, { name: 'C', advisees: 25 }]);
+  assert.equal(r.ok, true);
+  assert.equal(r.tutors[0].advisees, '', '沒填要存空字串，不能自動變成 0——否則統計時分不出「沒填」與「真的是 0」');
+  assert.equal(r.tutors[1].advisees, '0');
+  assert.equal(r.tutors[2].advisees, '25', '數字型別也收，一律轉成字串存');
+});
+
+test('輔導人數：前導零去掉；非整數／負數／超過四位數 → 拒絕整筆', () => {
+  const S = makeSandbox2();
+  assert.equal(S.normalizeDeptRosterTutors_([{ name: 'A', advisees: '007' }]).tutors[0].advisees, '7');
+  for (const bad of ['-1', '3.5', 'abc', '12345', '1 2', '１２']) {
+    const r = S.normalizeDeptRosterTutors_([{ name: 'A', advisees: bad }]);
+    assert.equal(r.ok, false, JSON.stringify(bad) + ' 應該被拒絕');
+    assert.match(r.error, /輔導人數/);
+  }
 });

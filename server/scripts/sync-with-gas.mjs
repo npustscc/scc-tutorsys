@@ -46,6 +46,7 @@ export function projectClass(c) {
     return {
       name: (t && t.name) || '', email: (t && t.email) || '',
       ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+      advisees: (t && t.advisees != null) ? String(t.advisees) : '',
     };
   });
   return out;
@@ -191,7 +192,8 @@ async function main() {
       else {
         const merged = Object.assign({}, next[idx]);
         ROSTER_FIELDS.forEach((f) => { merged[f] = r[f] === undefined ? null : r[f]; });
-        merged.tutors = (r.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '', ext: t.ext || '', mobile: t.mobile || '' }));
+        merged.tutors = (r.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '',
+          ext: t.ext || '', mobile: t.mobile || '', advisees: t.advisees != null ? String(t.advisees) : '' }));
         next[idx] = merged;
       }
     }
@@ -215,7 +217,8 @@ async function main() {
         class: {
           id: plan.createRemote.includes(id) ? undefined : (plan.ridOf[id] || id),
           deptId: c.deptId, name: c.name, displayName: c.displayName || c.name,
-          tutors: (c.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '', ext: t.ext || '', mobile: t.mobile || t.phone || '' })),
+          tutors: (c.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '',
+            ext: t.ext || '', mobile: t.mobile || t.phone || '', advisees: t.advisees != null ? String(t.advisees) : '' })),
         },
       });
       pushed.push(id);

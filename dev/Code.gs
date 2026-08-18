@@ -4300,6 +4300,7 @@ function projectClassForDeptRoster_(cls) {
       return {
         name: (t && t.name) || '', email: (t && t.email) || '',
         ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
+        advisees: (t && t.advisees != null) ? String(t.advisees) : '',
       };
     }),
   };
@@ -4333,7 +4334,18 @@ function normalizeDeptRosterTutors_(tutors) {
     const mobileRaw = (t.mobile === undefined || t.mobile === null) ? t.phone : t.mobile;
     const mobile = String(mobileRaw == null ? '' : mobileRaw).trim();
     if (mobile && !CONTACT_RE.test(mobile)) return { ok: false, error: '私人手機格式不正確（只接受數字與 + - ( ) # 空白）：' + mobile };
-    out.push({ name: name, email: email, ext: ext, mobile: mobile });
+    // 輔導人數（2026-08-18 使用者要求，助理可填）。**空字串與 0 是不同的意思**：
+    // 空＝還沒填，0＝這位導師目前沒有輔導學生。所以沒填時存 ''，不要存 0——
+    // 存 0 的話統計時分不出「沒填」與「真的是 0」，而「還有幾個系沒填」正是會被問的問題。
+    const adviseesRaw = String(t.advisees == null ? '' : t.advisees).trim();
+    let advisees = '';
+    if (adviseesRaw !== '') {
+      if (!/^\d{1,4}$/.test(adviseesRaw)) {
+        return { ok: false, error: '輔導人數只能填 0～9999 的整數：' + adviseesRaw };
+      }
+      advisees = String(Number(adviseesRaw));       // 去掉前導零，'007' → '7'
+    }
+    out.push({ name: name, email: email, ext: ext, mobile: mobile, advisees: advisees });
   }
   return { ok: true, tutors: out };
 }

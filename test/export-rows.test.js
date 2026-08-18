@@ -56,10 +56,11 @@ test('前五列是學院名／說明／三列表頭，資料從第 6 列起；�
   assert.equal(t.values[0][0], '農學院');
   assert.match(t.values[1][0], /匯出時間：20260812/);
   assert.match(t.values[1][0], /含導師私人手機/);
-  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '狀態']);
-  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '']);
+  // 2026-08-18 多一欄「輔導人數」，插在私人手機之後、狀態之前（狀態從第 9 欄變第 10 欄）。
+  assert.deepEqual(plain(t.values[2]), ['系別', '主任導師(系主任)', '', '班級', '班級名稱(原始)', '導師姓名', '聯絡方式', '', '', '狀態']);
+  assert.deepEqual(plain(t.values[3]), ['', '姓名', '校內分機', '', '', '', '校內分機', '私人手機', '輔導人數', '']);
   // 森林系第一列：系別用**正式全名**，主任導師只出現在這一列
-  assert.deepEqual(plain(t.values[5]), ['森林學系', '吳羽婷', '7149', '四森林一A', '四技一A', '', '', '', '啟用']);
+  assert.deepEqual(plain(t.values[5]), ['森林學系', '吳羽婷', '7149', '四森林一A', '四技一A', '', '', '', '', '啟用']);
   assert.equal(t.values[6][0], '', '系別只寫一次，其餘留白給合併');
 });
 
@@ -82,7 +83,7 @@ test('狀態照實寫；classes 有、departments 沒有的系所不會被丟掉
   const S = load();
   const t = tabNamed(S.buildRosterExportTabs(CLASSES, DEPTS, OPTS), '農學院');
   const grad = t.values.slice(5).find((r) => r[3] === '碩農園一');
-  assert.equal(grad[8], '停用／已畢業(114-2)');
+  assert.equal(grad[9], '停用／已畢業(114-2)');   // 狀態欄因為多了輔導人數而右移一格
   const tabs = S.buildRosterExportTabs(
     [{ id: 'x', name: '四技一A', deptId: '孤兒系', tutors: [{ name: '丁' }] }], DEPTS, OPTS);
   const orphan = tabs.find((t2) => t2.values.slice(5).some((r) => r[0] === '孤兒系'));

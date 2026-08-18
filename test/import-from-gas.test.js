@@ -41,7 +41,7 @@ test('🔒 更新既有班級時，投影裡沒有的本地欄位一律保留', 
   assert.equal(c.nameHistory.length, 1);
   assert.equal(c.createdAt, '2026-07-01T00:00:00Z');
   // 名冊欄位要被覆蓋：分機與手機進來了
-  assert.deepEqual(c.tutors, [{ name: '李鎮宇', email: 'lee@x.com', ext: '7140', mobile: '0912345678' }]);
+  assert.deepEqual(c.tutors, [{ name: '李鎮宇', email: 'lee@x.com', ext: '7140', mobile: '0912345678', advisees: '' }]);
 });
 
 test('名冊欄位（班名/簡稱/應繳/畢業/停用）以收集端為準', () => {
@@ -69,7 +69,7 @@ test('收集端有、本地沒有 → 新增，並帶上本地欄位的合理預
   assert.deepEqual(c.uploadWhitelist, []);
   assert.equal(c.dualApprovalMode, 'any');
   assert.equal(c.active, true);
-  assert.deepEqual(c.tutors, [{ name: '陳美惠', email: '', ext: '', mobile: '0911' }]);
+  assert.deepEqual(c.tutors, [{ name: '陳美惠', email: '', ext: '', mobile: '0911', advisees: '' }]);
 });
 
 test('🔒 本地有、收集端沒有 → 絕不刪除，只列進報告', () => {
@@ -115,7 +115,7 @@ test('欄位形狀差異不算變動：本地 tutors 沒有聯絡欄位、gradua
   assert.deepEqual(report.unchanged, ['農園系_四技一A'], '形狀差異不該算成變動');
   assert.deepEqual(report.updated, []);
   // 仍然要把正規化後的形狀寫回去（之後就有 ext/mobile 欄位了）
-  assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: '', ext: '', mobile: '' }]);
+  assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: '', ext: '', mobile: '', advisees: '' }]);
 });
 
 test('真的有手機填進來時，要算成變動', () => {
@@ -139,7 +139,7 @@ test('換版相容：本地是舊的 phone、遠端已改用 mobile → 同一�
   const { classes, report } = mergeClasses(local, remote);
   assert.deepEqual(report.unchanged, ['農園系_四技一A']);
   // 寫回去的是新形狀，舊鍵不留著
-  assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: 'a@x.com', ext: '', mobile: '0911' }]);
+  assert.deepEqual(classes[0].tutors, [{ name: '李鎮宇', email: 'a@x.com', ext: '', mobile: '0911', advisees: '' }]);
 });
 
 test('系所：正式全名（fullName）也要同步過來，其餘本地欄位不動', () => {

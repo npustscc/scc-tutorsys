@@ -1706,6 +1706,29 @@ await flow('O', async () => {
   });
   await shot(page, 'O-稽核紀錄');
 
+  await check('O', '導師資料頁有「輔導人數」欄，助理填得進去而且存得起來', async () => {
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    await page.locator('#deptroster-content table').waitFor({ timeout: 20000 });
+    const heads = await page.locator('#deptroster-content thead th').allTextContents();
+    evid['O-roster-cols'] = heads.join('｜');
+    expect(heads.includes('輔導人數'), '表頭少了輔導人數：' + heads.join('｜'));
+    // 打開第一個班編輯 → 填 25 → 存 → 表格要看得到
+    await page.locator('[data-action="deptroster-edit"]').first().click();
+    await page.locator('#deptroster-tutors').waitFor({ timeout: 5000 });
+    await page.locator('[data-tutor-field="advisees"]').first().fill('25');
+    await page.locator('#deptroster-form button[type=submit]').click();
+    await page.locator('.toast', { hasText: '已儲存' }).waitFor({ timeout: 10000 });
+    await page.waitForTimeout(600);
+    const body = await page.locator('#deptroster-content').textContent();
+    expect(/25/.test(body || ''), '存完表格看不到 25');
+  });
+  await check('O', '🔒 輔導人數只收 0～9999 的整數（填 abc 要被擋）', async () => {
+    await page.locator('[data-action="deptroster-edit"]').first().click();
+    await page.locator('[data-tutor-field="advisees"]').first().fill('abc');
+    await page.locator('#deptroster-form button[type=submit]').click();
+    await page.locator('.toast', { hasText: '輔導人數' }).waitFor({ timeout: 10000 });
+    await page.locator('[data-action="close-modal"]').first().click();
+  });
   await check('O', '導師資料頁的說明＝個資告知那段文案（與跳出視窗同一段）', async () => {
     await page.locator('.nav-btn', { hasText: '導師資料' }).click();
     const hint = await page.locator('#deptroster-editor-hint').textContent({ timeout: 20000 });
