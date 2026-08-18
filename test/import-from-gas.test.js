@@ -153,3 +153,27 @@ test('系所：正式全名（fullName）也要同步過來，其餘本地欄位
   // 再跑一次不該再報變動
   assert.deepEqual(mergeDepartments(departments, remote).report.updated, []);
 });
+
+test('🔒 輔導人數是本機獨有的欄位：收集端沒有時不得被清掉（會發生，不是理論風險）', () => {
+  // 一般版的後端還不認識 advisees，會把它靜靜丟掉。若照遠端寫回去，助理在快速版填好的
+  // 數字會在下一輪同步被清成空的——這一條就是釘住那件事不會發生。
+  const local = [localClass({ tutors: [{ name: '李鎮宇', email: '', ext: '', mobile: '', advisees: '25' }] })];
+  const remote = [{
+    id: '農園系_四技一A', name: '四技一A', deptId: '農園系', systemId: 'day_college',
+    displayName: '四農園一A', requiredMeetingOverride: 4, graduatedSemester: null, active: true,
+    tutors: [{ name: '李鎮宇', email: '', ext: '', mobile: '' }],   // 遠端沒有 advisees
+  }];
+  const { classes, report } = mergeClasses(local, remote);
+  assert.equal(classes[0].tutors[0].advisees, '25', '本機的輔導人數被遠端的空值蓋掉了');
+  assert.deepEqual(report.unchanged, ['農園系_四技一A'], '它不該被算成變動（不然每輪都報假異動）');
+});
+
+test('收集端日後支援 advisees 時，以收集端的值為準', () => {
+  const local = [localClass({ tutors: [{ name: '李鎮宇', email: '', ext: '', mobile: '', advisees: '25' }] })];
+  const remote = [{
+    id: '農園系_四技一A', name: '四技一A', deptId: '農園系', systemId: 'day_college',
+    displayName: '四農園一A', requiredMeetingOverride: 4, graduatedSemester: null, active: true,
+    tutors: [{ name: '李鎮宇', email: '', ext: '', mobile: '', advisees: '30' }],
+  }];
+  assert.equal(mergeClasses(local, remote).classes[0].tutors[0].advisees, '30');
+});

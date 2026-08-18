@@ -48,9 +48,8 @@ function normTutors(tutors) {
     return {
       name: (t && t.name) || '', email: (t && t.email) || '',
       ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
-      // 輔導人數（2026-08-18 新增）**一定要納入比較**：漏掉的話助理填的值不會同步，
-      // 而且因為兩邊看起來「沒有差異」，它會被下一次同步用對方的空值覆蓋掉。
-      advisees: (t && t.advisees != null) ? String(t.advisees) : '',
+      // 輔導人數刻意**不納入比較**：收集端（GAS）的後端還不認識這個欄位，
+      // 納入的話每次都會把「那邊沒有」讀成「那邊清空了」。合併時另外保留本機的值。
     };
   });
 }
@@ -60,6 +59,20 @@ function sameRoster(local, remote) {
     if (JSON.stringify(normRosterValue(local[f])) !== JSON.stringify(normRosterValue(remote[f]))) return false;
   }
   return JSON.stringify(normTutors(local.tutors)) === JSON.stringify(normTutors(remote.tutors));
+}
+
+// 把本機既有的 advisees（依導師姓名對）貼回正規化後的名單上。遠端有值就以遠端為準
+// （日後收集端支援之後自然生效），遠端空的就保留本機的。
+function withAdvisees(tutors, localTutors) {
+  const byName = {};
+  (localTutors || []).forEach((t) => { if (t && t.name) byName[t.name] = t; });
+  return (tutors || []).map((t) => {
+    const remoteAdv = t.advisees != null ? String(t.advisees) : '';
+    const keep = byName[t.name || ''];
+    return Object.assign({}, t, {
+      advisees: remoteAdv !== '' ? remoteAdv : ((keep && keep.advisees != null) ? String(keep.advisees) : ''),
+    });
+  });
 }
 
 export function mergeClasses(localClasses, remoteClasses) {
@@ -75,7 +88,7 @@ export function mergeClasses(localClasses, remoteClasses) {
         displayName: r.displayName || r.name,
         requiredMeetingOverride: r.requiredMeetingOverride === undefined ? null : r.requiredMeetingOverride,
         graduatedSemester: r.graduatedSemester || null,
-        tutors: normTutors(r.tutors),
+        tutors: withAdvisees(normTutors(r.tutors), []),
         suggestedTutors: [], dualApprovalMode: 'any', uploadWhitelist: [], active: r.active !== false,
       });
       report.created.push(r.id);
@@ -85,7 +98,10 @@ export function mergeClasses(localClasses, remoteClasses) {
     for (const f of ROSTER_FIELDS) {
       if (r[f] !== undefined) local[f] = r[f];
     }
-    local.tutors = normTutors(r.tutors);
+    // 輔導人數是**本機獨有**的欄位（收集端的後端還不認識它）。整筆覆寫會把它清掉，
+    // 所以依姓名把本機既有的值帶回來——與 suggestedTutors 那類「投影裡沒有的欄位一律保留」
+    // 同一個原則，只是它藏在 tutors 陣列裡面，容易被漏掉。
+    local.tutors = withAdvisees(normTutors(r.tutors), local.tutors);
     (changed ? report.updated : report.unchanged).push(r.id);
   }
 

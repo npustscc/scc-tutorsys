@@ -38,6 +38,9 @@ const ROSTER_FIELDS = ['name', 'displayName', 'deptId', 'systemId', 'requiredMee
 // 兩邊的資料形狀不同（本機是完整紀錄、遠端是投影），一律折成同一個可比較的形狀再比。
 // 缺欄位補 null、tutors 只留名冊欄位並把舊的 phone 折進 mobile——不正規化的話第一次比對
 // 會把幾百筆全報成「有變動」，真正的變動就被雜訊淹掉（import-from-gas 踩過同一個坑）。
+// 比較用的投影**刻意不含 advisees**：一般版的後端還不認識這個欄位，納入比較的話
+// 每一輪都會把「遠端沒有」讀成「遠端清空了」，於是本機的值被反覆清掉。
+// 等一般版的後端也支援了（Code.gs 已改、待 clasp push），把 advisees 加進來就會開始同步。
 export function projectClass(c) {
   if (!c) return null;
   const out = {};
@@ -46,7 +49,6 @@ export function projectClass(c) {
     return {
       name: (t && t.name) || '', email: (t && t.email) || '',
       ext: (t && t.ext) || '', mobile: (t && (t.mobile || t.phone)) || '',
-      advisees: (t && t.advisees != null) ? String(t.advisees) : '',
     };
   });
   return out;
@@ -192,8 +194,19 @@ async function main() {
       else {
         const merged = Object.assign({}, next[idx]);
         ROSTER_FIELDS.forEach((f) => { merged[f] = r[f] === undefined ? null : r[f]; });
-        merged.tutors = (r.tutors || []).map((t) => ({ name: t.name || '', email: t.email || '',
-          ext: t.ext || '', mobile: t.mobile || '', advisees: t.advisees != null ? String(t.advisees) : '' }));
+        // 輔導人數：**遠端是空的就保留本機的值**（依姓名對）。
+        // 一般版的後端還不認識這個欄位，會把它靜靜丟掉；若照著遠端寫回去，
+        // 助理在快速版填好的數字會在下一輪同步被清成空的（實際會發生，不是理論風險）。
+        const localByName = {};
+        (next[idx].tutors || []).forEach((t) => { if (t && t.name) localByName[t.name] = t; });
+        merged.tutors = (r.tutors || []).map((t) => {
+          const remoteAdv = t.advisees != null ? String(t.advisees) : '';
+          const keep = localByName[t.name || ''];
+          return {
+            name: t.name || '', email: t.email || '', ext: t.ext || '', mobile: t.mobile || '',
+            advisees: remoteAdv !== '' ? remoteAdv : ((keep && keep.advisees != null) ? String(keep.advisees) : ''),
+          };
+        });
         next[idx] = merged;
       }
     }
