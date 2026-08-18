@@ -3946,6 +3946,13 @@ function normalizeDeptAssistantDeptIds_(deptIds, departments) {
 // 避免「驗的時候系所還在、寫進去時已被刪」的競態。
 function adminUpsertDeptAssistantAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  return upsertDeptAssistantCore_(params, ctx, userEmail);
+}
+
+// 驗證與寫入的核心，**不含權限判斷**。兩個呼叫端各自負責授權：
+// adminUpsertDeptAssistantAction_（admin）與 syncPutConfigListsAction_（同步服務帳號）。
+// 抽出來是為了讓同步走同一套 deptIds 驗證、軟刪除欄位與稽核紀錄——複製一份遲早會漂移。
+function upsertDeptAssistantCore_(params, ctx, userEmail) {
   const entry = params.deptAssistant;
   if (!entry || !entry.email) throw new Error('deptAssistant.email required');
   const isDelete = entry.deleted === true;
@@ -4100,8 +4107,10 @@ function syncPutConfigListsAction_(params, ctx, userEmail) {
     rows.forEach(function (row) {
       if (!row || !row.email) return;
       try {
-        if (k === 'deptAssistants') adminUpsertDeptAssistantAction_({ deptAssistant: row }, ctx, userEmail);
-        else adminUpsertSafetyOfficerAction_({ safetyOfficer: row }, ctx, userEmail);
+        // 走 core 而不是 admin action：那兩支開頭會再 requireAdmin_ 一次，而同步帳號不是 admin
+        // （授權已經在 requireSyncService_ 做過，而且切得更窄——只准寫這兩份名單）。
+        if (k === 'deptAssistants') upsertDeptAssistantCore_({ deptAssistant: row }, ctx, userEmail);
+        else upsertSafetyOfficerCore_({ safetyOfficer: row }, ctx, userEmail);
         ok++;
       } catch (e) { result.rejected.push(k + '/' + row.email + '：' + e.message); }
     });
@@ -4271,6 +4280,11 @@ function adminAuditListAction_(params, ctx, userEmail) {
 // 沒有 deptIds：緊急聯繫本來就不分系，給範圍反而會在最需要的時候擋住人。
 function adminUpsertSafetyOfficerAction_(params, ctx, userEmail) {
   requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  return upsertSafetyOfficerCore_(params, ctx, userEmail);
+}
+
+// 同上：驗證與寫入的核心，不含權限判斷。
+function upsertSafetyOfficerCore_(params, ctx, userEmail) {
   const entry = params.safetyOfficer;
   if (!entry || !entry.email) throw new Error('safetyOfficer.email required');
   const email = String(entry.email).trim().toLowerCase();
