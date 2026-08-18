@@ -1706,6 +1706,14 @@ await flow('O', async () => {
   });
   await shot(page, 'O-稽核紀錄');
 
+  await check('O', '導師資料頁的說明＝個資告知那段文案（與跳出視窗同一段）', async () => {
+    await page.locator('.nav-btn', { hasText: '導師資料' }).click();
+    const hint = await page.locator('#deptroster-editor-hint').textContent({ timeout: 20000 });
+    evid['O-roster-hint'] = (hint || '').trim();
+    expect(/導師名冊平台，用於教學單位登入新增、修改、刪除班級或家族導師/.test(hint || ''), '文案不對：' + hint);
+    expect(/校安人員於危機或緊急事件即時聯繫使用/.test(hint || ''), '缺了用途那一句：' + hint);
+    expect(!/維護您負責系所的班級與導師名單/.test(hint || ''), '舊文案還在');
+  });
   await check('O', '全站的表格都有可拖曳欄寬（不只系辦助理那一張）', async () => {
     const seen = [];
     // 最常用的那一頁（導師資料）先驗——它不是後台分頁，走導覽列
