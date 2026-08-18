@@ -254,6 +254,61 @@ async function main() {
   console.log('[sync] 完成（同步基準 ' + Object.keys(nextBaseline).length + ' 班）' +
     (plan.conflict.length ? '；**有 ' + plan.conflict.length + ' 筆衝突未處理**' : ''));
 
+  // ── 名單（主責／助理／管理員／系辦助理／校安人員）────────────────────────────
+  // 走 GAS 上的兩個專用通道。**users／staffLeads／staffAssistants 只拉不推**——那三份
+  // 等於管理員權限，寫入的路留著就是把「憑一組存在 .env 的密碼變成管理員」這條路留著。
+  // 所以：那三份以一般版為準（拉下來覆蓋本機）；deptAssistants／safetyOfficers 才雙向。
+  try {
+    const remoteLists = (await call({
+      action: 'syncGetConfigLists', rootFolderId: env.GAS_ROOT_FOLDER_ID, sessionToken: token,
+    })).lists || {};
+    const cfgPath = path.join(storeDir, 'config.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    const cnt = (v) => Array.isArray(v) ? v.filter((x) => x && !x.deleted).length : Object.keys(v || {}).length;
+    const pulledLists = [];
+    for (const k of ['users', 'staffLeads', 'staffAssistants']) {
+      const before = JSON.stringify(cfg[k] || (k === 'users' ? {} : []));
+      const after = JSON.stringify(remoteLists[k] || (k === 'users' ? {} : []));
+      if (before !== after) {
+        cfg[k] = remoteLists[k];
+        pulledLists.push(k + '（' + cnt(remoteLists[k]) + '）');
+      }
+    }
+    if (pulledLists.length) {
+      if (apply) {
+        fs.copyFileSync(cfgPath, cfgPath + '.bak-sync-' + new Date().toISOString().replace(/[:.]/g, '-'));
+        const tmp = cfgPath + '.tmp-' + process.pid;
+        fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp, cfgPath);
+      }
+      console.log('  名單（一般版→快速版，只拉不推）：' + pulledLists.join('、') + (apply ? '' : '（預演，未寫入）'));
+    }
+    // 可雙向的兩份：本機有、遠端沒有的推上去（整份送，GAS 端逐筆走既有的 upsert action）
+    const pushLists = {};
+    for (const k of ['deptAssistants', 'safetyOfficers']) {
+      const localRows = (cfg[k] || []).filter((x) => x && !x.deleted);
+      const remoteRows = (remoteLists[k] || []).filter((x) => x && !x.deleted);
+      const remoteByEmail = new Set(remoteRows.map((x) => String(x.email || '').toLowerCase()));
+      const missing = localRows.filter((x) => !remoteByEmail.has(String(x.email || '').toLowerCase()));
+      if (missing.length) pushLists[k] = missing;
+    }
+    if (Object.keys(pushLists).length) {
+      const n = Object.keys(pushLists).map((k) => k + ' ' + pushLists[k].length).join('、');
+      if (apply) {
+        const r = await call({
+          action: 'syncPutConfigLists', rootFolderId: env.GAS_ROOT_FOLDER_ID, sessionToken: token, lists: pushLists,
+        });
+        console.log('  名單（快速版→一般版）：' + JSON.stringify(r.applied) +
+          (r.rejected && r.rejected.length ? '，被拒 ' + r.rejected.length + ' 筆' : ''));
+      } else {
+        console.log('  名單（快速版→一般版，預演）：' + n);
+      }
+    }
+  } catch (e) {
+    // 名單同步失敗不該讓班級同步的結果報廢（一般版還沒部署新版時就會走到這裡）。
+    console.log('  ⚠️ 名單同步略過：' + e.message);
+  }
+
   await notifyIfChanged({
     dataDir, env, cwd,
     conflicts: plan.conflict,

@@ -158,6 +158,8 @@ function doPost(e) {
       case 'adminRenameDeptAssistant':  result = adminRenameDeptAssistantAction_(params, ctx, userEmail); break;
       case 'adminUpsertSafetyOfficer':  result = adminUpsertSafetyOfficerAction_(params, ctx, userEmail); break;
       case 'auditAppend':               result = auditAppendAction_(params, ctx, userEmail); break;
+      case 'syncGetConfigLists':        result = syncGetConfigListsAction_(params, ctx, userEmail); break;
+      case 'syncPutConfigLists':        result = syncPutConfigListsAction_(params, ctx, userEmail); break;
       case 'adminAuditList':            result = adminAuditListAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
@@ -4047,6 +4049,65 @@ function adminRenameDeptAssistantAction_(params, ctx, userEmail) {
     appendAuditLog_(ctx, { action: 'adminRenameDeptAssistant', by: userEmail, targetId: plan.from + ' → ' + plan.to, at: now });
     return { deptAssistants: config.deptAssistants, from: plan.from, to: plan.to };
   });
+}
+
+// ── 名單同步（給校內同步服務用的兩個專用通道，2026-08-18）─────────────────────
+// 一般版與快速版要「連管理者名單也一樣」，而名單的讀寫本來全是 admin only，
+// 同步帳號（importer）是 deptAssistant，讀都讀不到。
+//
+// **刻意不把 importer 升成 admin**，而是開兩個只做這件事的通道。理由：那組密碼存在自架端的
+// .env 裡，升成 admin 就等於「拿到那個檔案的人可以把自己設成管理員」。這裡改成把權限切到
+// 剛好夠用：
+//   syncGetConfigLists —— 讀五份名單（同步要先知道兩邊差在哪）
+//   syncPutConfigLists —— **只准寫 deptAssistants 與 safetyOfficers**
+//
+// 為什麼 users／staffLeads／staffAssistants 只准讀不准寫：
+//   users 的 role:'admin' 直接就是管理員；而 staffLeads 命中時 resolveRoles_ 會同時給 isAdmin
+//   （2026-08-11 的「主責＝最大權限」那條規則）。開放寫入這三份，就等於把「憑一組存在檔案裡的
+//   密碼把自己變成管理員」這條路留著——那正是不升 admin 想避免的事。
+//   代價：這三份名單只能在一般版維護，快速版改了不會同步過去（同步腳本會把差異列出來）。
+function requireSyncService_(roles) {
+  if (!roles || String(roles.email || '').toLowerCase() !== String(IMPORTER_ACCOUNT_EMAIL_).toLowerCase()) {
+    throw new Error('forbidden');
+  }
+  // 這個帳號本身仍必須是有效的系辦助理——在後台停用它，這兩個通道就一起失效（fail-closed）。
+  if (!(roles.deptAssistantOf || []).length) throw new Error('forbidden');
+}
+
+const SYNC_WRITABLE_LISTS_ = ['deptAssistants', 'safetyOfficers'];
+const SYNC_READABLE_LISTS_ = ['users', 'staffLeads', 'staffAssistants', 'deptAssistants', 'safetyOfficers'];
+
+function syncGetConfigListsAction_(params, ctx, userEmail) {
+  requireSyncService_(loadRolesForCtx_(ctx, userEmail));
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  const out = {};
+  SYNC_READABLE_LISTS_.forEach(function (k) {
+    out[k] = (k === 'users') ? (config.users || {}) : (config[k] || []);
+  });
+  return { lists: out, writable: SYNC_WRITABLE_LISTS_ };
+}
+
+// 整份取代那兩份名單。**逐筆走既有的 upsert action**而不是直接覆寫陣列：那些 action 才有
+// deptIds 驗證、email 正規化、軟刪除欄位與稽核紀錄。整份覆寫會繞過全部這些。
+function syncPutConfigListsAction_(params, ctx, userEmail) {
+  requireSyncService_(loadRolesForCtx_(ctx, userEmail));
+  const lists = params.lists || {};
+  const result = { applied: {}, rejected: [] };
+  Object.keys(lists).forEach(function (k) {
+    if (SYNC_WRITABLE_LISTS_.indexOf(k) === -1) { result.rejected.push(k); return; }
+    const rows = Array.isArray(lists[k]) ? lists[k] : [];
+    let ok = 0;
+    rows.forEach(function (row) {
+      if (!row || !row.email) return;
+      try {
+        if (k === 'deptAssistants') adminUpsertDeptAssistantAction_({ deptAssistant: row }, ctx, userEmail);
+        else adminUpsertSafetyOfficerAction_({ safetyOfficer: row }, ctx, userEmail);
+        ok++;
+      } catch (e) { result.rejected.push(k + '/' + row.email + '：' + e.message); }
+    });
+    result.applied[k] = ok;
+  });
+  return result;
 }
 
 // ── 稽核：瀏覽軌跡（2026-08-18）─────────────────────────────────────────────────
