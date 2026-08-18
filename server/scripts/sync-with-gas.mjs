@@ -255,6 +255,9 @@ async function main() {
         });
         console.log('  名單（快速版→一般版）：' + JSON.stringify(r.applied) +
           (r.rejected && r.rejected.length ? '，被拒 ' + r.rejected.length + ' 筆' : ''));
+        // 只印數字沒有用——看的人需要知道「為什麼」才處理得了。
+        (r.rejected || []).slice(0, 8).forEach((x) => console.log('     ' + x));
+        if ((r.rejected || []).length > 8) console.log('     …其餘 ' + (r.rejected.length - 8) + ' 筆同類');
       } else {
         console.log('  名單（快速版→一般版，預演）：' + n);
       }
@@ -320,7 +323,13 @@ async function main() {
         },
       });
       pushed.push(id);
-    } catch (e) { failed.push(id + '：' + e.message); }
+    } catch (e) {
+      // 「class name already exists」多半是一般版有同名的班但已被刪除（墓碑）——
+      // deptRosterGet 看不到它，所以配對不到，但建立時的同名檢查擋得住。只能由人決定。
+      const hint = /already exists/.test(e.message)
+        ? '（一般版有同名的班但看不到，多半是已刪除的墓碑：請在一般版復原它或把其中一邊改名）' : '';
+      failed.push(id + '：' + e.message + hint);
+    }
   }
   if (pushed.length) console.log('  已推上一般版 ' + pushed.length + ' 班');
   if (failed.length) { console.log('  ⚠️ 推送失敗 ' + failed.length + ' 筆：'); failed.slice(0, 8).forEach((f) => console.log('     ' + f)); }
