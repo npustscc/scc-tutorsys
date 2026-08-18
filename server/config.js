@@ -79,6 +79,13 @@ function loadConfig(opts) {
     allowedOrigins: String(env.ALLOWED_ORIGINS || '').split(',')
       .map(function (s) { return s.trim(); })
       .filter(function (s) { return s && s !== '*'; }),
+    // 走公開通道（Cloudflare Tunnel）進來的主機名。對這些 Host 的 `/` 不提供自架站的
+    // 登入頁，改回一頁說明——那條通道只開放 /healthz 與 /exec 給前端用，人直接打網址會看到
+    // 裸的 404，看起來像壞掉（使用者 2026-08-18 實際踩到）。
+    // 是**允許清單**：沒列到的 Host（loopback、tailnet、區網）行為完全不變。
+    noticeHosts: String(env.PUBLIC_NOTICE_HOSTS || '').split(',')
+      .map(function (s) { return s.trim().toLowerCase(); })
+      .filter(Boolean),
     repoRoot: repoRoot,
   };
 }

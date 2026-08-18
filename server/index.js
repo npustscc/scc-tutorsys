@@ -433,7 +433,34 @@ function startServer(config) {
   // 整段包 try/catch：畸形 percent-encoding 會讓 decodeURIComponent 丟 URIError、
   // 含 NUL byte 的路徑會讓 fs.readFile 同步丟 ERR_INVALID_ARG_VALUE——不接住的話
   // 一個畸形請求就能打死整個 process（fail-closed 回 400，不是 crash）。
+  // 公開通道上的 `/`：回一頁說明，而不是自架站的登入頁。
+  // 那條通道只放行 /healthz 與 /exec（帳密登入刻意不對外），所以這頁不提供任何表單，
+  // 只告訴人正確的入口在哪。判斷依 Host，而且是允許清單——沒列到的 Host 走原本的邏輯。
+  function serveTunnelNotice(req, res) {
+    const html = '<!doctype html><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width,initial-scale=1">' +
+      '<title>導師名冊系統</title>' +
+      '<style>body{font-family:system-ui,-apple-system,"PingFang TC","Noto Sans TC",sans-serif;' +
+      'max-width:34rem;margin:12vh auto;padding:0 1.25rem;line-height:1.8;color:#1f2933}' +
+      'a{color:#2563eb}code{background:#f1f5f9;padding:.1em .35em;border-radius:3px;font-size:.9em}' +
+      '@media(prefers-color-scheme:dark){body{background:#0f1512;color:#e8eee9}code{background:#1f2a24}}' +
+      '</style>' +
+      '<h1 style="font-size:1.3rem;">這裡是導師名冊系統的後端服務</h1>' +
+      '<p>這個網址只提供系統內部呼叫，沒有可以操作的畫面。</p>' +
+      '<p>請改用系統入口：<br><a href="https://npustscc.github.io/scc-tutorsys/">' +
+      'https://npustscc.github.io/scc-tutorsys/</a></p>' +
+      '<p style="font-size:.85rem;opacity:.75;">若入口頁右上角顯示「⚡ 快速版」，代表它已經在使用這台伺服器。</p>';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(html);
+    logLine(req.method, '/', 200, 'tunnel-notice');
+  }
+
   function serveStatic(req, res, urlObj) {
+    const host = String(req.headers.host || '').toLowerCase();
+    if ((urlObj.pathname === '/' || urlObj.pathname === '') &&
+        config.noticeHosts.indexOf(host) !== -1) {
+      return serveTunnelNotice(req, res);
+    }
     let target;
     try {
       let rel = decodeURIComponent(urlObj.pathname);
