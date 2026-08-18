@@ -31,6 +31,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 const ROSTER_FIELDS = ['name', 'displayName', 'deptId', 'systemId', 'requiredMeetingOverride', 'graduatedSemester', 'active'];
 
@@ -198,7 +199,68 @@ async function main() {
   fs.writeFileSync(baselinePath, JSON.stringify({ at: new Date().toISOString(), classes: nextBaseline }, null, 2), { mode: 0o600 });
   console.log('[sync] 完成（同步基準 ' + Object.keys(nextBaseline).length + ' 班）' +
     (plan.conflict.length ? '；**有 ' + plan.conflict.length + ' 筆衝突未處理**' : ''));
+
+  await notifyIfChanged({
+    dataDir, env, cwd,
+    conflicts: plan.conflict,
+    pushFailed: failed,
+  });
   if (plan.conflict.length) process.exitCode = 2;
+}
+
+// 衝突／推送失敗要寄信通知——不然它只留在 journal，而沒有人會主動去看 journal。
+//
+// **只在「這一批問題跟上次通知的不一樣」時才寄**。每 5 分鐘一輪，同一筆衝突若每輪都寄，
+// 一天就是 288 封，收信的人三天後就會把它整條規則丟進垃圾桶——那等於沒有通知。
+// 問題全部排除時另外寄一封「已排除」，讓人知道可以不用再管了（只寄一次）。
+async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed }) {
+  const statePath = path.join(dataDir, 'sync-alert-state.json');
+  const signature = JSON.stringify({ c: conflicts.slice().sort(), f: pushFailed.slice().sort() });
+  let last = '';
+  try { last = JSON.parse(fs.readFileSync(statePath, 'utf8')).signature || ''; } catch (e) { last = ''; }
+  const clean = !conflicts.length && !pushFailed.length;
+  if (signature === last) return;                       // 狀況沒變，不重複打擾
+  if (clean && !last) { return; }                        // 一直都正常，不需要報平安
+
+  const to = (env.SYNC_ALERT_TO || env.SMTP_USER || '').trim();
+  if (!to) { console.log('[sync] 沒有設定通知收件者（SYNC_ALERT_TO／SMTP_USER），略過通知'); return; }
+  const require_ = createRequire(path.join(cwd, 'server/x.js'));
+  let mailer;
+  try {
+    const { createMailer } = require_(path.join(cwd, 'server/mailer.js'));
+    mailer = createMailer({
+      host: env.SMTP_HOST || 'smtp.gmail.com', port: Number(env.SMTP_PORT || 465),
+      user: env.SMTP_USER, pass: env.SMTP_PASS, fromName: env.MAIL_FROM_NAME,
+      auditPath: path.join(dataDir, 'mails.jsonl'),
+    });
+  } catch (e) { console.log('[sync] 寄信模組載入失敗，略過通知：' + e.message); return; }
+  if (!mailer.enabled) { console.log('[sync] 未設定 SMTP，略過通知'); return; }
+
+  const lines = clean
+    ? ['先前回報的名冊同步問題已經全部排除，兩邊目前一致。', '', '（此信由系統自動寄出，不需回覆）']
+    : [
+        '一般版與快速版的名冊同步遇到需要人處理的狀況：', '',
+        conflicts.length
+          ? '【衝突】同一個班在兩邊都被改過，內容不一樣。系統**兩邊都沒有動**，等人決定要留哪一邊：\n  ' +
+            conflicts.join('\n  ') +
+            '\n\n處理方式：到其中一邊把它改成正確的內容並存檔（另一邊不要動），下一輪同步就會自動對齊。'
+          : '',
+        pushFailed.length
+          ? '\n【推送失敗】這些班改不上一般版：\n  ' + pushFailed.join('\n  ') +
+            '\n\n最常見的原因是同步帳號沒有掛到那個系所（新增系所之後要讓它的系所清單跟上）。'
+          : '',
+        '', '同步每 5 分鐘跑一次；問題排除後會再寄一封通知。', '（此信由系統自動寄出，不需回覆）',
+      ];
+  try {
+    await mailer.send({
+      to: to,
+      subject: clean ? '【導師名冊系統】同步問題已排除' :
+        '【導師名冊系統】名冊同步需要處理（衝突 ' + conflicts.length + '、推送失敗 ' + pushFailed.length + '）',
+      body: lines.filter(function (x) { return x !== ''; }).join('\n'),
+    });
+    console.log('[sync] 已寄出通知給 ' + to);
+  } catch (e) { console.log('[sync] 通知寄送失敗（不影響同步結果）：' + e.message); }
+  fs.writeFileSync(statePath, JSON.stringify({ at: new Date().toISOString(), signature: signature }, null, 2), { mode: 0o600 });
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
