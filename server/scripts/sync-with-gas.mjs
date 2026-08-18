@@ -217,7 +217,28 @@ async function main() {
       }
       console.log('  名單（一般版→快速版，只拉不推）：' + pulledLists.join('、') + (apply ? '' : '（預演，未寫入）'));
     }
-    // 可雙向的兩份：本機有、遠端沒有的推上去（整份送，GAS 端逐筆走既有的 upsert action）
+    // 可雙向的兩份：**兩個方向都要補**。只推不拉的話，一般版上新增的系辦助理永遠不會出現在
+    // 快速版——而快速版才是使用者實際會打開的那一個。
+    const pulledRows = [];
+    for (const k of ['deptAssistants', 'safetyOfficers']) {
+      const localRows = (cfg[k] || []);
+      const localEmails = new Set(localRows.map((x) => String((x && x.email) || '').toLowerCase()));
+      const missing = (remoteLists[k] || []).filter((x) => x && !x.deleted &&
+        !localEmails.has(String(x.email || '').toLowerCase()));
+      if (!missing.length) continue;
+      cfg[k] = localRows.concat(missing);
+      pulledRows.push(k + '（' + missing.length + '）');
+    }
+    if (pulledRows.length) {
+      if (apply) {
+        const tmp2 = cfgPath + '.tmp2-' + process.pid;
+        fs.writeFileSync(tmp2, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+        fs.renameSync(tmp2, cfgPath);
+      }
+      console.log('  名單（一般版→快速版，新增）：' + pulledRows.join('、') + (apply ? '' : '（預演，未寫入）'));
+    }
+
+    // 本機有、遠端沒有的推上去（整份送，GAS 端逐筆走既有的 upsert action）
     const pushLists = {};
     for (const k of ['deptAssistants', 'safetyOfficers']) {
       const localRows = (cfg[k] || []).filter((x) => x && !x.deleted);
