@@ -118,9 +118,14 @@ export function resolveByTimestamp(localAt, remoteAt) {
 // 就兩邊都不動、只回報。ROW_IGNORE 裡的欄位不參與比較，否則同一份內容會因為戳不同
 // 而永遠互推。
 const ROW_IGNORE = ['updatedAt', 'updatedBy'];
+// 「沒有這個鍵」與「這個鍵是空的」意思一樣，比較前要折平。實測：兩邊 31 筆被判成不同，
+// 差異全部只是本機沒有 disabled 鍵、一般版寫著 false——不折平的話報告每輪喊 31 筆狼來了，
+// 真正的差異就淹在裡面沒人看得到（這正是 08-18 的分機被改掉卻沒人發現的同一種盲點）。
+const isEmpty = (v) => v === undefined || v === null || v === '' || v === false ||
+  (Array.isArray(v) && v.length === 0);
 export function rowContent(row) {
   const out = {};
-  Object.keys(row || {}).filter((k) => !ROW_IGNORE.includes(k)).sort()
+  Object.keys(row || {}).filter((k) => !ROW_IGNORE.includes(k) && !isEmpty(row[k])).sort()
     .forEach((k) => { out[k] = row[k]; });
   return JSON.stringify(out);
 }

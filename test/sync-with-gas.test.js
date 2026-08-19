@@ -250,3 +250,19 @@ test('名單：email 大小寫不同視為同一人', () => {
   );
   assert.deepEqual(p.push, ['a@x.com']);
 });
+
+test('🔒 名單：「沒有這個鍵」與「空值」視為相同（實測 31 筆假差異全是 disabled 缺鍵）', () => {
+  const p = planListSync(
+    [{ email: 'a@x.com', ext: '7040', name: '甲' }],
+    [{ email: 'a@x.com', ext: '7040', name: '甲', disabled: false, deleted: false, deptIds: [] }],
+  );
+  assert.deepEqual(p.push.concat(p.pull, p.undecided), [], '形狀差異被當成真差異了');
+});
+
+test('名單：真的被停用時仍要判成不同', () => {
+  const p = planListSync(
+    [{ email: 'a@x.com', ext: '1', updatedAt: '2026-08-19T02:00:00Z' }],
+    [{ email: 'a@x.com', ext: '1', disabled: true, updatedAt: '2026-08-19T01:00:00Z' }],
+  );
+  assert.deepEqual(p.push, ['a@x.com']);
+});
