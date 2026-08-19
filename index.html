@@ -3207,6 +3207,7 @@ const ADMIN_TABS = [
   { id: 'deptAssistants', label: '系辦助理' },
   { id: 'safetyOfficers', label: '校安人員（唯讀）' },
   { id: 'audit', label: '稽核紀錄' },
+  { id: 'deleted', label: '已刪除項目' },
   // 「宣導關鍵字」是班會紀錄表的設定，而那整條流程目前不啟用（RECORD_FLOW_ENABLED_FOR_STAFF_），
   // 留在後台只會讓人以為要維護它。**是隱藏不是移除**：renderAdminKeywords 與後端都原封不動，
   // 要恢復只要把這一行放回 ADMIN_TABS。
@@ -3233,7 +3234,7 @@ function renderAdminTab() {
     colleges: renderAdminColleges, departments: renderAdminDepartments, tutorSystems: renderAdminTutorSystems,
     classes: renderAdminClasses, semesters: renderAdminSemesters, users: renderAdminUsers,
     staffTeam: renderAdminStaffTeam, deptAssistants: enterAdminDeptAssistants,
-    safetyOfficers: renderAdminSafetyOfficers, audit: enterAdminAudit,
+    safetyOfficers: renderAdminSafetyOfficers, audit: enterAdminAudit, deleted: enterAdminDeleted,
     keywords: renderAdminKeywords, roster: renderAdminRoster,
   };
   auditView('viewAdminTab', { page: 'admin', detail: adminTab });
@@ -3342,6 +3343,105 @@ document.body.addEventListener('click', async function (e) {
 // 畫面不是資料匯出，一次撈全部只會讓瀏覽器卡住而且沒人讀得完。
 // ══════════════════════════════════════════════════════════════════════════════
 let auditState = { kind: '', email: '', limit: 300, rows: null, total: 0, error: '' };
+
+// ── 已刪除項目（墓碑區）──────────────────────────────────────────────────────
+// 使用者 2026-08-19：「我看不到被軟刪除的項目，請增加一個類似墓碑區的地方讓管理者使用」。
+// 這一頁存在的理由不只是方便：這個系統的刪除幾乎都是軟刪除，而墓碑在畫面上完全不可見，
+// 所以同步把 6 個已換名的舊信箱復活成有效帳號時，沒有任何一個畫面看得出異狀。
+const deletedState = { rows: null, error: '', busy: '' };
+
+function enterAdminDeleted() {
+  deletedState.rows = null;
+  deletedState.error = '';
+  renderAdminDeleted();
+  loadDeleted();
+}
+
+async function loadDeleted() {
+  try {
+    const res = await proxyCall('adminListDeleted', {});
+    deletedState.rows = res.entries || [];
+    deletedState.error = '';
+  } catch (e) {
+    deletedState.rows = [];
+    deletedState.error = e.message;
+  }
+  if (adminTab === 'deleted') renderAdminDeleted();
+}
+
+const TOMBSTONE_KIND_LABEL_ = {
+  class: '班級', deptAssistant: '系辦助理', safetyOfficer: '校安人員',
+  staffLead: '學諮主責', staffAssistant: '學諮助理', user: '主管／職員帳號',
+};
+
+async function restoreTombstone(kind, id, label) {
+  if (!confirm('要把「' + label + '」還原成有效項目嗎？\n\n還原後它會重新出現在名單裡並恢復作用。')) return;
+  deletedState.busy = kind + ':' + id;
+  renderAdminDeleted();
+  try {
+    await proxyCall('adminRestoreDeleted', { kind: kind, id: id });
+    deletedState.busy = '';
+    await loadDeleted();
+    // 還原會改到別的分頁看到的資料，重新載入 bootstrap 才不會讓人看到過期的名單
+    await refreshBootstrap();
+  } catch (e) {
+    deletedState.busy = '';
+    renderAdminDeleted();
+    openModal('無法還原', '<p>' + escapeHtml(e.message) + '</p>');
+  }
+}
+
+function renderAdminDeleted() {
+  const rows = deletedState.rows;
+  let html = '<h3>已刪除項目</h3>' +
+    '<p class="field-hint">系統裡的刪除都是<strong>軟刪除</strong>——資料還在，只是不再生效，' +
+    '所以查得到「這筆以前是誰」。這一頁把它們全部列出來，必要時可以還原。</p>';
+  if (deletedState.error) {
+    html += '<p class="field-hint" style="color:var(--color-danger);">讀取失敗：' + escapeHtml(deletedState.error) + '</p>';
+  } else if (rows === null) {
+    html += '<p class="field-hint">載入中…</p>';
+  } else if (!rows.length) {
+    html += '<p class="field-hint">目前沒有任何已刪除的項目。</p>';
+  } else {
+    html += '<div class="table-wrap"><table><thead><tr>' +
+      '<th data-col="1">種類</th><th data-col="2">名稱</th><th data-col="3">識別</th>' +
+      '<th data-col="4">所屬</th><th data-col="5">刪除時間</th><th data-col="6">刪除者</th>' +
+      '<th data-col="7">備註</th><th data-col="8">操作</th></tr></thead><tbody>' +
+      rows.map(function (r) {
+        const label = (TOMBSTONE_KIND_LABEL_[r.kind] || r.kind) + '「' + (r.name || r.id) + '」';
+        const busy = deletedState.busy === (r.kind + ':' + r.id);
+        // 換名的墓碑不給還原鍵：接手那筆多半還有效，還原等於讓同一個人有兩個有效帳號
+        // （2026-08-19 事故的形狀）。真的要換回舊信箱請用「修改 email」。
+        const note = r.renamedTo
+          ? '已換名到 <strong>' + escapeHtml(r.renamedTo) + '</strong>'
+          : (r.tutors ? '導師：' + escapeHtml(r.tutors) : '');
+        const op = r.renamedTo
+          ? '<span class="field-hint">換名的舊資料不提供還原</span>'
+          : '<button class="btn btn-sm" ' + (busy ? 'disabled' : '') +
+            ' data-restore-kind="' + escapeHtml(r.kind) + '" data-restore-id="' + escapeHtml(r.id) + '"' +
+            ' data-restore-label="' + escapeHtml(label) + '">' + (busy ? '還原中…' : '還原') + '</button>';
+        return '<tr>' +
+          '<td data-label="種類">' + escapeHtml(TOMBSTONE_KIND_LABEL_[r.kind] || r.kind) + '</td>' +
+          '<td data-label="名稱">' + escapeHtml(r.name || '') + '</td>' +
+          '<td data-label="識別">' + escapeHtml(r.id || '') + '</td>' +
+          '<td data-label="所屬">' + escapeHtml(r.extra || '') + '</td>' +
+          '<td data-label="刪除時間" style="white-space:nowrap;">' + (r.deletedAt ? fmtAuditTime(r.deletedAt) : '—') + '</td>' +
+          '<td data-label="刪除者">' + escapeHtml(r.deletedBy || '—') + '</td>' +
+          '<td data-label="備註">' + note + '</td>' +
+          '<td data-label="操作">' + op + '</td>' +
+          '</tr>';
+      }).join('') +
+      '</tbody></table></div>' +
+      '<p class="field-hint">共 ' + rows.length + ' 筆。</p>';
+  }
+  $('admin-tab-content').innerHTML = html;
+}
+
+document.body.addEventListener('click', function (e) {
+  const btn = e.target.closest('[data-restore-kind]');
+  if (!btn) return;
+  restoreTombstone(btn.dataset.restoreKind, btn.dataset.restoreId, btn.dataset.restoreLabel);
+});
 
 function enterAdminAudit() {
   auditState.rows = null;

@@ -163,6 +163,8 @@ function doPost(e) {
       case 'syncGetAudit':              result = syncGetAuditAction_(params, ctx, userEmail); break;
       case 'migrateCohortIds':          result = migrateCohortIdsAction_(params, ctx, userEmail); break;
       case 'adminAuditList':            result = adminAuditListAction_(params, ctx, userEmail); break;
+      case 'adminListDeleted':          result = adminListDeletedAction_(params, ctx, userEmail); break;
+      case 'adminRestoreDeleted':       result = adminRestoreDeletedAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
       // 這三個是名冊異動：回傳後要做收尾（排入主責通知佇列＋同步 Google Sheet），
@@ -4392,6 +4394,144 @@ function syncGetAuditAction_(params, ctx, userEmail) {
     views: tail(views.entries),
     sessions: tail(sess.sessions),
   };
+}
+
+// ── 墓碑區（已刪除項目）─────────────────────────────────────────────────────
+// 這個系統的刪除幾乎都是**軟刪除**（留 deleted:true 才查得到「這筆以前是誰」），
+// 但畫面上一直沒有地方看得到它們。代價在 2026-08-19 具體發生過：
+// 同步把 6 個已換名的舊信箱從墓碑「復活」成有效帳號，6 個系各有兩個助理帳號，
+// 而任何人打開後台都看不出異狀——因為墓碑跟復活的墓碑在畫面上長得一模一樣（都不存在）。
+//
+// 只讀不改的一支 action，admin only。**不回傳任何私人聯絡方式**（手機/分機）：
+// 這一頁的用途是「看得到有哪些東西被刪掉了」，不是另一個名冊查詢入口。
+const TOMBSTONE_KINDS_ = ['class', 'deptAssistant', 'safetyOfficer', 'staffLead', 'staffAssistant', 'user'];
+
+function collectTombstones_(classes, config) {
+  const out = [];
+  (classes || []).forEach(function (c) {
+    if (!c || c.deleted !== true) return;
+    out.push({
+      kind: 'class', id: c.id, name: c.name || c.id, extra: c.deptId || '',
+      tutors: (c.tutors || []).map(function (t) { return (t && t.name) || ''; }).filter(Boolean).join('、'),
+      deletedAt: c.deletedAt || '', deletedBy: c.deletedBy || '', renamedTo: '',
+    });
+  });
+  const listOf = function (kind, rows) {
+    (rows || []).forEach(function (r) {
+      if (!r || r.deleted !== true) return;
+      out.push({
+        kind: kind, id: r.email || '', name: r.name || '',
+        extra: (r.deptIds || []).join('、'), tutors: '',
+        deletedAt: r.deletedAt || '', deletedBy: r.deletedBy || '', renamedTo: r.renamedTo || '',
+      });
+    });
+  };
+  listOf('deptAssistant', (config || {}).deptAssistants);
+  listOf('safetyOfficer', (config || {}).safetyOfficers);
+  listOf('staffLead', (config || {}).staffLeads);
+  listOf('staffAssistant', (config || {}).staffAssistants);
+  const users = (config || {}).users || {};
+  Object.keys(users).forEach(function (email) {
+    const u = users[email];
+    if (!u || u.deleted !== true) return;
+    out.push({
+      kind: 'user', id: email, name: u.name || '', extra: u.role || '', tutors: '',
+      deletedAt: u.deletedAt || '', deletedBy: u.deletedBy || '', renamedTo: u.renamedTo || '',
+    });
+  });
+  // 新的排前面；沒有刪除時間的（早期資料）排最後，不要讓它們插在最上面假裝是剛刪的
+  out.sort(function (a, b) {
+    if (!a.deletedAt && !b.deletedAt) return 0;
+    if (!a.deletedAt) return 1;
+    if (!b.deletedAt) return -1;
+    return a.deletedAt < b.deletedAt ? 1 : (a.deletedAt > b.deletedAt ? -1 : 0);
+  });
+  return out;
+}
+
+function adminListDeletedAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const classes = readJsonSafe_('classes.json', ctx, []);
+  const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+  return { entries: collectTombstones_(classes, config) };
+}
+
+// 還原（純函式版本，可測）：**撞名一律拒絕**。
+// 墓碑之所以是墓碑，往往正是因為有一筆新的接手了它（換名、重開同名班），
+// 不檢查就還原＝把同一個身分變成兩份，而那正是 2026-08-19 那場事故的形狀。
+function planTombstoneRestore_(kind, id, classes, config) {
+  const key = String(id || '').trim();
+  if (!key) return { ok: false, error: '缺少要還原的項目' };
+  if (TOMBSTONE_KINDS_.indexOf(kind) === -1) return { ok: false, error: '不認得的項目種類：' + kind };
+
+  if (kind === 'class') {
+    const idx = (classes || []).findIndex(function (c) { return c && c.id === key; });
+    if (idx === -1 || classes[idx].deleted !== true) return { ok: false, error: '找不到這筆已刪除的班級' };
+    const me = classes[idx];
+    const clash = (classes || []).some(function (c) {
+      return c && c.deleted !== true && c.deptId === me.deptId && c.name === me.name;
+    });
+    if (clash) {
+      return { ok: false, error: '「' + me.deptId + ' / ' + me.name + '」已經有一個同名的有效班級了。' +
+        '還原會讓同一個班有兩筆，同步永遠不會收斂——請先處理那一筆，或把這筆改名之後再還原。' };
+    }
+    return { ok: true, kind: kind, index: idx };
+  }
+
+  const listKey = { deptAssistant: 'deptAssistants', safetyOfficer: 'safetyOfficers',
+    staffLead: 'staffLeads', staffAssistant: 'staffAssistants' }[kind];
+  const email = key.toLowerCase();
+  if (listKey) {
+    const rows = (config || {})[listKey] || [];
+    const idx = rows.findIndex(function (r) { return r && String(r.email || '').toLowerCase() === email; });
+    if (idx === -1 || rows[idx].deleted !== true) return { ok: false, error: '找不到這筆已刪除的資料' };
+    const to = String(rows[idx].renamedTo || '').toLowerCase();
+    if (to) {
+      const heir = rows.some(function (r) { return r && r.deleted !== true && String(r.email || '').toLowerCase() === to; });
+      if (heir) {
+        return { ok: false, error: '這筆已經換名到「' + rows[idx].renamedTo + '」，而那一筆是有效的。' +
+          '還原會讓同一個人同時有兩個有效帳號——要換回舊信箱請改用「修改 email」，不要還原。' };
+      }
+    }
+    return { ok: true, kind: kind, listKey: listKey, index: idx };
+  }
+
+  const users = (config || {}).users || {};
+  const hit = Object.keys(users).filter(function (e) { return e.toLowerCase() === email; })[0];
+  if (!hit || users[hit].deleted !== true) return { ok: false, error: '找不到這筆已刪除的帳號' };
+  return { ok: true, kind: kind, userKey: hit };
+}
+
+function adminRestoreDeletedAction_(params, ctx, userEmail) {
+  requireAdmin_(loadRolesForCtx_(ctx, userEmail));
+  const kind = String(params.kind || '');
+  const id = String(params.id || '');
+  return withLock_(function () {
+    const now = new Date().toISOString();
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const config = readJsonSafe_('config.json', ctx, { users: {}, settings: {} });
+    const plan = planTombstoneRestore_(kind, id, classes, config);
+    if (!plan.ok) throw new Error(plan.error);
+
+    const revive = function (row) {
+      const next = Object.assign({}, row, { deleted: false, updatedAt: now, updatedBy: userEmail });
+      delete next.deletedAt;
+      delete next.deletedBy;
+      return next;
+    };
+    if (plan.kind === 'class') {
+      classes[plan.index] = revive(classes[plan.index]);
+      writeJsonPath_('classes.json', classes, ctx);
+    } else if (plan.listKey) {
+      config[plan.listKey][plan.index] = revive(config[plan.listKey][plan.index]);
+      writeJsonPath_('config.json', config, ctx);
+    } else {
+      config.users[plan.userKey] = revive(config.users[plan.userKey]);
+      writeJsonPath_('config.json', config, ctx);
+    }
+    appendAuditLog_(ctx, { action: 'adminRestoreDeleted', by: userEmail, targetId: kind + '：' + id, at: now });
+    return { restored: { kind: kind, id: id } };
+  });
 }
 
 function adminAuditListAction_(params, ctx, userEmail) {

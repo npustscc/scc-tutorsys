@@ -242,6 +242,31 @@ async function main() {
     check('5q3 🔒 壞 token 打 delete → 拒絕', r.success === false, JSON.stringify(r));
     r = await login(base, 'rn-old@test.local', '5511');
     check('5r 🔒 換完 email 後舊密碼登不進去', r.success === false, JSON.stringify(r).slice(0, 200));
+
+    // 5s–5x. 墓碑區（已刪除項目）。上面那段換 email 剛好留下一個真的墓碑
+    // （rn-old@ 帶 renamedTo），正好用來驗「換名的墓碑不准還原」——那正是 2026-08-19
+    // 事故的形狀：同步把已換名的舊信箱復活，同一個人有兩個有效帳號。
+    r = await call(base, asAdmin({ action: 'adminListDeleted' }));
+    const tombs = (r.data && r.data.entries) || [];
+    const rnOld = tombs.filter(function (x) { return x.id === 'rn-old@test.local'; })[0];
+    check('5s 墓碑區列得出換 email 留下的舊信箱',
+      r.success === true && !!rnOld && rnOld.kind === 'deptAssistant', JSON.stringify(r).slice(0, 300));
+    check('5t 墓碑帶得出「換名到誰」', !!rnOld && rnOld.renamedTo === 'rn-new@test.local', JSON.stringify(rnOld));
+    check('5u 🔒 墓碑區不含有效項目',
+      !tombs.some(function (x) { return x.id === 'rn-new@test.local'; }), JSON.stringify(tombs).slice(0, 200));
+    r = await call(base, asAdmin({ action: 'adminRestoreDeleted', kind: 'deptAssistant', id: 'rn-old@test.local' }));
+    check('5v 🔒 換名的墓碑不准還原（接手那筆還有效）',
+      r.success === false && /換名/.test(r.error || ''), JSON.stringify(r).slice(0, 200));
+    r = await call(base, {
+      rootFolderId: rootFolderId, sessionToken: 'garbage.token',
+      action: 'adminListDeleted',
+    });
+    // /exec 對壞 token 的既有慣例是回 success:true 帶 data.error（前端靠它觸發重新登入），
+    // 不是 success:false——所以這裡驗的是「有錯誤、而且一筆墓碑都沒吐出來」。
+    check('5w 🔒 壞 token 看不到墓碑區',
+      !!(r.data && r.data.error) && !(r.data && r.data.entries), JSON.stringify(r).slice(0, 160));
+    r = await call(base, asAdmin({ action: 'adminRestoreDeleted', kind: 'class', id: '不存在的班' }));
+    check('5x 🔒 還原不存在的東西 → 明確拒絕', r.success === false, JSON.stringify(r).slice(0, 160));
     await sleep(1600); // 上一步算一次登入失敗，避免節流影響後續
 
     // 6. ping（sessionToken）→ email 正確。
