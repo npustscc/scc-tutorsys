@@ -597,11 +597,16 @@ function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = ne
       startW = (col && parseInt(col.style.width, 10)) || th.offsetWidth;
       // 表格頂到容器寬度之後，再拉寬就得跟右邊的欄位借。**依序跟右邊每一個可調欄位借**，
       // 不是只跟隔壁那一欄——只跟一欄借的話，那欄縮到 30px 就再也拉不動了（實測只借得到 37px）。
-      const laterCols = colNums
-        .filter(function (i) { return i > n && !skipCols.has(i); })
-        .map(function (i) { return document.getElementById(colPrefix + i); })
-        .filter(Boolean)
-        .map(function (c) { return { col: c, startW: parseInt(c.style.width, 10) || 0 }; });
+      const pick = function (nums) {
+        return nums.map(function (i) { return document.getElementById(colPrefix + i); })
+          .filter(Boolean)
+          .map(function (c) { return { col: c, startW: parseInt(c.style.width, 10) || 0 }; });
+      };
+      const laterCols = pick(colNums.filter(function (i) { return i > n && !skipCols.has(i); }));
+      // 右邊借不到時**往左借**（由近而遠）。少了這一段，最後一個可調欄位在表格頂到容器
+      // 寬度之後就完全拉不動——使用者 2026-08-19 回報系辦助理表的「密碼」欄卡在一個中文字
+      // 的寬度：它是第 7 欄，右邊只剩被排除的「操作」，於是 laterCols 是空的，怎麼拉都沒反應。
+      const earlierCols = pick(colNums.filter(function (i) { return i < n && !skipCols.has(i); }).reverse());
 
       const onMove = function (ev) {
         const delta = ev.pageX - startX;
@@ -615,12 +620,16 @@ function _makeTableResizable({ table, colPrefix, colNums, prefKey, skipCols = ne
         // 每次 move 都從各欄的**起始寬度**重算（不是累加），這樣往回拉會自動把借走的還回去。
         const want = Math.max(30, startW + delta);
         let need = Math.max(0, want - w);
-        laterCols.forEach(function (lc) {
-          const give = Math.min(need, Math.max(0, lc.startW - 30));
-          lc.col.style.width = (lc.startW - give) + 'px';
-          need -= give;
-          w += give;
-        });
+        const borrowFrom = function (list) {
+          list.forEach(function (lc) {
+            const give = Math.min(need, Math.max(0, lc.startW - 30));
+            lc.col.style.width = (lc.startW - give) + 'px';
+            need -= give;
+            w += give;
+          });
+        };
+        borrowFrom(laterCols);
+        borrowFrom(earlierCols);
         if (col) col.style.width = w + 'px';
         table.style.width = newTableW + 'px';
       };
@@ -3786,7 +3795,7 @@ function renderAdminDeptAssistants() {
         '<td data-label="密碼">—</td>';
     }
     return '<td data-label="帳號">' + (r.accountDisabled ? '<span style="color:var(--color-danger);">已停用</span>' : '啟用') + '</td>' +
-      '<td data-label="密碼">' + (r.mustChangePassword
+      '<td data-label="密碼" style="white-space:nowrap;">' + (r.mustChangePassword
         ? '<span style="color:var(--color-warning);">仍是初始密碼</span>' : '已自行更改') + '</td>';
   };
   const acctOps = function (s) {
