@@ -2622,6 +2622,82 @@ function resolveDuration_(cls, system, parsed) {
   return null;
 }
 
+// ── 入學學年度模型（cohort，2026-08-19 使用者決策）─────────────────────────────
+// 舊模型：班名存「當前年級」，每年靠「換學期升級」把全校班名往上推一屆。那件事製造過
+// 這個專案最貴的災情（8/11 的 200 列失敗／104 列已寫入、獸醫系 id 與班名錯開一屆、
+// 同名重複讓升級「挑第一筆」）。根因是**同一件事實被存了兩份**：id 裡的年級與班名裡的年級。
+//
+// 新模型：存的是**入學學年度**（entryYear，不會變），年級與班名**每次顯示時算**：
+//     年級 = 當前學年度 − 入學學年度 + 1
+// 於是 8/1 一到全校自動正確，不需要任何升級動作，也不可能再錯開。
+//
+// **相容性**：沒有 entryYear 的班（家族班、海青班、共同指導，以及還沒遷移的資料）一律
+// 回傳存起來的 name／displayName。所以這一段可以在資料遷移之前先上線，行為零改變。
+const AY_ROLL_MONTH_ = 8;     // 學年度 8/1 換
+
+// 民國學年度。刻意用台北時間算：GAS 與自架端的行程時區不保證一致，而「幾月」會決定學年度，
+// 差一天就可能讓全校顯示錯一屆。
+function academicYearOf_(date) {
+  const d = date || new Date();
+  const tpe = new Date(d.getTime() + (8 * 60 + d.getTimezoneOffset()) * 60000);
+  const roc = tpe.getFullYear() - 1911;
+  return (tpe.getMonth() + 1) >= AY_ROLL_MONTH_ ? roc : roc - 1;
+}
+
+// 這個班現在幾年級（cohort 模型）。沒有 entryYear 回 null（＝用存起來的名字）。
+function cohortGrade_(cls, year) {
+  if (!cls || typeof cls.entryYear !== 'number' || !cls.entryYear) return null;
+  const g = year - cls.entryYear + 1;
+  return g >= 1 ? g : null;
+}
+
+// 算出來的班名。超出一~七（例如已經畢業很久）就退回存起來的名字，不要生出「四技八A」。
+function deriveClassName_(cls, year) {
+  const stored = String((cls && cls.name) || '');
+  const g = cohortGrade_(cls, year);
+  if (!g || !cls.prefix) return stored;
+  const ch = GRADE_CHARS_[g - 1];
+  if (!ch) return stored;
+  return cls.prefix + ch + String(cls.section || '');
+}
+
+// 算出來的顯示名。用遷移時存下的樣板（例「四獸醫{G}A」）換掉年級字——**不重新產生**，
+// 因為顯示名有一堆人工調過的系所簡稱覆寫（見 normalizeClassDisplayName_），重新產生會把它們洗掉。
+// 沒有樣板就退回存起來的 displayName。
+const DERIVED_GRADE_TOKEN_ = '{G}';
+function deriveClassDisplayName_(cls, year) {
+  const stored = String((cls && cls.displayName) || '') || String((cls && cls.name) || '');
+  const tpl = String((cls && cls.displayTemplate) || '');
+  const g = cohortGrade_(cls, year);
+  if (!tpl || !g) return stored;
+  const ch = GRADE_CHARS_[g - 1];
+  if (!ch) return stored;
+  return tpl.split(DERIVED_GRADE_TOKEN_).join(ch);
+}
+
+// 已畢業＝年級超過修業年限。年限走既有的 resolveDuration_ 鏈
+// （班級 graduationGrade → 學制 durationYears → prefix 內建預設；獸醫系四技要填 5）。
+function cohortGraduated_(cls, system, year) {
+  const g = cohortGrade_(cls, year);
+  if (!g) return false;
+  const dur = resolveDuration_(cls, system, cls && cls.prefix ? { prefix: cls.prefix } : null);
+  return typeof dur === 'number' ? g > dur : false;
+}
+
+// 投影用：把算出來的名字貼回一個班級物件的副本。**所有把班級交給前端的地方都要經過它**，
+// 否則畫面上一半是算出來的、一半是存起來的舊值。
+function withDerivedNames_(cls, year, system) {
+  if (!cls) return cls;
+  const y = year || academicYearOf_();
+  if (typeof cls.entryYear !== 'number' || !cls.entryYear) return cls;   // 未遷移／非年級制：原樣
+  return Object.assign({}, cls, {
+    name: deriveClassName_(cls, y),
+    displayName: deriveClassDisplayName_(cls, y),
+    grade: cohortGrade_(cls, y),
+    graduated: cohortGraduated_(cls, system, y),
+  });
+}
+
 // 產生升級規劃（預覽用，不寫入）：逐班判斷 inherit（導師從低一個年級的席位接手）/
 // vacate（新生席位：原導師隨學生升上去，本班待指派）/ keep（原樣保留）。年差
 // dy = 學年(to) - 學年(from)：dy ≤ 0（同學年換學期、或選反）全部 keep——名單本來就掛在
