@@ -29,10 +29,6 @@
     background: #2d6cdf; color: #fff; font-size: .8rem; vertical-align: middle;
   }
   .hint { font-size: .85rem; opacity: .75; margin: .5rem 0 1.5rem; }
-  .purpose { font-size: .8rem; line-height: 1.7; opacity: .85; text-align: left;
-    margin: 0 0 1.4rem; padding: .6rem .75rem; border-left: 3px solid #2563eb; border-radius: 0 6px 6px 0;
-    background: rgba(37, 99, 235, .06); }
-  .purpose strong { color: #b91c1c; }
   form { display: flex; flex-direction: column; gap: .9rem; }
   label { font-size: .9rem; display: block; }
   input {
@@ -50,9 +46,7 @@
 <body>
 <h1>屏科大導師資訊系統 <span class="env-badge">__ENV_LABEL__</span></h1>
 <p class="hint">此為校內自架伺服器登入；憑證效期至當日 24:00（台北時間）。</p>
-<!-- 與 index.html 登入卡片的 .login-purpose 同一段文案（使用者 2026-08-18 指定）。
-     兩個入口都要有：助理從哪一邊進來看到的說明都一樣。 -->
-<p class="purpose">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫校內分機與私人手機。<strong>導師的私人手機屬於高度個資</strong>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>
+<!-- 用途說明**刻意不放在登入頁**（使用者 2026-08-19）。告知在登入之後：跳出視窗＋「用途說明」按鈕＋導師資料頁。 -->
 <form id="login-form" autocomplete="on">
   <label>帳號
     <!-- type=text 而非 email：帳號允許只打 @ 之前那段（伺服器端 resolveLoginEmail_ 補全），
