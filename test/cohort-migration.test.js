@@ -135,3 +135,51 @@ test('🔒 已經遷移過的班一律跳過——明年再跑一次不可以用
   assert.equal(report.alreadyMigrated, 1);
   assert.equal(report.migrated, 0);
 });
+
+// ── 換鍵時「以 classId 為鍵的其他資料」要一起改 ──────────────────────────────
+// 正式資料的 tutorHistory.json 有 339 筆導師異動歷程全靠 classId 找班。只改 classes.json 的話，
+// 遷移後每個年級制班級的歷程都查不到，而畫面只會顯示「沒有紀錄」、沒有任何地方會報錯。
+// 跟上面同一組依賴（planCohortMigration_ 需要 parseClassGrade_ 與 GRADE_CHARS_）
+const R = load(['remapClassIdRefs_', 'planCohortMigration_', 'parseClassGrade_'], {
+  GRADE_CHARS_: ['一', '二', '三', '四', '五', '六', '七'],
+});
+
+test('歷程的 classId 跟著改過去，其他欄位一個都不動', () => {
+  const rows = [
+    { classId: '農園系_四技一A', classNameAtTime: '四技一A', changeType: 'replace', at: '2026-08-01', tutors: [{ name: '甲' }] },
+    { classId: '森林系_家族陳美惠', classNameAtTime: '家族陳美惠' },
+  ];
+  const res = R.remapClassIdRefs_(rows, { '農園系_四技一A': '農園系_四技115A' });
+  assert.equal(res.changed, 1);
+  assert.equal(res.rows[0].classId, '農園系_四技115A');
+  assert.equal(res.rows[0].classNameAtTime, '四技一A', '「當時的名字」是歷史事實，不該被改');
+  assert.equal(res.rows[0].changeType, 'replace');
+  assert.deepEqual(res.rows[0].tutors, [{ name: '甲' }]);
+  assert.equal(res.rows[1].classId, '森林系_家族陳美惠', '不在對照表裡的一個字都不動');
+});
+
+test('沒有 classId 或對照表為空時原樣回傳，不算改動', () => {
+  const rows = [{ note: '沒有 classId' }, { classId: 'X' }];
+  assert.equal(R.remapClassIdRefs_(rows, {}).changed, 0);
+  assert.equal(R.remapClassIdRefs_(rows, null).changed, 0);
+  assert.equal(R.remapClassIdRefs_(null, { X: 'Y' }).rows.length, 0);
+});
+
+test('🔒 遷移計畫要吐出可用的 old→new 對照表（不只是給人看的字串）', () => {
+  const classes = [
+    { id: '農園系_四技一A', name: '四技一A', deptId: '農園系', systemId: 'day_college', displayName: '四農園一A' },
+    { id: '森林系_家族陳美惠', name: '家族陳美惠', deptId: '森林系' },
+  ];
+  const plan = R.planCohortMigration_(classes, 115);
+  assert.equal(plan.report.idMap['農園系_四技一A'], '農園系_四技115A');
+  assert.ok(!('森林系_家族陳美惠' in plan.report.idMap), '非年級制不該進對照表');
+  // 對照表與人看的清單要對得上，不然報告會說謊
+  assert.equal(Object.keys(plan.report.idMap).length, plan.report.idChanges.length);
+});
+
+test('對照表接得上歷程：計畫算出來的 map 直接餵進去就能改對', () => {
+  const classes = [{ id: '農園系_四技二A', name: '四技二A', deptId: '農園系', systemId: 'day_college', displayName: '四農園二A' }];
+  const plan = R.planCohortMigration_(classes, 115);
+  const res = R.remapClassIdRefs_([{ classId: '農園系_四技二A' }], plan.report.idMap);
+  assert.equal(res.rows[0].classId, '農園系_四技114A');
+});

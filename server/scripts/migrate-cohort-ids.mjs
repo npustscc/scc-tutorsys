@@ -32,6 +32,13 @@ function readEnv(file) {
 function printReport(where, r) {
   console.log('  [' + where + '] 遷移 ' + r.migrated + '｜不動（非年級制）' + r.skipped +
     '｜已遷移過 ' + (r.alreadyMigrated || 0) + '｜獸醫系補五年制 ' + r.vetFixed);
+  // 以 classId 為鍵的其他資料（導師異動歷程等）也會跟著改。**一定要印出來**：
+  // 漏了它不會有任何錯誤訊息，畫面只會安靜地顯示「沒有紀錄」。
+  const refs = r.refsRemapped || {};
+  const refKeys = Object.keys(refs);
+  console.log('    連帶改鍵：' + (refKeys.length
+    ? refKeys.map((f) => f + ' ' + refs[f] + ' 筆').join('、')
+    : '（沒有以 classId 為鍵的資料需要改）'));
   if (r.collisions.length) {
     console.log('    ⚠️ 新 id 撞名 ' + r.collisions.length + ' 組（遷移會中止）：');
     r.collisions.slice(0, 5).forEach((c) => console.log('       ' + c.newId + ' ← ' + c.from.join('、')));

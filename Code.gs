@@ -2639,6 +2639,23 @@ function migrateCohortIdsAction_(params, ctx, userEmail) {
 
 // 核心（不含權限判斷）。自架端的遷移腳本直接呼叫這一支——它在機器上以服務身分執行，
 // 不經過 doPost，所以不該被「必須是同步服務帳號」那道守門擋住。
+// 換 class id 時，**以 classId 為鍵的其他資料要一起改**，否則它們整批指向不存在的班。
+// 這不是理論風險：正式資料的 tutorHistory.json 有 339 筆導師異動歷程全部靠 classId 找班，
+// 只改 classes.json 的話，遷移後每一個年級制班級的歷程都會查不到（而且畫面只會顯示「沒有紀錄」，
+// 沒有任何地方會報錯——這種壞法最難發現）。
+// classNameAtTime 之類的「當時的名字」刻意不動：那是歷史事實，不是指標。
+function remapClassIdRefs_(rows, idMap) {
+  let changed = 0;
+  const out = (rows || []).map(function (r) {
+    if (!r || !r.classId) return r;
+    const to = (idMap || {})[r.classId];
+    if (!to) return r;
+    changed++;
+    return Object.assign({}, r, { classId: to });
+  });
+  return { rows: out, changed: changed };
+}
+
 function migrateCohortIdsCore_(params, ctx, userEmail) {
   const year = Number(params.year) || academicYearOf_();
   const apply = params.apply === true;
@@ -2646,15 +2663,33 @@ function migrateCohortIdsCore_(params, ctx, userEmail) {
   const run = function () {
     const classes = readJsonSafe_('classes.json', ctx, []);
     const plan = planCohortMigration_(classes, year);
+    // 連帶改鍵的筆數在**預演時就要算出來**：不算的話報告只講班級數，
+    // 而「歷程有沒有跟著改」正是這個遷移最容易漏、也最難事後發現的一半。
+    const refFiles = ['tutorHistory.json', 'records.json'];
+    plan.report.refsRemapped = {};
+    const refPlans = refFiles.map(function (f) {
+      const rows = readJsonSafe_(f, ctx, null);
+      if (!Array.isArray(rows) || !rows.length) return null;
+      const res = remapClassIdRefs_(rows, plan.report.idMap);
+      if (res.changed) plan.report.refsRemapped[f] = res.changed;
+      return { file: f, res: res };
+    }).filter(Boolean);
     if (!apply) return { dryRun: true, year: year, report: plan.report };
     if (plan.report.collisions.length) {
       // 撞名代表現在就有重複的班——寫下去會把兩筆併成一筆而且沒人看得出來。
       throw new Error('新 id 撞名 ' + plan.report.collisions.length + ' 組，遷移中止（請先處理重複的班）');
     }
     writeJsonPath_('classes.json', plan.classes, ctx);
+    // 跟著改鍵：以 classId 為鍵的其他檔案。**在同一個 lock 裡做完**，
+    // 不然中間掛掉會留下「班已改名、歷程還指舊 id」的半套狀態。
+    refPlans.forEach(function (rp) {
+      if (!rp.res.changed) return;
+      writeJsonPath_(rp.file, rp.res.rows, ctx);
+    });
     appendAuditLog_(ctx, {
       action: 'migrateCohortIds', by: userEmail, at: new Date().toISOString(),
-      targetId: plan.report.migrated + ' classes → cohort ids（學年度 ' + year + '）',
+      targetId: plan.report.migrated + ' classes → cohort ids（學年度 ' + year + '）' +
+        '；連帶改鍵 ' + JSON.stringify(plan.report.refsRemapped),
     });
     return { dryRun: false, year: year, report: plan.report };
   };
@@ -2669,7 +2704,7 @@ function migrateCohortIdsCore_(params, ctx, userEmail) {
 //   獸醫系四技 → 順手補 graduationGrade=5（不補的話會被四技預設 4 年判成已畢業）
 function planCohortMigration_(classes, year) {
   const out = [];
-  const report = { migrated: 0, skipped: 0, alreadyMigrated: 0, collisions: [], noTemplate: [], vetFixed: 0, idChanges: [] };
+  const report = { migrated: 0, skipped: 0, alreadyMigrated: 0, collisions: [], noTemplate: [], vetFixed: 0, idChanges: [], idMap: {} };
   const newIds = {};
   (classes || []).forEach(function (c) {
     if (!c) { out.push(c); return; }
@@ -2708,7 +2743,10 @@ function planCohortMigration_(classes, year) {
     }
     out.push(next);
     report.migrated++;
-    if (newId !== c.id) report.idChanges.push(c.id + ' → ' + newId);
+    if (newId !== c.id) {
+      report.idChanges.push(c.id + ' → ' + newId);
+      report.idMap[c.id] = newId;             // 給「跟著改鍵的其他檔案」用
+    }
   });
   Object.keys(newIds).forEach(function (k) {
     if (newIds[k].length > 1) report.collisions.push({ newId: k, from: newIds[k] });
