@@ -106,7 +106,15 @@ export function planSync(localById, remoteById, baselineById) {
     const r = rid ? remoteById[rid] : null;
     const b = (lid && baselineById[lid] !== undefined) ? baselineById[lid] : null;
     if (lid && rid) plan.ridOf[lid] = rid;
-    if (viaName) plan.idMismatch.push(lid + ' ↔ ' + rid);
+    if (viaName) {
+      plan.idMismatch.push(lid + ' ↔ ' + rid);
+      // **靠班名配對起來的一對，只用來避免徒勞的「新增」，絕不拿來同步內容。**
+      // 2026-08-18 實際災情：coma 的「獸醫系_四技五A」（導師林春福，剛填好分機與手機）
+      // 被名字相同、但其實是**另一個班**的一般版「獸醫系_四技四A」（導師林韋豪）整筆蓋掉，
+      // 那兩位導師的聯絡資料就這樣消失，而畫面上完全看不出來。
+      // id 不同就代表「這兩筆是不是同一個班」沒有證據，只有人能判斷——所以只報告，不搬資料。
+      continue;
+    }
 
     if (l && r && key(l) === key(r)) { plan.same++; continue; }
     if (l && !r) { plan.createRemote.push(lid); continue; }
@@ -191,7 +199,7 @@ async function main() {
   show('一般版有、這邊沒有 → 新增到這邊', plan.createLocal);
   show('這邊有、一般版沒有 → 新增到那邊', plan.createRemote);
   show('⚠️ 沒有同步基準、無法判斷（先人工對齊）', plan.missingBaseline);
-  show('兩邊 id 不同、靠班名配對起來的', plan.idMismatch);
+  show('兩邊 id 不同、靠班名配對起來的（**只避免重複新增，不同步內容**，請人工確認是不是同一班）', plan.idMismatch);
   // 同名重複會讓其中一筆永遠配不到對象、每輪都嘗試新增又被拒。先列出來。
   const dupGroups = {};
   Object.keys(localFull).forEach(function (k) {

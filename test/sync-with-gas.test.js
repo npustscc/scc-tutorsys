@@ -80,19 +80,25 @@ test('id 配不到時用「系所＋班名」配對，不當成兩邊各自新�
   const pairs = pairClasses(local, remote);
   assert.equal(pairs.length, 1);
   assert.deepEqual([pairs[0].lid, pairs[0].rid, pairs[0].viaName], ['D_二B', 'D_二B_2', true]);
-  // 內容相同 → 不該產生任何動作，也不該報成新增
+  // 配對起來之後就不會被當成「兩邊各自新增」——但也不會同步內容（見下一條測試）。
   const p = planSync(local, remote, {});
-  assert.equal(p.same, 1);
   assert.deepEqual([p.createLocal, p.createRemote], [[], []]);
+  assert.deepEqual([p.pull, p.push, p.conflict], [[], [], []]);
   assert.deepEqual(p.idMismatch, ['D_二B ↔ D_二B_2']);
 });
 
-test('名字配對成功時，ridOf 要指出「推去哪個 id」（拿本機 id 去打會 class not found）', () => {
+test('🔒 靠班名配對起來的一對，絕不拿來同步內容——只避免徒勞的「新增」', () => {
+  // 2026-08-18 實際災情：coma 的「獸醫系_四技五A」（導師林春福，剛填好分機與手機）被
+  // 名字相同、其實是另一個班的一般版「獸醫系_四技四A」（導師林韋豪）整筆蓋掉，
+  // 兩位導師的聯絡資料就這樣消失，畫面上完全看不出來。
+  // id 不同＝「是不是同一個班」沒有證據，只有人能判斷。
   const local = { 'D_二B': C('二B', '1234') };
-  const remote = { 'D_二B_2': C('二B') };
+  const remote = { 'D_二B_2': C('二B', '9999') };
   const p = planSync(local, remote, { 'D_二B': C('二B') });
-  assert.deepEqual(p.push, ['D_二B']);
-  assert.equal(p.ridOf['D_二B'], 'D_二B_2');
+  assert.deepEqual(p.pull, [], '不可以把對方的內容拉下來蓋掉本機');
+  assert.deepEqual(p.push, [], '也不可以把本機的推上去蓋掉對方');
+  assert.deepEqual(p.createRemote, [], '但也不該再重複嘗試新增（那是配對的用意）');
+  assert.deepEqual(p.idMismatch, ['D_二B ↔ D_二B_2'], '要報告出來讓人判斷');
 });
 
 test('🔒 id 優先於名字：改名要被認成「同一筆改了名」，不是「刪一個加一個」', () => {
