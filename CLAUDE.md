@@ -10,10 +10,13 @@
 資料庫為 Google Drive 資料夾內的 JSON 檔（Drive REST API 讀寫 + LockService）。
 架構與工作慣例完全比照同單位既有專案 `scc-infosys`（同一人維護，同一套習慣）。
 
-**2026-07-16 起主要運行環境改為中心自架伺服器 scc-server**（`server/`：零依賴 Node，
-`node:vm` 載入同一份 Code.gs，儲存 seam 換成本機檔案系統）；GAS＋GitHub Pages 軌凍結為
-既有使用者的過渡服務，待移機三條件（SSO/LDAP、公網 HTTPS、資料 cutover）到齊後下架
-（見「部署環境」節）。
+**現在有兩個活的後端，而且它們每 5 分鐘互相同步**（2026-08-18 定案，詳見「部署環境」節）：
+**一般版**＝GAS＋GitHub Pages（對外公開入口）；**快速版**＝coma 上的自架 Node
+（`server/`：零依賴，`node:vm` 載入同一份 Code.gs，儲存 seam 換成本機檔案系統）。
+入口固定是 GitHub Pages，載入時自動探測快速版、通了就用它、連不上自動退回一般版
+（**不給使用者選項**，使用者 2026-08-18 要求）。
+**scc-server 已於 2026-08-19 降為純備份接收端**（web 服務 disable、排程全部停用），
+不要再把它當成運行環境。
 
 ## 資安原則（最高優先，凌駕功能）
 
@@ -41,17 +44,27 @@
 
 ## 部署環境（正式版 vs 測試版）
 
-**主要運行環境（2026-07-16 起）＝自架 scc-server（192.168.100.123，`ssh scc-server`）：**
+**使用者實際打開的網址只有一個**：`https://npustscc.github.io/scc-tutorsys/`（測試版是
+`…/scc-tutorsys/dev/`）。它在載入時決定要打哪個後端：
 
-| | 目錄（scc-server） | URL | 載入檔案 | systemd unit |
-|---|---|---|---|---|
-| **正式版** | `~/scc-tutor-prod` | `http://192.168.100.123:8789/` | `Code.gs`＋`index.html` | `scc-tutor-prod` |
-| **測試版** | `~/scc-tutor-dev` | `http://192.168.100.123:8790/` | `dev/Code.gs`＋`dev/index.html` | `scc-tutor-dev` |
+| 後端 | 是什麼 | 位置 | 使用者看到 |
+|---|---|---|---|
+| **快速版**（優先） | coma 上的自架 Node | `tutor.kiauho.com` → `127.0.0.1:8789`（測試版 `tutor-dev.kiauho.com` → :8790） | 快，且是**主要寫入端** |
+| **一般版**（退回） | GAS ＋ Drive | `APPS_SCRIPT_URL`（見下表） | 慢（空載 ~4s），但永遠在 |
 
-部署一律用 `node scripts/deploy-onprem.mjs dev|prod`（先 `git push` 再跑；腳本會 ssh 到
-scc-server 做 git pull → build-public → restart → healthz，並比對遠端/本機 HEAD 一致）。
-維運細節（登入機制、SMTP、備份、資料匯入）見 `server/README.md` 與 memory
-`tutorsys-onprem-deploy`。
+**兩邊每 5 分鐘雙向同步**（`scc-tutor-sync.timer` → `server/scripts/sync-with-gas.mjs`，
+三方比對、衝突不自動挑邊、名單與稽核也同步）——細節與地雷見 memory `tutorsys-two-way-sync`。
+
+自架端（coma）的部署：`node scripts/deploy-onprem.mjs dev|prod`（先 `git push` 再跑；
+預設打 coma，服務跑在獨立 unix 使用者 `scc-tutor` 底下、家目錄 `/srv/scc-tutor`）。
+維運細節（登入機制、SMTP、tunnel 放行哪些路徑、備份）見 `server/README.md` 與 memory
+`tutorsys-coma-hosting`。
+
+**scc-server（192.168.100.123）＝純備份接收端（2026-08-19 起）**：兩個 web service 已
+`systemctl disable --now`、crontab 內全部停用（原本每小時的 import-from-gas 會製造第三份
+對不起來的資料）。它現在只收 coma 每日 03:30 rsync 過去的備份（`~/scc-tutor-offsite/`），
+收掉之前的完整封存在 `~/scc-tutor-frozen/`。`deploy-onprem.mjs --host scc-server` 那條路
+還留著，但**不要用**——除非是要把它恢復成獨立實例。
 
 **⚠️ 2026-08-17 起「凍結」政策取消**：使用者當日決定「入口固定留在 GitHub Pages、後端在執行期
 決定」（一般版／快速版），所以 **Pages＋GAS prod 就是現在對外的公開入口**，
