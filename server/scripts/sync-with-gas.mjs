@@ -109,10 +109,13 @@ export function resolveByTimestamp(localAt, remoteAt) {
 
 // 三方比對（純函式，可單元測試）。回傳要做的動作，不碰任何 I/O。
 // 基準以**本機 id** 為鍵（本機 id 是這一端的穩定識別）。
-export function planSync(localById, remoteById, baselineById, stamps) {
+export function planSync(localById, remoteById, baselineById, stamps, tombstones) {
   const at = stamps || { local: {}, remote: {} };
+  // 本機已刪除的班（`deleted:true`）。**沒有這份名單，刪除看起來就跟「從來沒有過」一樣**，
+  // 於是每一輪都會把它當成「那邊有、這邊沒有」再接回來一次（2026-08-19 資管系實際發生）。
+  const gone = tombstones instanceof Set ? tombstones : new Set(tombstones || []);
   const plan = {
-    pull: [], push: [], conflict: [], createLocal: [], createRemote: [],
+    pull: [], push: [], conflict: [], createLocal: [], createRemote: [], deletedHere: [],
     same: 0, missingBaseline: [], idMismatch: [], overwritten: [],
     // 本機 id → 一般版 id 的對照。名字配對出來的那些兩邊 id 不同，**推送必須用對方的 id**，
     // 拿本機 id 去打會得到 class not found。
@@ -135,7 +138,12 @@ export function planSync(localById, remoteById, baselineById, stamps) {
 
     if (l && r && key(l) === key(r)) { plan.same++; continue; }
     if (l && !r) { plan.createRemote.push(lid); continue; }
-    if (r && !l) { plan.createLocal.push(rid); continue; }
+    if (r && !l) {
+      // 這邊刪掉了、那邊還在 → **不要接回來**。也不主動去刪那邊（跨系統的刪除是不可逆
+      // 動作，要由人決定），只列出來讓人處理。
+      if (gone.has(rid)) { plan.deletedHere.push(rid); continue; }
+      plan.createLocal.push(rid); continue;
+    }
 
     if (b === null) { plan.missingBaseline.push(lid); continue; }   // 沒有基準，不猜
     const lChanged = key(l) !== key(b);
@@ -238,7 +246,10 @@ async function main() {
   Object.keys(localFull).forEach((k) => { stamps.local[k] = localFull[k].updatedAt || localFull[k].createdAt || ''; });
   (remote.classes || []).forEach((c) => { stamps.remote[c.id] = c.updatedAt || c.createdAt || ''; });
 
-  const plan = planSync(localById, remoteById, baseline, stamps);
+  // 墓碑：本機被刪掉的班（含它們的 id），交給 planSync 才不會每輪把它們接回來。
+  const tombstones = new Set(localRaw.filter((c) => c && c.deleted === true).map((c) => c.id));
+
+  const plan = planSync(localById, remoteById, baseline, stamps, tombstones);
   console.log('[sync] 本機 ' + Object.keys(localById).length + ' 班、一般版 ' + Object.keys(remoteById).length + ' 班、相同 ' + plan.same);
   const show = (label, ids) => { if (ids.length) console.log('  ' + label + ' ' + ids.length + '：' + ids.slice(0, 8).join('、') + (ids.length > 8 ? ' …' : '')); };
   show('一般版→快速版（只有那邊改）', plan.pull);
@@ -249,6 +260,7 @@ async function main() {
     plan.overwritten.forEach(function (o) { console.log('     ' + o.id + '：覆蓋掉' + o.side + ' ' + (o.at || '（無時間）') + ' 的版本'); });
   }
   show('一般版有、這邊沒有 → 新增到這邊', plan.createLocal);
+  show('這邊已刪除、一般版還在（不接回來，也不自動刪那邊）', plan.deletedHere);
   show('這邊有、一般版沒有 → 新增到那邊', plan.createRemote);
   show('⚠️ 沒有同步基準、無法判斷（先人工對齊）', plan.missingBaseline);
   show('兩邊 id 不同、靠班名配對起來的（**只避免重複新增，不同步內容**，請人工確認是不是同一班）', plan.idMismatch);

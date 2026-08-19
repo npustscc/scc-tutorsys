@@ -186,3 +186,15 @@ test('🔒 時間戳只當裁判，不進內容比較：內容相同、時間不
   assert.equal(plan.same, 1);
   assert.deepEqual(plan.push.concat(plan.pull, plan.conflict, plan.overwritten), []);
 });
+
+test('🔒 本機刪掉的班不會被同步接回來（也不會每輪重報）', () => {
+  const plan = planSync({}, { X: { name: 'A', tutors: [] } }, {}, undefined, new Set(['X']));
+  assert.deepEqual(plan.createLocal, [], '已刪除的班被接回來了');
+  assert.deepEqual(plan.deletedHere, ['X']);
+});
+
+test('沒有墓碑時照舊：那邊有、這邊沒有 → 新增到這邊', () => {
+  const plan = planSync({}, { X: { name: 'A', tutors: [] } }, {}, undefined, new Set());
+  assert.deepEqual(plan.createLocal, ['X']);
+  assert.deepEqual(plan.deletedHere, []);
+});
