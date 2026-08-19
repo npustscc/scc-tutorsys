@@ -129,3 +129,60 @@ test('🔒 配對要分兩趟：早一點的班用班名配走某個遠端班，
   assert.equal(pairs.find((p) => p.lid === 'D_二B').rid, 'D_二B');
   assert.equal(pairs.find((p) => p.lid === 'A_一').rid, null);
 });
+
+// ── 衝突改由時間戳裁判（使用者 2026-08-19：不再讓人選版本，所以「後改的贏」）────────
+// 這一組釘住兩件事：贏的是**後存檔的那一邊**、以及**沒有時間戳時絕不亂猜**。
+// 亂猜的代價是靜靜地弄丟別人剛填的資料——2026-08-18 已經真的發生過一次（班名配對）。
+
+test('兩邊都改過：快速版比較新 → 推上去，並記下被覆蓋的是一般版哪一版', () => {
+  const base = { name: 'A', tutors: [{ name: '甲' }] };
+  const plan = planSync(
+    { X: { name: 'A', tutors: [{ name: '本機新' }] } },
+    { X: { name: 'A', tutors: [{ name: '遠端舊' }] } },
+    { X: base },
+    { local: { X: '2026-08-19T10:00:00Z' }, remote: { X: '2026-08-19T09:00:00Z' } },
+  );
+  assert.deepEqual(plan.push, ['X']);
+  assert.deepEqual(plan.conflict, []);
+  assert.equal(plan.overwritten.length, 1);
+  assert.equal(plan.overwritten[0].side, '一般版');
+  assert.equal(plan.overwritten[0].at, '2026-08-19T09:00:00Z');
+});
+
+test('兩邊都改過：一般版比較新 → 拉下來', () => {
+  const plan = planSync(
+    { X: { name: 'A', tutors: [{ name: '本機' }] } },
+    { X: { name: 'A', tutors: [{ name: '遠端' }] } },
+    { X: { name: 'A', tutors: [] } },
+    { local: { X: '2026-08-19T08:00:00Z' }, remote: { X: '2026-08-19T09:00:00Z' } },
+  );
+  assert.deepEqual(plan.pull, ['X']);
+  assert.equal(plan.overwritten[0].side, '快速版');
+});
+
+test('🔒 判不出新舊（缺時間戳或同時間）→ 退回兩邊都不動，不准猜', () => {
+  const args = (stamps) => planSync(
+    { X: { name: 'A', tutors: [{ name: '本機' }] } },
+    { X: { name: 'A', tutors: [{ name: '遠端' }] } },
+    { X: { name: 'A', tutors: [] } }, stamps);
+  for (const stamps of [
+    undefined,
+    { local: {}, remote: { X: '2026-08-19T09:00:00Z' } },   // 本機沒時間戳（舊匯入資料）
+    { local: { X: '2026-08-19T09:00:00Z' }, remote: {} },   // 一般版還沒更新版本、不回時間戳
+    { local: { X: '2026-08-19T09:00:00Z' }, remote: { X: '2026-08-19T09:00:00Z' } },
+  ]) {
+    const plan = args(stamps);
+    assert.deepEqual(plan.conflict, ['X'], '判不出來卻自作主張搬了資料');
+    assert.deepEqual(plan.push, []);
+    assert.deepEqual(plan.pull, []);
+    assert.deepEqual(plan.overwritten, []);
+  }
+});
+
+test('🔒 時間戳只當裁判，不進內容比較：內容相同、時間不同 → 仍算相同', () => {
+  const same = { name: 'A', displayName: 'A', tutors: [{ name: '甲' }] };
+  const plan = planSync({ X: same }, { X: same }, { X: same },
+    { local: { X: '2026-08-19T10:00:00Z' }, remote: { X: '2026-08-01T00:00:00Z' } });
+  assert.equal(plan.same, 1);
+  assert.deepEqual(plan.push.concat(plan.pull, plan.conflict, plan.overwritten), []);
+});

@@ -91,12 +91,29 @@ export function pairClasses(localById, remoteById) {
   return pairs;
 }
 
+// 衝突的裁判（純函式）：兩邊都改過同一筆時，**時間戳比較新的那一邊留下**。
+// 使用者 2026-08-19：「不會讓他們選擇一般版或快速版，所以應該從時間戳記判斷哪一筆比較新」。
+//
+// 為什麼這比原本的「兩邊都不動」好：使用者不再知道自己打的是哪一邊，所以「凍結等人來看」
+// 對他而言只是「我改的東西沒生效」而已，而且他不會知道要去看報告。後改的贏至少符合直覺。
+// 代價是**舊的那筆會被覆蓋**，所以被蓋掉的內容一定要進報告與通知信（呼叫端負責）。
+//
+// 判不出來時（任一邊沒有時間戳、或兩邊一樣）**退回凍結**：沒有證據就不要猜，
+// 猜錯是靜靜地弄丟別人剛填的資料。舊資料多半沒有 updatedAt（都是匯入來的、沒人編輯過），
+// 而真的發生衝突＝兩邊都被人編輯過＝兩邊都會有時間戳，所以這個退路實務上很少用到。
+export function resolveByTimestamp(localAt, remoteAt) {
+  const l = String(localAt || ''), r = String(remoteAt || '');
+  if (!l || !r || l === r) return 'freeze';
+  return l > r ? 'push' : 'pull';       // ISO 8601 字串可以直接字典序比較
+}
+
 // 三方比對（純函式，可單元測試）。回傳要做的動作，不碰任何 I/O。
 // 基準以**本機 id** 為鍵（本機 id 是這一端的穩定識別）。
-export function planSync(localById, remoteById, baselineById) {
+export function planSync(localById, remoteById, baselineById, stamps) {
+  const at = stamps || { local: {}, remote: {} };
   const plan = {
     pull: [], push: [], conflict: [], createLocal: [], createRemote: [],
-    same: 0, missingBaseline: [], idMismatch: [],
+    same: 0, missingBaseline: [], idMismatch: [], overwritten: [],
     // 本機 id → 一般版 id 的對照。名字配對出來的那些兩邊 id 不同，**推送必須用對方的 id**，
     // 拿本機 id 去打會得到 class not found。
     ridOf: {},
@@ -123,7 +140,13 @@ export function planSync(localById, remoteById, baselineById) {
     if (b === null) { plan.missingBaseline.push(lid); continue; }   // 沒有基準，不猜
     const lChanged = key(l) !== key(b);
     const rChanged = key(r) !== key(b);
-    if (lChanged && rChanged) plan.conflict.push(lid + (viaName ? '（一般版 id：' + rid + '）' : ''));
+    if (lChanged && rChanged) {
+      // 兩邊都改過：交給時間戳裁判，判不出來才凍結。
+      const verdict = resolveByTimestamp(at.local[lid], at.remote[rid]);
+      if (verdict === 'push') { plan.push.push(lid); plan.overwritten.push({ side: '一般版', id: rid, at: at.remote[rid] }); }
+      else if (verdict === 'pull') { plan.pull.push(lid); plan.overwritten.push({ side: '快速版', id: lid, at: at.local[lid] }); }
+      else plan.conflict.push(lid + (viaName ? '（一般版 id：' + rid + '）' : ''));
+    }
     else if (lChanged) plan.push.push(lid);
     else if (rChanged) plan.pull.push(lid);
   }
@@ -162,13 +185,33 @@ async function main() {
   const storeDir = path.join(dataDir, 'store');
   const baselinePath = path.join(dataDir, 'sync-baseline.json');
 
-  const call = async (payload) => {
-    const res = await fetch(env.GAS_EXEC_URL, {
-      method: 'POST', body: new URLSearchParams({ payload: JSON.stringify(payload) }),
-    });
-    const j = await res.json();
-    if (j && j.success === false) throw new Error(j.error || 'GAS 回應失敗');
-    return (j && j.data) || {};
+  // GAS 偶發會回一頁 HTML 錯誤頁而不是 JSON（2026-08-19 這一輪就是這樣整輪失敗，
+  // 前端 proxyCall 早就有同樣的重試）。**只重試「傳輸層沒談成」**——回得出 JSON 但
+  // success:false 是後端的判斷，重試只會重複做一樣的事。
+  const call = async (payload, attempt) => {
+    attempt = attempt || 1;
+    let text;
+    try {
+      const res = await fetch(env.GAS_EXEC_URL, {
+        method: 'POST', body: new URLSearchParams({ payload: JSON.stringify(payload) }),
+      });
+      text = await res.text();
+    } catch (e) {
+      text = null;
+      if (attempt >= 3) throw e;
+    }
+    let j = null;
+    if (text != null) { try { j = JSON.parse(text); } catch (e) { j = null; } }
+    if (j == null) {
+      if (attempt >= 3) {
+        throw new Error('GAS 回的不是 JSON（多半是它自己的錯誤頁）：' + String(text || '').slice(0, 120));
+      }
+      console.log('[sync] GAS 回應異常，' + (attempt * 4) + " 秒後重試（第 " + attempt + ' 次）');
+      await new Promise((r) => setTimeout(r, attempt * 4000));
+      return call(payload, attempt + 1);
+    }
+    if (j.success === false) throw new Error(j.error || 'GAS 回應失敗');
+    return j.data || {};
   };
   const login = await call({
     action: 'localLogin', rootFolderId: env.GAS_ROOT_FOLDER_ID,
@@ -190,12 +233,21 @@ async function main() {
   try { baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')).classes || {}; }
   catch (e) { firstRun = true; }
 
-  const plan = planSync(localById, remoteById, baseline);
+  // 衝突的裁判材料：兩邊各自的最後編輯時間（不進內容比較，只在衝突時用）。
+  const stamps = { local: {}, remote: {} };
+  Object.keys(localFull).forEach((k) => { stamps.local[k] = localFull[k].updatedAt || localFull[k].createdAt || ''; });
+  (remote.classes || []).forEach((c) => { stamps.remote[c.id] = c.updatedAt || c.createdAt || ''; });
+
+  const plan = planSync(localById, remoteById, baseline, stamps);
   console.log('[sync] 本機 ' + Object.keys(localById).length + ' 班、一般版 ' + Object.keys(remoteById).length + ' 班、相同 ' + plan.same);
   const show = (label, ids) => { if (ids.length) console.log('  ' + label + ' ' + ids.length + '：' + ids.slice(0, 8).join('、') + (ids.length > 8 ? ' …' : '')); };
   show('一般版→快速版（只有那邊改）', plan.pull);
   show('快速版→一般版（只有這邊改）', plan.push);
-  show('⚠️ 衝突（兩邊都改過，兩邊都不動）', plan.conflict);
+  show('⚠️ 衝突且判不出新舊（兩邊都不動，需人工看）', plan.conflict);
+  if (plan.overwritten.length) {
+    console.log('  ⚠️ 兩邊都改過、由時間戳判定覆蓋 ' + plan.overwritten.length + ' 筆（較舊的那一邊被蓋掉）：');
+    plan.overwritten.forEach(function (o) { console.log('     ' + o.id + '：覆蓋掉' + o.side + ' ' + (o.at || '（無時間）') + ' 的版本'); });
+  }
   show('一般版有、這邊沒有 → 新增到這邊', plan.createLocal);
   show('這邊有、一般版沒有 → 新增到那邊', plan.createRemote);
   show('⚠️ 沒有同步基準、無法判斷（先人工對齊）', plan.missingBaseline);
@@ -408,6 +460,7 @@ async function main() {
     dataDir, env, cwd,
     conflicts: plan.conflict,
     pushFailed: failed,
+    overwritten: apply ? plan.overwritten : [],
   });
   if (plan.conflict.length) process.exitCode = 2;
 }
@@ -417,12 +470,16 @@ async function main() {
 // **只在「這一批問題跟上次通知的不一樣」時才寄**。每 5 分鐘一輪，同一筆衝突若每輪都寄，
 // 一天就是 288 封，收信的人三天後就會把它整條規則丟進垃圾桶——那等於沒有通知。
 // 問題全部排除時另外寄一封「已排除」，讓人知道可以不用再管了（只寄一次）。
-async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed }) {
+async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed, overwritten }) {
+  overwritten = overwritten || [];
   const statePath = path.join(dataDir, 'sync-alert-state.json');
-  const signature = JSON.stringify({ c: conflicts.slice().sort(), f: pushFailed.slice().sort() });
+  const signature = JSON.stringify({
+    c: conflicts.slice().sort(), f: pushFailed.slice().sort(),
+    o: overwritten.map(function (x) { return x.id + '@' + (x.at || ''); }).sort(),
+  });
   let last = '';
   try { last = JSON.parse(fs.readFileSync(statePath, 'utf8')).signature || ''; } catch (e) { last = ''; }
-  const clean = !conflicts.length && !pushFailed.length;
+  const clean = !conflicts.length && !pushFailed.length && !overwritten.length;
   if (signature === last) return;                       // 狀況沒變，不重複打擾
   if (clean && !last) { return; }                        // 一直都正常，不需要報平安
 
@@ -449,6 +506,11 @@ async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed }) {
             conflicts.join('\n  ') +
             '\n\n處理方式：到其中一邊把它改成正確的內容並存檔（另一邊不要動），下一輪同步就會自動對齊。'
           : '',
+        overwritten.length
+          ? '\n【已依時間戳自動覆蓋】同一個班在兩邊都被改過，系統留下**比較晚存檔**的那一版，' +
+            '較早的那一版已被覆蓋。若被覆蓋的才是對的，請重新輸入一次：\n  ' +
+            overwritten.map(function (o) { return o.id + '（覆蓋掉' + o.side + ' ' + (o.at || '無時間') + ' 的版本）'; }).join('\n  ')
+          : '',
         pushFailed.length
           ? '\n【推送失敗】這些班改不上一般版：\n  ' + pushFailed.join('\n  ') +
             '\n\n最常見的原因是同步帳號沒有掛到那個系所（新增系所之後要讓它的系所清單跟上）。'
@@ -462,7 +524,9 @@ async function notifyIfChanged({ dataDir, env, cwd, conflicts, pushFailed }) {
       // 而收件者只從標題判斷要不要點開。
       subject: clean ? '【導師名冊系統】同步問題已排除' :
         '【導師名冊系統】名冊同步需要處理（' +
-        [conflicts.length ? '衝突 ' + conflicts.length : '', pushFailed.length ? '推送失敗 ' + pushFailed.length : '']
+        [conflicts.length ? '衝突 ' + conflicts.length : '',
+         overwritten.length ? '自動覆蓋 ' + overwritten.length : '',
+         pushFailed.length ? '推送失敗 ' + pushFailed.length : '']
           .filter(Boolean).join('、') + '）',
       body: lines.filter(function (x) { return x !== ''; }).join('\n'),
     });

@@ -4578,6 +4578,11 @@ function projectClassForDeptRoster_(cls) {
     requiredMeetingOverride: cls.requiredMeetingOverride === undefined ? null : cls.requiredMeetingOverride,
     graduatedSemester: cls.graduatedSemester || null,
     active: cls.active !== false,
+    // 最後編輯時間（2026-08-19 加）：同步靠它決定「兩邊都改過同一班時留哪一筆」。
+    // **它不參與「內容有沒有變」的比較**——參與的話，同一份內容只因為時間不同就會被判成
+    // 有差異、兩邊每輪互推不停。只在真的發生衝突時拿出來當裁判（見 sync-with-gas.mjs）。
+    updatedAt: cls.updatedAt || cls.createdAt || null,
+    updatedBy: cls.updatedBy || cls.createdBy || null,
     // ext（校內分機）／mobile（私人手機）**只在這條通道出現**：bootstrap 的 classes 是每個
     // 登入者都拿得到的，放進去等於全校可讀，所以 sanitizeClassesForViewer_ 會整組拔掉（見該函式）。
     // 2026-08-11 之前只有單一「電話」欄 phone，沒填過 mobile 的舊資料就把 phone 當私人手機顯示
