@@ -268,7 +268,34 @@ function createHost(opts) {
     return path.join.apply(path, [storeDir].concat(parts));
   }
 
+  // 密碼雜湊換成自架端這一套（scrypt）。不換的話：/login 用 scrypt 寫、/exec 的 localLogin
+  // 用 Code.gs 的 PBKDF2＋pepper 驗，同一組密碼永遠對不起來。
+  // **必須放在 runInContext 之後**——Code.gs 自己的 function 宣告會蓋掉先設的同名屬性
+  // （這正是儲存 seam 也放在載入之後的原因，2026-08-19 又踩了一次）。
+  const pw_ = require('./password');
+  sandbox.hashPasswordGas_ = function (password) { return pw_.hashPassword_(password); };
+  sandbox.verifyPasswordGas_ = function (password, hashStr) { return pw_.verifyPassword_(password, hashStr); };
+
+  // ── 本機帳號：localAccounts.json ＝ users.json（2026-08-19 修）────────────────
+  // Code.gs 的 localLogin／adminLocalAccounts 讀寫 Drive 語意的 store/localAccounts.json，
+  // 而自架端的本機帳號其實在 <DATA_DIR>/users.json（/login 與 /admin/accounts 用的那份）。
+  // 入口搬到 Pages 之後登入表單是打 /exec ——**管理員重設密碼寫進 users.json，
+  // 使用者登入卻去讀 localAccounts.json**，於是「重設了還是登不進去」（實際災情）。
+  // 這裡把那個檔名對應到同一份檔案，自架端從此只有一份帳號。
+  const usersPath_ = path.join(dataDir, 'users.json');
+  const isLocalAccounts_ = (p) => String(p || '').replace(/^\/+/, '') === 'localAccounts.json';
+  const readUsers_ = () => {
+    try { return JSON.parse(fs.readFileSync(usersPath_, 'utf8')) || {}; } catch (e) { return {}; }
+  };
+  const writeUsers_ = (obj) => {
+    // 含密碼雜湊 → 0600，且 tmp+rename 原子寫（與 server/index.js 的 writeUsersSync_ 同一個做法）
+    const tmp = usersPath_ + '.tmp-' + process.pid + '-' + Date.now();
+    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, usersPath_);
+  };
+
   sandbox.readJsonSafe_ = function (p, ctx, fallback) {
+    if (isLocalAccounts_(p)) return readUsers_();
     try {
       const file = storeFilePath_(p);
       if (!fs.existsSync(file)) return fallback;
@@ -292,6 +319,7 @@ function createHost(opts) {
     }
   };
   sandbox.writeJsonPath_ = function (p, content, ctx) {
+    if (isLocalAccounts_(p)) { writeUsers_(content); return; }
     const file = storeFilePath_(p);
     atomicWriteFileSync(file, JSON.stringify(content));
     return { id: 'store:' + p };

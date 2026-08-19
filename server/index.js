@@ -63,30 +63,9 @@ function logLine(method, urlPath, status, extra) {
   console.log(parts.join(' '));
 }
 
-// ── scrypt 密碼雜湊：格式 scrypt$N$r$p$saltHex$keyHex ─────────────────────────
-const SCRYPT_KEYLEN = 32;
-function scryptDerive_(password, salt, N, r, p) {
-  return crypto.scryptSync(password, salt, SCRYPT_KEYLEN, { N: N, r: r, p: p, maxmem: 256 * N * r });
-}
-function verifyPassword_(password, hashStr) {
-  const parts = String(hashStr || '').split('$');
-  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
-  const N = Number(parts[1]), r = Number(parts[2]), p = Number(parts[3]);
-  if (!N || !r || !p) return false;
-  let salt, key;
-  try {
-    salt = Buffer.from(parts[4], 'hex');
-    key = Buffer.from(parts[5], 'hex');
-  } catch (e) { return false; }
-  try {
-    const derived = scryptDerive_(password, salt, N, r, p);
-    return derived.length === key.length && crypto.timingSafeEqual(derived, key);
-  } catch (e) { return false; }
-}
-// 固定的假雜湊（模組載入時算一次、之後重複使用）：查無帳號時仍照樣跑一次 scrypt 驗證，
-// 拉平「帳號不存在」與「密碼錯誤」之間的回應時間差。這個雜湊不對應任何真實密碼，
-// 驗證必然失敗，純粹是為了燒掉跟真實路徑等量的 CPU 時間。
-const DUMMY_HASH = 'scrypt$16384$8$1$' + crypto.randomBytes(16).toString('hex') + '$' + crypto.randomBytes(32).toString('hex');
+// scrypt 密碼雜湊搬到 server/password.js——gas-host 也要用同一套
+// （見那個檔開頭：兩套雜湊並存造成過「重設了還是登不進去」）。
+const { hashPassword_, verifyPassword_, DUMMY_HASH } = require('./password');
 
 function readUsersSync_(dataDir) {
   try {
@@ -96,13 +75,6 @@ function readUsersSync_(dataDir) {
   }
 }
 
-// 產雜湊（參數同 create-user.js：scrypt N=16384 r=8 p=1、32-byte 金鑰、16-byte 隨機 salt）。
-function hashPassword_(password) {
-  const N = 16384, r = 8, p = 1;
-  const salt = crypto.randomBytes(16);
-  const key = scryptDerive_(password, salt, N, r, p);
-  return 'scrypt$' + N + '$' + r + '$' + p + '$' + salt.toString('hex') + '$' + key.toString('hex');
-}
 
 // 登入帳號可以只打 @ 之前那段（系辦助理不必每次打完整 email）。
 // 規則：輸入含 '@' → 原樣當 email；不含 '@' → 在現有帳號裡找 local-part 相同的，
