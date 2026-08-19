@@ -3808,6 +3808,11 @@ function recordRejectAction_(params, ctx, userEmail) {
 // 見 Ticket B 設計說明）。純函式，不做 I/O，供各 adminUpsert*Action_ 共用。
 function applyUpsertDeleteFields_(existing, entry, userEmail, now) {
   const merged = Object.assign({}, existing, entry);
+  // 最後編輯時間（2026-08-19 加）：名單也要有戳，同步才判得出「兩邊都改過時該留誰」。
+  // 沒有它就是 2026-08-18 那次事故的形狀——我的同步把舊值整份推上一般版，蓋掉別人剛做完的
+  // 工作，而且兩邊都沒有任何線索可以指出哪一份比較新。**不參與內容比較**（見 sync-with-gas.mjs）。
+  merged.updatedAt = now;
+  merged.updatedBy = userEmail;
   if (entry && entry.deleted === true) {
     merged.deleted = true;
     merged.deletedAt = now;

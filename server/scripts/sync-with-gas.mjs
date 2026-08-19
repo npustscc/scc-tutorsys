@@ -107,6 +107,41 @@ export function resolveByTimestamp(localAt, remoteAt) {
   return l > r ? 'push' : 'pull';       // ISO 8601 字串可以直接字典序比較
 }
 
+// 名單（系辦助理／校安人員）的既有列怎麼對齊（純函式）。
+//
+// 2026-08-18 的事故就發生在這個縫：舊版把本機整份推上一般版，蓋掉別人剛改好的分機；
+// 修成「只補對面缺的整筆」之後不再蓋人，但**既有列從此永遠不會互相追上**——
+// 兩邊各自漂移了好幾天沒有人發現，而使用者實際打開的是快速版，看到的是舊分機，
+// 於是全校的初始密碼都是錯的。
+//
+// 規則跟班級一致：內容不同就比 updatedAt，**後改的贏**；判不出來（缺戳或同時間）
+// 就兩邊都不動、只回報。ROW_IGNORE 裡的欄位不參與比較，否則同一份內容會因為戳不同
+// 而永遠互推。
+const ROW_IGNORE = ['updatedAt', 'updatedBy'];
+export function rowContent(row) {
+  const out = {};
+  Object.keys(row || {}).filter((k) => !ROW_IGNORE.includes(k)).sort()
+    .forEach((k) => { out[k] = row[k]; });
+  return JSON.stringify(out);
+}
+export function planListSync(localRows, remoteRows) {
+  const plan = { pull: [], push: [], undecided: [] };
+  const byEmail = (rows) => new Map((rows || [])
+    .filter((r) => r && r.email)
+    .map((r) => [String(r.email).toLowerCase(), r]));
+  const L = byEmail(localRows), R = byEmail(remoteRows);
+  for (const [email, l] of L) {
+    const r = R.get(email);
+    if (!r) continue;                                  // 對面沒有 → 走既有的「新增」那條路
+    if (rowContent(l) === rowContent(r)) continue;
+    const verdict = resolveByTimestamp(l.updatedAt, r.updatedAt);
+    if (verdict === 'push') plan.push.push(email);
+    else if (verdict === 'pull') plan.pull.push({ email, row: r });
+    else plan.undecided.push(email);
+  }
+  return plan;
+}
+
 // 三方比對（純函式，可單元測試）。回傳要做的動作，不碰任何 I/O。
 // 基準以**本機 id** 為鍵（本機 id 是這一端的穩定識別）。
 export function planSync(localById, remoteById, baselineById, stamps, tombstones) {
@@ -334,14 +369,45 @@ async function main() {
       console.log('  名單（一般版→快速版，新增）：' + pulledRows.join('、') + (apply ? '' : '（預演，未寫入）'));
     }
 
+    // 既有列的內容對齊（後改的贏）。缺這一段，兩邊的分機／姓名會各自漂移到天荒地老。
+    const listPushRows = {};
+    for (const k of ['deptAssistants', 'safetyOfficers']) {
+      const lp = planListSync(cfg[k] || [], remoteLists[k] || []);
+      if (lp.pull.length) {
+        const rows = cfg[k] || [];
+        lp.pull.forEach(function (hit) {
+          const i = rows.findIndex((x) => String((x && x.email) || '').toLowerCase() === hit.email);
+          if (i !== -1) rows[i] = Object.assign({}, hit.row);
+        });
+        cfg[k] = rows;
+        if (apply) {
+          const tmp4 = cfgPath + '.tmp4-' + process.pid;
+          fs.writeFileSync(tmp4, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+          fs.renameSync(tmp4, cfgPath);
+        }
+        console.log('  名單（一般版→快速版，那邊比較新）：' + k + ' ' + lp.pull.length + ' 筆：' +
+          lp.pull.map((x) => x.email).slice(0, 6).join('、') + (apply ? '' : '（預演，未寫入）'));
+      }
+      if (lp.push.length) {
+        const byEmail = new Map((cfg[k] || []).map((x) => [String((x && x.email) || '').toLowerCase(), x]));
+        listPushRows[k] = lp.push.map((e) => byEmail.get(e)).filter(Boolean);
+        console.log('  名單（快速版→一般版，這邊比較新）：' + k + ' ' + lp.push.length + ' 筆：' +
+          lp.push.slice(0, 6).join('、'));
+      }
+      if (lp.undecided.length) {
+        console.log('  ⚠️ 名單內容兩邊不同、判不出新舊（都不動）：' + k + ' ' +
+          lp.undecided.length + ' 筆：' + lp.undecided.slice(0, 8).join('、'));
+      }
+    }
+
     // 本機有、遠端沒有的推上去（整份送，GAS 端逐筆走既有的 upsert action）
-    const pushLists = {};
+    const pushLists = Object.assign({}, listPushRows);
     for (const k of ['deptAssistants', 'safetyOfficers']) {
       const localRows = (cfg[k] || []).filter((x) => x && !x.deleted);
       const remoteRows = (remoteLists[k] || []).filter((x) => x && !x.deleted);
       const remoteByEmail = new Set(remoteRows.map((x) => String(x.email || '').toLowerCase()));
       const missing = localRows.filter((x) => !remoteByEmail.has(String(x.email || '').toLowerCase()));
-      if (missing.length) pushLists[k] = missing;
+      if (missing.length) pushLists[k] = (pushLists[k] || []).concat(missing);
     }
     if (Object.keys(pushLists).length) {
       const n = Object.keys(pushLists).map((k) => k + ' ' + pushLists[k].length).join('、');

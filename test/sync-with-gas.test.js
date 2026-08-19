@@ -6,7 +6,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { planSync, projectClass } = require('node:module')
+const { planSync, projectClass, planListSync } = require('node:module')
   .createRequire(__filename)('../server/scripts/sync-with-gas.mjs');
 
 const C = (name, ext) => ({ name: name, displayName: name, deptId: 'D', systemId: null,
@@ -197,4 +197,56 @@ test('沒有墓碑時照舊：那邊有、這邊沒有 → 新增到這邊', () 
   const plan = planSync({}, { X: { name: 'A', tutors: [] } }, {}, undefined, new Set());
   assert.deepEqual(plan.createLocal, ['X']);
   assert.deepEqual(plan.deletedHere, []);
+});
+
+// ── 名單既有列的對齊（2026-08-19 事故的直接對策）────────────────────────────
+// 事故經過：舊版把本機整份推上一般版，蓋掉承辦人剛改好的 25 個系辦助理分機；
+// 因為初始密碼＝分機，全校助理隔天登入全錯，客服電話進來才發現。
+// 修成「只補對面缺的整筆」之後不再蓋人，但既有列從此永遠不會互相追上——
+// 於是兩邊各自漂移了好幾天，而使用者打開的快速版顯示的是舊分機。
+
+test('名單：這邊比較新 → 推上去', () => {
+  const p = planListSync(
+    [{ email: 'a@x.com', ext: '7040', updatedAt: '2026-08-19T04:05:00Z' }],
+    [{ email: 'a@x.com', ext: '7026', updatedAt: '2026-08-18T08:41:00Z' }],
+  );
+  assert.deepEqual(p.push, ['a@x.com']);
+  assert.deepEqual(p.pull, []);
+});
+
+test('名單：那邊比較新 → 拉下來，並帶回整列內容', () => {
+  const p = planListSync(
+    [{ email: 'a@x.com', ext: '7802', updatedAt: '2026-08-09T03:17:00Z' }],
+    [{ email: 'a@x.com', ext: '7819', updatedAt: '2026-08-18T09:03:00Z' }],
+  );
+  assert.deepEqual(p.push, []);
+  assert.equal(p.pull.length, 1);
+  assert.equal(p.pull[0].row.ext, '7819');
+});
+
+test('🔒 名單：判不出新舊就兩邊都不動（缺戳的舊資料不准猜）', () => {
+  const p = planListSync([{ email: 'a@x.com', ext: '1' }], [{ email: 'a@x.com', ext: '2' }]);
+  assert.deepEqual(p.undecided, ['a@x.com']);
+  assert.deepEqual(p.push.concat(p.pull), []);
+});
+
+test('🔒 名單：內容相同、只有時間戳不同 → 什麼都不做（否則兩邊永遠互推）', () => {
+  const p = planListSync(
+    [{ email: 'a@x.com', ext: '7040', name: '甲', updatedAt: '2026-08-19T10:00:00Z' }],
+    [{ email: 'a@x.com', ext: '7040', name: '甲', updatedAt: '2026-08-01T00:00:00Z' }],
+  );
+  assert.deepEqual(p.push.concat(p.pull, p.undecided), []);
+});
+
+test('名單：對面沒有這個人 → 不歸這裡管（走既有的新增那條路）', () => {
+  const p = planListSync([{ email: 'a@x.com', ext: '1', updatedAt: '2026-08-19T00:00:00Z' }], []);
+  assert.deepEqual(p.push.concat(p.pull, p.undecided), []);
+});
+
+test('名單：email 大小寫不同視為同一人', () => {
+  const p = planListSync(
+    [{ email: 'A@x.com', ext: '1', updatedAt: '2026-08-19T00:00:00Z' }],
+    [{ email: 'a@x.com', ext: '2', updatedAt: '2026-08-18T00:00:00Z' }],
+  );
+  assert.deepEqual(p.push, ['a@x.com']);
 });
