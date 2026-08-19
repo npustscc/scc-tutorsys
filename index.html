@@ -31,11 +31,6 @@
   }
   .login-card h1{font-size:1.4rem; margin:0 0 6px;}
   .login-sub{color:var(--color-text-light); font-size:.88rem; margin:0 0 28px;}
-  /* 登入前的用途說明。行高放寬、左邊一條槓，讓它看起來是「說明」而不是錯誤訊息。 */
-  .login-purpose{color:var(--color-text-light); font-size:.82rem; line-height:1.7; text-align:left;
-    margin:0 0 20px; padding:10px 12px; border-left:3px solid var(--color-primary);
-    background:var(--color-bg); border-radius:0 6px 6px 0;}
-  .login-purpose strong{color:var(--color-danger);}
   .login-fallback{font-size:.82rem; color:var(--color-text-light); margin-top:16px;}
   .login-error{font-size:.85rem; color:var(--color-danger); margin-top:14px; background:var(--color-danger-bg); padding:10px 12px; border-radius:8px;}
   #g-signin-btn{display:flex; justify-content:center;}
@@ -252,9 +247,9 @@
   <div class="login-card">
     <h1>導師資訊系統</h1>
     <p class="login-sub">國立屏東科技大學學生諮商中心</p>
-    <!-- 登入前就講清楚這個平台是做什麼的、以及手機那一欄的個資分級（使用者 2026-08-18 指定文案）。
-         放在登入卡片裡而不是登入後：助理拿到網址時第一次看到的就是它。 -->
-    <p class="login-purpose">維護您負責系所的班級與導師名單。可以新增／刪除班級、增減導師、填寫校內分機與私人手機。<strong>導師的私人手機屬於高度個資</strong>：只有您與學諮中心看得到，不會出現在其他人的畫面。</p>
+    <!-- 登入頁**刻意不放**用途說明（使用者 2026-08-19 指定整段刪除）。
+         個資告知不會因此消失：登入後會跳一次告知視窗、導覽列旁有「用途說明」隨時可開、
+         導師資料頁上方也有同一段文案。這裡只是不要在登入畫面塞一大段字。 -->
     <!-- 帳密登入（主要入口）。Google 登入預設隱藏在下方連結後面——這個平台目前的使用者
          是各系系辦助理，而他們的校內信箱不是 Google 帳號；Google 那條路只剩中心人員在用，
          擺在最前面只會讓多數人以為自己該按它。是「隱藏」不是移除，隨時可以恢復。 -->
