@@ -161,6 +161,7 @@ function doPost(e) {
       case 'syncGetConfigLists':        result = syncGetConfigListsAction_(params, ctx, userEmail); break;
       case 'syncPutConfigLists':        result = syncPutConfigListsAction_(params, ctx, userEmail); break;
       case 'syncGetAudit':              result = syncGetAuditAction_(params, ctx, userEmail); break;
+      case 'migrateCohortIds':          result = migrateCohortIdsAction_(params, ctx, userEmail); break;
       case 'adminAuditList':            result = adminAuditListAction_(params, ctx, userEmail); break;
       case 'adminLocalAccounts':        result = adminLocalAccountsAction_(params, ctx, userEmail); break;
       case 'deptRosterGet':             result = deptRosterGetAction_(params, ctx, userEmail); break;
@@ -2620,6 +2621,97 @@ function resolveDuration_(cls, system, parsed) {
     return DURATION_BY_PREFIX_[parsed.prefix];
   }
   return null;
+}
+
+// ── 一次性遷移：班級 id 改用入學學年度（2026-08-19）────────────────────────────
+// 為什麼要做成 GAS 上的 action、而不是像自架端那樣直接改檔案：一般版的資料在 Drive 上，
+// 只有這支程式碼碰得到它（同步帳號沒有 Drive 憑證，clasp 的 token 也只能碰自己建的檔案）。
+// 呼叫端是自架端的遷移腳本（同步服務帳號身分），兩邊才能在同一個窗口內一起改。
+//
+// **預設是預演**：params.apply !== true 時只回報計畫，一個字都不寫。
+// 寫入時整份 classes.json 一次換掉（在 withLock_ 內），並寫稽核。
+function migrateCohortIdsAction_(params, ctx, userEmail) {
+  requireSyncService_(loadRolesForCtx_(ctx, userEmail));
+  return migrateCohortIdsCore_(params, ctx, userEmail);
+}
+
+// 核心（不含權限判斷）。自架端的遷移腳本直接呼叫這一支——它在機器上以服務身分執行，
+// 不經過 doPost，所以不該被「必須是同步服務帳號」那道守門擋住。
+function migrateCohortIdsCore_(params, ctx, userEmail) {
+  const year = Number(params.year) || academicYearOf_();
+  const apply = params.apply === true;
+
+  const run = function () {
+    const classes = readJsonSafe_('classes.json', ctx, []);
+    const plan = planCohortMigration_(classes, year);
+    if (!apply) return { dryRun: true, year: year, report: plan.report };
+    if (plan.report.collisions.length) {
+      // 撞名代表現在就有重複的班——寫下去會把兩筆併成一筆而且沒人看得出來。
+      throw new Error('新 id 撞名 ' + plan.report.collisions.length + ' 組，遷移中止（請先處理重複的班）');
+    }
+    writeJsonPath_('classes.json', plan.classes, ctx);
+    appendAuditLog_(ctx, {
+      action: 'migrateCohortIds', by: userEmail, at: new Date().toISOString(),
+      targetId: plan.report.migrated + ' classes → cohort ids（學年度 ' + year + '）',
+    });
+    return { dryRun: false, year: year, report: plan.report };
+  };
+  return apply ? withLock_(run) : run();
+}
+
+// 遷移的純函式（可測、不碰 I/O）。回傳新的 classes 陣列與報告。
+// 規則（使用者 2026-08-19 拍板）：
+//   年級制 → id = <deptId>_<prefix><entryYear><section>，並存下 entryYear/prefix/section
+//            與 displayTemplate（把顯示名裡的年級字換成 {G}）
+//   家族班／海青班／共同指導等非年級制 → **一個欄位都不動**
+//   獸醫系四技 → 順手補 graduationGrade=5（不補的話會被四技預設 4 年判成已畢業）
+function planCohortMigration_(classes, year) {
+  const out = [];
+  const report = { migrated: 0, skipped: 0, alreadyMigrated: 0, collisions: [], noTemplate: [], vetFixed: 0, idChanges: [] };
+  const newIds = {};
+  (classes || []).forEach(function (c) {
+    if (!c) { out.push(c); return; }
+    // **已經遷移過的一律跳過**。遷移是用「現在的 name 裡的年級」反推入學學年度，而遷移之後
+    // name 就變成算出來的、存起來那份會過期——明年再跑一次就會把 114 屆算成 115 屆，
+    // 而且畫面上看不出來。有 entryYear 就代表這筆已經是 cohort 模型，不要再碰。
+    if (typeof c.entryYear === 'number' && c.entryYear) { out.push(c); report.alreadyMigrated++; return; }
+    const p = (c.deleted === true) ? null : parseClassGrade_(c.name);
+    if (!p) { out.push(c); report.skipped++; return; }
+
+    const entryYear = year - p.grade + 1;
+    const newId = c.deptId + '_' + p.prefix + entryYear + (p.section || '');
+    (newIds[newId] = newIds[newId] || []).push(c.id);
+
+    // 顯示名樣板：把年級字換成 {G}，並**驗證換回去等於原值**——換不回去就不套樣板
+    // （顯示名有人工調過的簡稱覆寫，硬套會顯示出錯的名字）。
+    const disp = String(c.displayName || '');
+    const ch = GRADE_CHARS_[p.grade - 1];
+    let tpl = '';
+    const at = disp.lastIndexOf(ch);
+    if (at !== -1) {
+      const candidate = disp.slice(0, at) + '{G}' + disp.slice(at + ch.length);
+      if (candidate.split('{G}').join(ch) === disp) tpl = candidate;
+    }
+    if (!tpl && disp) report.noTemplate.push(c.id + '（' + disp + '）');
+
+    const next = Object.assign({}, c, {
+      id: newId, entryYear: entryYear, prefix: p.prefix, section: p.section || '',
+      previousId: c.id,          // 留著查得到「這筆以前叫什麼」
+    });
+    if (tpl) next.displayTemplate = tpl;
+    // 獸醫系四技五年制：沒有這個覆寫，第五年會被四技的預設 4 年判成已畢業。
+    if (c.deptId === '獸醫系' && p.prefix === '四技' && typeof next.graduationGrade !== 'number') {
+      next.graduationGrade = 5;
+      report.vetFixed++;
+    }
+    out.push(next);
+    report.migrated++;
+    if (newId !== c.id) report.idChanges.push(c.id + ' → ' + newId);
+  });
+  Object.keys(newIds).forEach(function (k) {
+    if (newIds[k].length > 1) report.collisions.push({ newId: k, from: newIds[k] });
+  });
+  return { classes: out, report: report };
 }
 
 // ── 入學學年度模型（cohort，2026-08-19 使用者決策）─────────────────────────────
